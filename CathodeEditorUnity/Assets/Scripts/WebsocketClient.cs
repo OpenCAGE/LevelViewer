@@ -35,6 +35,10 @@ public class WebsocketClient : MonoBehaviour
 
     void Start()
     {
+        Destroy(this);
+        return;
+
+
         loader = GetComponent<AlienLevelLoader>();
         StartCoroutine(ReconnectLoop());
     }

@@ -53,20 +53,10 @@ public class AlienLevelLoader : MonoBehaviour
         public Cubemap Cubemap = null;
     }
 
-    private WebsocketClient _client;
-
-    IEnumerator Start()
+    void Start()
     {
-        _client = GetComponent<WebsocketClient>();
-
-        yield return new WaitForEndOfFrame();
-
-        try
-        {
-            SceneView.FocusWindowIfItsOpen(typeof(SceneView));
-            EditorWindow.GetWindow(typeof(EditorWindow).Assembly.GetType("UnityEditor.GameView")).Close();
-        }
-        catch { }
+        LoadLevel("ENG_ALIEN_NEST");
+        LoadComposite(_levelContent.CommandsPAK.EntryPoints[0].shortGUID);
     }
 
     private void ResetLevel()
@@ -84,7 +74,7 @@ public class AlienLevelLoader : MonoBehaviour
         _levelContent = null;
 
         if (_globalTextures == null)
-            _globalTextures = new Textures(_client.PathToAI + "/DATA/ENV/GLOBAL/WORLD/GLOBAL_TEXTURES.ALL.PAK");
+            _globalTextures = new Textures("E:\\SteamLibrary\\steamapps\\common\\Alien Isolation\\" + "/DATA/ENV/GLOBAL/WORLD/GLOBAL_TEXTURES.ALL.PAK");
     }
 
     public void LoadLevel(string level)
@@ -94,7 +84,7 @@ public class AlienLevelLoader : MonoBehaviour
         ResetLevel();
 
         _levelName = level;
-        _levelContent = new LevelContent(_client.PathToAI, level);
+        _levelContent = new LevelContent("E:\\SteamLibrary\\steamapps\\common\\Alien Isolation\\", level);
 
         //Load cubemaps to reflection probes
         List<Textures.TEX4> cubemaps = _levelContent.LevelTextures.Entries.Where(o => o.Type == Textures.AlienTextureType.ENVIRONMENT_MAP).ToList();
@@ -220,6 +210,11 @@ public class AlienLevelLoader : MonoBehaviour
                 GameObject nodeModel = new GameObject("[FUNCTION ENTITY] [ModelReference] " + function.shortGUID.ToByteString());
                 nodeModel.transform.parent = compositeGO.transform;
                 nodeModel.transform.SetLocalPositionAndRotation(position, Quaternion.Euler(rotation));
+
+                FunctionEntityBehaviour beh = nodeModel.AddComponent<FunctionEntityBehaviour>();
+                beh.Entity = function;
+                beh.Composite = composite;
+                beh.Commands = _levelContent.CommandsPAK;
 
                 Parameter resourceParam = function.GetParameter("resource");
                 if (resourceParam != null && resourceParam.content != null)

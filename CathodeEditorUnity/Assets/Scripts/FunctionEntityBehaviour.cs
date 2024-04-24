@@ -7,7 +7,6 @@ using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using UnityEngine;
-using static UnityEditor.Timeline.TimelinePlaybackControls;
 
 public class FunctionEntityBehaviour : MonoBehaviour
 {
@@ -18,62 +17,57 @@ public class FunctionEntityBehaviour : MonoBehaviour
     private Composite ZoneComposite;
     private FunctionEntity ZoneEntity;
 
-    private void Start()
-    {
-        TryFindZoneForEntity(Entity, Composite, out ZoneComposite, out ZoneEntity);
-    }
+    [SerializeField] private bool FindZone;
 
-    private void OnDrawGizmosSelected()
+    private void Update()
     {
+        if (!FindZone)
+            return;
+
         if (Entity == null || Composite == null || Commands == null)
+            return;
+
+        if (ZoneComposite == null || ZoneEntity == null)
+        {
+            Debug.Log("Trying to find zone info...");
+            foreach (Composite comp in Commands.Entries)
+            {
+                ZoneComposite = comp;
+                ZoneEntity = FindZoneEnt(comp);
+                if (ZoneEntity != null) break;
+            }
+            FindZone = false;
+        }
+
+        if (ZoneComposite == null || ZoneEntity == null)
             return;
 
         Debug.Log("Zone: " + ZoneEntity.shortGUID.ToByteString() + "\nComposite: " + ZoneComposite.name);
     }
 
-    public void TryFindZoneForEntity(Entity entity, Composite startComposite, out Composite composite, out FunctionEntity zone)
+    private FunctionEntity FindZoneEnt(Composite comp)
     {
-        Func<Composite, FunctionEntity> findZone = comp => {
-            if (comp == null) return null;
+        ShortGuid compositesGUID = ShortGuidUtils.Generate("composites");
 
-            FunctionEntity toReturn = null;
-            ShortGuid compositesGUID = ShortGuidUtils.Generate("composites");
-
-            List<FunctionEntity> triggerSequences = comp.functions.FindAll(o => o.function == CommandsUtils.GetFunctionTypeGUID(FunctionType.TriggerSequence));
-            foreach(FunctionEntity trigEnt in triggerSequences)
+        List<FunctionEntity> triggerSequences = comp.functions.FindAll(o => o.function == CommandsUtils.GetFunctionTypeGUID(FunctionType.TriggerSequence));
+        foreach (FunctionEntity trigEnt in triggerSequences)
+        {
+            TriggerSequence trig = (TriggerSequence)trigEnt;
+            foreach (TriggerSequence.Entity trigger in trig.entities)
             {
-                TriggerSequence trig = (TriggerSequence)trigEnt;
-                foreach(TriggerSequence.Entity trigger in trig.entities)
+                if (CommandsUtils.ResolveHierarchy(Commands, comp, trigger.connectedEntity.path, out Composite compRef, out string str) != Entity)
+                    continue;
+
+                Debug.Log("Found TriggerSequence for Entity");
+                foreach (FunctionEntity z in comp.functions.FindAll(o => o.function == CommandsUtils.GetFunctionTypeGUID(FunctionType.Zone)))
                 {
-                    if (CommandsUtils.ResolveHierarchy(Commands, comp, trigger.connectedEntity.path, out Composite compRef, out string str) == entity)
-                    {
-                        List<FunctionEntity> zones = comp.functions.FindAll(o => o.function == CommandsUtils.GetFunctionTypeGUID(FunctionType.Zone));
-                        foreach(FunctionEntity z in zones)
-                        {
-                            foreach(EntityConnector link in z.childLinks)
-                            {
-                                if (link.parentParamID == compositesGUID && link.childID == trig.shortGUID)
-                                {
-                                    toReturn = z;
-                                }
-                            }
-                        }
-                    }
+                    List<EntityConnector> conn = z.childLinks.FindAll(o => o.parentParamID == compositesGUID && o.childID == trig.shortGUID);
+                    if (conn.Count == 0) continue;
+                    return z;
                 }
             }
-
-            return toReturn;
-        };
-
-        composite = startComposite;
-        zone = findZone(composite);
-        if (zone != null) return;
-
-        foreach (Composite comp in Commands.Entries)
-        {
-            composite = comp;
-            zone = findZone(composite);
-            if (zone != null) return;
         }
+
+        return null;
     }
 }

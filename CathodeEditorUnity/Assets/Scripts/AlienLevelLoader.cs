@@ -16,6 +16,12 @@ using Newtonsoft.Json;
 using System.Reflection;
 using UnityEditor;
 using System.Collections;
+using CATHODE.EXPERIMENTAL;
+using System.Text.RegularExpressions;
+using UnityEditor.PackageManager.UI;
+using static CATHODE.Textures.TEX4;
+using System.Xml;
+using static CATHODE.Materials.Material;
 
 public class AlienLevelLoader : MonoBehaviour
 {
@@ -41,6 +47,7 @@ public class AlienLevelLoader : MonoBehaviour
 
     private Dictionary<int, TexOrCube> _texturesGlobal = new Dictionary<int, TexOrCube>();
     private Dictionary<int, TexOrCube> _texturesLevel = new Dictionary<int, TexOrCube>();
+    private Dictionary<string, TexOrCube> _texturesGobo = new Dictionary<string, TexOrCube>();
     private Dictionary<int, Material> _materials = new Dictionary<int, Material>();
     private Dictionary<Material, bool> _materialSupport = new Dictionary<Material, bool>();
     private Dictionary<int, GameObjectHolder> _modelGOs = new Dictionary<int, GameObjectHolder>();
@@ -63,7 +70,7 @@ public class AlienLevelLoader : MonoBehaviour
     }
 
     private void Awake()
-        {
+    {
         Debug.Log("Awaking AlienLevelLoader");
         _client = GetComponent<WebsocketClient>();
     }
@@ -93,12 +100,13 @@ public class AlienLevelLoader : MonoBehaviour
         ResetLevel();
 
         _levelName = level;
+
         _levelContent = new LevelContent(_client.PathToAI, level);
 
         //Load cubemaps to reflection probes
         List<Textures.TEX4> cubemaps = _levelContent.LevelTextures.Entries.Where(o => o.Type == Textures.AlienTextureType.ENVIRONMENT_MAP).ToList();
         GameObject probeHolder = new GameObject("Reflection Probes");
-        for (int i = 0; i <  cubemaps.Count; i++)
+        for (int i = 0; i < cubemaps.Count; i++)
         {
             Cubemap cubemap = GetCubemap(_levelContent.LevelTextures.GetWriteIndex(cubemaps[i]), false);
             ReflectionProbe probe = new GameObject(cubemaps[i].Name).AddComponent<ReflectionProbe>();
@@ -174,6 +182,7 @@ public class AlienLevelLoader : MonoBehaviour
         _loadedComposite = composite;
         ParseComposite(composite, _loadedCompositeGO, Vector3.zero, Quaternion.identity, new List<AliasEntity>());
     }
+
     void ParseComposite(Composite composite, GameObject parentGO, Vector3 parentPos, Quaternion parentRot, List<AliasEntity> aliases)
     {
         if (composite == null) return;
@@ -216,46 +225,153 @@ public class AlienLevelLoader : MonoBehaviour
             }
 
             //Parse model data
-            else if (CommandsUtils.GetFunctionType(function.function) == FunctionType.ModelReference)
+            else
             {
-                //Work out our position, accounting for overrides
-                Vector3 position, rotation;
-                AliasEntity ovrride = trimmedAliases.FirstOrDefault(o => o.alias.path.Count == 1 && o.alias.path[0] == function.shortGUID);
-                if (!GetEntityTransform(ovrride, out position, out rotation))
-                    GetEntityTransform(function, out position, out rotation);
+                FunctionType currentFunctionType = CommandsUtils.GetFunctionType(function.function);
 
-                GameObject nodeModel = new GameObject("[FUNCTION ENTITY] [ModelReference] " + function.shortGUID.ToByteString());
-                nodeModel.transform.parent = compositeGO.transform;
-                nodeModel.transform.SetLocalPositionAndRotation(position, Quaternion.Euler(rotation));
-
-                Parameter resourceParam = function.GetParameter("resource");
-                if (resourceParam != null && resourceParam.content != null)
+                if (currentFunctionType == FunctionType.ModelReference || currentFunctionType == FunctionType.LightReference)
                 {
-                    switch (resourceParam.content.dataType)
+                    //Work out our position, accounting for overrides
+                    Vector3 position, rotation;
+                    AliasEntity ovrride = trimmedAliases.FirstOrDefault(o => o.alias.path.Count == 1 && o.alias.path[0] == function.shortGUID);
+                    if (!GetEntityTransform(ovrride, out position, out rotation))
+                        GetEntityTransform(function, out position, out rotation);
+
+                    GameObject nodeModel = new GameObject("[FUNCTION ENTITY] [" + currentFunctionType + "] " + function.shortGUID.ToByteString());
+                    nodeModel.transform.parent = compositeGO.transform;
+                    nodeModel.transform.SetLocalPositionAndRotation(position, Quaternion.Euler(rotation));
+
+                    if (currentFunctionType == FunctionType.ModelReference)
                     {
-                        case DataType.RESOURCE:
-                            cResource resource = (cResource)resourceParam.content;
-                            foreach (ResourceReference resourceRef in resource.value)
-                            {
-                                for (int i = 0; i < resourceRef.count; i++)
-                                {
-                                    RenderableElements.Element renderable = _levelContent.RenderableREDS.Entries[resourceRef.index + i];
-                                    switch (resourceRef.entryType)
-                                    {
-                                        case ResourceType.RENDERABLE_INSTANCE:
-                                            SpawnModel(renderable.ModelIndex, renderable.MaterialIndex, nodeModel);
-                                            break;
-                                        case ResourceType.COLLISION_MAPPING:
-                                            break;
-                                    }
-                                }
-                            }
-                            break;
+                        ProcessModelReference(function, nodeModel);
+                    } else if (currentFunctionType == FunctionType.LightReference)
+                    {
+                        ProcessLightReference(function, nodeModel);
                     }
                 }
             }
         }
     }
+
+    void ProcessModelReference(FunctionEntity function, GameObject nodeModel)
+    {
+        Parameter resourceParam = function.GetParameter("resource");
+        if (resourceParam != null && resourceParam.content != null)
+        {
+            switch (resourceParam.content.dataType)
+            {
+                case DataType.RESOURCE:
+                    cResource resource = (cResource)resourceParam.content;
+                    foreach (ResourceReference resourceRef in resource.value)
+                    {
+                        for (int i = 0; i < resourceRef.count; i++)
+                        {
+                            RenderableElements.Element renderable = _levelContent.RenderableREDS.Entries[resourceRef.index + i];
+                            switch (resourceRef.entryType)
+                            {
+                                case ResourceType.RENDERABLE_INSTANCE:
+                                    SpawnModel(renderable.ModelIndex, renderable.MaterialIndex, nodeModel);
+                                    break;
+                                case ResourceType.COLLISION_MAPPING:
+                                    break;
+                            }
+                        }
+                    }
+                    break;
+            }
+        }
+    }
+    void ProcessLightReference(FunctionEntity function, GameObject nodeModel)
+    {
+
+        Parameter typeParam = function.GetParameter("type");
+        Parameter colourParam = function.GetParameter("colour");
+        Parameter intensityMultParam = function.GetParameter("intensity_multiplier");
+        Parameter outerConeAngle = function.GetParameter("outer_cone_angle");
+        Parameter endAttenuation = function.GetParameter("end_attenuation");
+        Parameter goboTextureParam = function.GetParameter("gobo_texture");
+        Parameter stripLengthParam = function.GetParameter("strip_length");
+        Parameter aspectRatioParam = function.GetParameter("aspect_ratio");
+        
+        // Only process known light types
+        if (typeParam != null && typeParam.content != null)
+        {
+
+            GameObject newLightSpawn = new GameObject();
+            if (nodeModel != null) newLightSpawn.transform.parent = nodeModel.transform;
+
+            newLightSpawn.transform.localPosition = Vector3.zero;
+            newLightSpawn.transform.localRotation = Quaternion.identity;
+
+            Light lightComp = newLightSpawn.AddComponent<Light>();
+
+            switch (typeParam.content.dataType)
+            {
+                case DataType.ENUM:
+
+                    cEnum lightType = (cEnum)typeParam.content;
+
+                    switch (lightType.enumIndex)
+                    {
+                        // Omni
+                        case 0:
+                            newLightSpawn.name = "[LIGHT][OMNI]";
+                            lightComp.type = LightType.Point;
+                            break;
+                        // Spot
+                        case 1:
+                            newLightSpawn.name = "[LIGHT][SPOT]";
+                            lightComp.type = LightType.Spot;
+                            break;
+                        // Strip
+                        case 2:
+                            newLightSpawn.name = "[LIGHT][STRIP]";
+                            lightComp.type = LightType.Area;
+                            break;
+                    }
+
+                    break;
+            }
+
+            if (colourParam?.content != null)
+            {
+                cVector3 color = (cVector3)colourParam.content;
+                lightComp.color = new Color(color.value.x / 255, color.value.y / 255, color.value.z / 255);
+            }
+
+            if (endAttenuation?.content != null) lightComp.range = ((cFloat)endAttenuation.content).value;
+
+            // Only spotlight
+            if (outerConeAngle?.content != null) lightComp.spotAngle = ((cFloat)outerConeAngle.content).value;
+
+            if (goboTextureParam?.content != null) 
+            {
+                lightComp.cookie = GetGoboTexture(((cString)goboTextureParam.content).value); 
+
+                if (lightComp.cookie != null) newLightSpawn.name += "[GOBO:" + lightComp.cookie.name + "]";
+            }
+
+            if (intensityMultParam?.content != null) lightComp.intensity = ((cFloat)intensityMultParam.content).value;
+
+            if (stripLengthParam?.content != null)
+            {
+                float stripLength = ((cFloat)stripLengthParam.content).value;
+
+                if (aspectRatioParam?.content != null)
+                {
+                    float stipWidth = ((cFloat)aspectRatioParam.content).value * stripLength;
+                    lightComp.areaSize = new Vector2(stripLength, stipWidth);
+                }
+                else
+                {
+                    lightComp.areaSize = new Vector2(stripLength, 1);
+                }
+            }
+
+            newLightSpawn.name += " " + nodeModel.name;
+        }
+    }
+
     bool GetEntityTransform(Entity entity, out Vector3 position, out Vector3 rotation)
     {
         position = Vector3.zero;
@@ -306,7 +422,7 @@ public class AlienLevelLoader : MonoBehaviour
         }
 
         Material material = GetMaterial((mtlIndex == -1) ? holder.DefaultMaterial : mtlIndex);
-        if (!_populateObjectsWithUnsupportedMaterials && !_materialSupport[material]) 
+        if (!_populateObjectsWithUnsupportedMaterials && !_materialSupport[material])
             return null;
 
         //Hack: we spawn the resource in a child of the GameObject hidden in the hierarchy, so that it's selectable in editor still
@@ -340,29 +456,92 @@ public class AlienLevelLoader : MonoBehaviour
     {
         return GetTexOrCube(index, global)?.Cubemap;
     }
-    
+
+    private Texture2D GetGoboTexture(string texPath)
+    {
+        Texture2D returnTexture = null;
+
+        if (_texturesGobo.ContainsKey(texPath))
+        {
+            returnTexture = _texturesGobo[texPath]?.Texture;
+        }
+        else if (!string.IsNullOrEmpty(texPath))
+        {
+            var regex = new Regex(@".*\\(.*\.(dds|tga))");
+            var match = regex.Match(texPath);
+            string texName = "";
+
+            if (match.Success)
+                texName = "gobo\\" + match.Groups[1].Value.ToLower();
+
+            Textures.TEX4 matchingTexture = _levelContent.LevelTextures.Entries.FirstOrDefault(texture => texture.Name.Equals(texName));
+
+            // GOBOs seem to be in BGR24 (unsupported as is), forcing format to DXT1 allows them to be loaded
+            TexOrCube texOrCube = LoadTexOrCube(matchingTexture, TextureWrapMode.Clamp, UnityEngine.TextureFormat.DXT1.ToString());
+
+            if (texOrCube != null)
+            {
+                _texturesGobo.Add(texPath, texOrCube);
+                returnTexture = texOrCube?.Texture;
+            }
+        }
+
+        return returnTexture;
+    }
+
     private TexOrCube GetTexOrCube(int index, bool global)
     {
         if ((global && !_texturesGlobal.ContainsKey(index)) || (!global && !_texturesLevel.ContainsKey(index)))
         {
             Textures.TEX4 InTexture = (global ? _globalTextures : _levelContent.LevelTextures).GetAtWriteIndex(index);
-            if (InTexture == null) return null;
-            Textures.TEX4.Part TexPart = InTexture.tex_HighRes;
 
-            Vector2 textureDims;
-            int textureLength = 0;
-            int mipLevels = 0;
+            TexOrCube tex = LoadTexOrCube(InTexture);
 
-            textureDims = new Vector2(TexPart.Width, TexPart.Height);
+            if (global)
+                _texturesGlobal.Add(index, tex);
+            else
+                _texturesLevel.Add(index, tex);
+        }
+
+        if (global)
+            return _texturesGlobal[index];
+        else
+            return _texturesLevel[index];
+    }
+
+    private TexOrCube LoadTexOrCube(Textures.TEX4 InTexture) {
+        
+        return LoadTexOrCube(InTexture, TextureWrapMode.Repeat, null);
+    }
+    private TexOrCube LoadTexOrCube(Textures.TEX4 InTexture, TextureWrapMode wrapMode, string formatOverride)
+    {
+        if (InTexture == null) return null;
+        Textures.TEX4.Part TexPart = InTexture.tex_HighRes;
+
+        Vector2 textureDims;
+        int textureLength = 0;
+        int mipLevels = 0;
+
+        // Check for content validity - fallback on lowres if highrest doesn't exist
+        if (TexPart.Content == null || TexPart.Content.Length == 0)
+        {
+            TexPart = InTexture.tex_LowRes;
+
             if (TexPart.Content == null || TexPart.Content.Length == 0)
             {
-                //Debug.LogWarning("LENGTH ZERO - NOT LOADING");
+                Debug.LogWarning("Found a 0-length texture - skipping");
                 return null;
             }
-            textureLength = TexPart.Content.Length;
-            mipLevels = TexPart.MipLevels;
+        }
 
-            UnityEngine.TextureFormat format = UnityEngine.TextureFormat.BC7;
+        textureDims = new Vector2(TexPart.Width, TexPart.Height);
+        textureLength = TexPart.Content.Length;
+        mipLevels = TexPart.MipLevels;
+
+        UnityEngine.TextureFormat format = UnityEngine.TextureFormat.BC7;
+        
+        if (string.IsNullOrEmpty(formatOverride)) {
+        
             switch (InTexture.Format)
             {
                 case Textures.TextureFormat.DXGI_FORMAT_BC1_UNORM:
@@ -384,42 +563,39 @@ public class AlienLevelLoader : MonoBehaviour
                     format = UnityEngine.TextureFormat.BGRA32;
                     break;
             }
-
-            TexOrCube tex = new TexOrCube();
-            using (BinaryReader tempReader = new BinaryReader(new MemoryStream(TexPart.Content)))
-            {
-                switch (InTexture.Type)
-                {
-                    case Textures.AlienTextureType.ENVIRONMENT_MAP:
-                        tex.Cubemap = new Cubemap((int)textureDims.x, format, false);
-                        tex.Cubemap.name = InTexture.Name;
-                        tex.Cubemap.SetPixelData(tempReader.ReadBytes(textureLength / 6), 0, CubemapFace.PositiveX);
-                        tex.Cubemap.SetPixelData(tempReader.ReadBytes(textureLength / 6), 0, CubemapFace.NegativeX);
-                        tex.Cubemap.SetPixelData(tempReader.ReadBytes(textureLength / 6), 0, CubemapFace.PositiveY);
-                        tex.Cubemap.SetPixelData(tempReader.ReadBytes(textureLength / 6), 0, CubemapFace.NegativeY);
-                        tex.Cubemap.SetPixelData(tempReader.ReadBytes(textureLength / 6), 0, CubemapFace.PositiveZ);
-                        tex.Cubemap.SetPixelData(tempReader.ReadBytes(textureLength / 6), 0, CubemapFace.NegativeZ);
-                        tex.Cubemap.Apply(false, true);
-                        break;
-                    default:
-                        tex.Texture = new Texture2D((int)textureDims[0], (int)textureDims[1], format, mipLevels, true);
-                        tex.Texture.name = InTexture.Name;
-                        tex.Texture.LoadRawTextureData(tempReader.ReadBytes(textureLength));
-                        tex.Texture.Apply();
-                        break;
-                }
-            }
-
-            if (global)
-                _texturesGlobal.Add(index, tex);
-            else
-                _texturesLevel.Add(index, tex);
+        } 
+        else
+        {
+            format = (UnityEngine.TextureFormat)Enum.Parse(typeof(UnityEngine.TextureFormat), formatOverride);
         }
 
-        if (global)
-            return _texturesGlobal[index];
-        else
-            return _texturesLevel[index];
+        TexOrCube tex = new TexOrCube();
+        using (BinaryReader tempReader = new BinaryReader(new MemoryStream(TexPart.Content)))
+        {
+            switch (InTexture.Type)
+            {
+                case Textures.AlienTextureType.ENVIRONMENT_MAP:
+                    tex.Cubemap = new Cubemap((int)textureDims.x, format, false);
+                    tex.Cubemap.name = InTexture.Name;
+                    tex.Cubemap.SetPixelData(tempReader.ReadBytes(textureLength / 6), 0, CubemapFace.PositiveX);
+                    tex.Cubemap.SetPixelData(tempReader.ReadBytes(textureLength / 6), 0, CubemapFace.NegativeX);
+                    tex.Cubemap.SetPixelData(tempReader.ReadBytes(textureLength / 6), 0, CubemapFace.PositiveY);
+                    tex.Cubemap.SetPixelData(tempReader.ReadBytes(textureLength / 6), 0, CubemapFace.NegativeY);
+                    tex.Cubemap.SetPixelData(tempReader.ReadBytes(textureLength / 6), 0, CubemapFace.PositiveZ);
+                    tex.Cubemap.SetPixelData(tempReader.ReadBytes(textureLength / 6), 0, CubemapFace.NegativeZ);
+                    tex.Cubemap.Apply(false, true);
+                    break;
+                default:
+                    tex.Texture = new Texture2D((int)textureDims[0], (int)textureDims[1], format, mipLevels, true);
+                    tex.Texture.name = InTexture.Name;
+                    tex.Texture.LoadRawTextureData(tempReader.ReadBytes(textureLength));
+                    tex.Texture.wrapMode = wrapMode;
+                    tex.Texture.Apply();
+                    break;
+            }
+        }
+
+        return tex;
     }
 
     private GameObjectHolder GetModel(int EntryIndex)
@@ -526,6 +702,8 @@ public class AlienLevelLoader : MonoBehaviour
                 }
             }
 
+            float emissiveFactor = 1;
+            Vector4 emissiveColour = Vector4.zero;
 
             //Apply properties
             for (int i = 0; i < Shader.Header.CSTCounts.Length; i++)
@@ -572,7 +750,22 @@ public class AlienLevelLoader : MonoBehaviour
                         toReturn.SetFloat("_Glossiness", spec);
                         toReturn.SetFloat("_GlossMapScale", spec);
                     }
+                    if (CSTIndexValid(metadata.cstIndexes.Emission, ref Shader, i))
+                    {
+                        emissiveColour = LoadFromCST<Vector4>(cstReader, baseOffset + (Shader.CSTLinks[i][metadata.cstIndexes.Emission] * 4));
+                    }
+                    if (CSTIndexValid(metadata.cstIndexes.EmissiveFactor, ref Shader, i))
+                    {
+                        emissiveFactor = LoadFromCST<float>(cstReader, baseOffset + (Shader.CSTLinks[i][metadata.cstIndexes.EmissiveFactor] * 4));
+                    }
                 }
+            }
+
+            if (!emissiveColour.Equals(Vector4.zero))
+            {
+                toReturn.globalIlluminationFlags = MaterialGlobalIlluminationFlags.RealtimeEmissive;
+                toReturn.EnableKeyword("_EMISSION");
+                toReturn.SetColor("_EmissionColor", emissiveColour * emissiveFactor);
             }
 
             _materialSupport.Add(toReturn, true);
@@ -597,7 +790,7 @@ public class GameObjectHolder
 {
     public string Name;
     public Mesh MainMesh; //TODO: should this be contained in a globally referenced array?
-    public int DefaultMaterial; 
+    public int DefaultMaterial;
 }
 
 public class LevelContent
@@ -617,7 +810,7 @@ public class LevelContent
                 break;
         }
 
-        Parallel.For(0, 14, (i) =>
+        Parallel.For(0, 15, (i) =>
         {
             switch (i)
             {
@@ -646,21 +839,24 @@ public class LevelContent
                     EnvironmentAnimation = new EnvironmentAnimations(worldPath + "ENVIRONMENT_ANIMATION.DAT");
                     break;
                 case 8:
-                    ModelsCST = File.ReadAllBytes(renderablePath + "LEVEL_MODELS.CST");
+                    LevelLights = new Lights(worldPath + "LIGHTS.BIN");
                     break;
                 case 9:
-                    ModelsMTL = new Materials(renderablePath + "LEVEL_MODELS.MTL");
+                    ModelsCST = File.ReadAllBytes(renderablePath + "LEVEL_MODELS.CST");
                     break;
                 case 10:
-                    ModelsPAK = new Models(renderablePath + "LEVEL_MODELS.PAK");
+                    ModelsMTL = new Materials(renderablePath + "LEVEL_MODELS.MTL");
                     break;
                 case 11:
-                    ShadersPAK = new ShadersPAK(renderablePath + "LEVEL_SHADERS_DX11.PAK");
+                    ModelsPAK = new Models(renderablePath + "LEVEL_MODELS.PAK");
                     break;
                 case 12:
-                    ShadersIDXRemap = new IDXRemap(renderablePath + "LEVEL_SHADERS_DX11_IDX_REMAP.PAK");
+                    ShadersPAK = new ShadersPAK(renderablePath + "LEVEL_SHADERS_DX11.PAK");
                     break;
                 case 13:
+                    ShadersIDXRemap = new IDXRemap(renderablePath + "LEVEL_SHADERS_DX11_IDX_REMAP.PAK");
+                    break;
+                case 14:
                     LevelTextures = new Textures(renderablePath + "LEVEL_TEXTURES.ALL.PAK");
                     break;
             }
@@ -679,6 +875,7 @@ public class LevelContent
     public Materials ModelsMTL;
     public Models ModelsPAK;
     public Textures LevelTextures;
+    public Lights LevelLights;
     public ShadersPAK ShadersPAK;
     public alien_shader_bin_pak ShadersBIN;
     public IDXRemap ShadersIDXRemap;

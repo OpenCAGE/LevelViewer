@@ -57,16 +57,15 @@ public class AlienLevelLoader : MonoBehaviour
 
     IEnumerator Start()
     {
-        _client = GetComponent<WebsocketClient>();
+        Debug.Log("Starting AlienLevelLoader");
 
         yield return new WaitForEndOfFrame();
+    }
 
-        try
+    private void Awake()
         {
-            SceneView.FocusWindowIfItsOpen(typeof(SceneView));
-            EditorWindow.GetWindow(typeof(EditorWindow).Assembly.GetType("UnityEditor.GameView")).Close();
-        }
-        catch { }
+        Debug.Log("Awaking AlienLevelLoader");
+        _client = GetComponent<WebsocketClient>();
     }
 
     private void ResetLevel()
@@ -83,7 +82,7 @@ public class AlienLevelLoader : MonoBehaviour
 
         _levelContent = null;
 
-        if (_globalTextures == null)
+        if (_globalTextures == null && _client)
             _globalTextures = new Textures(_client.PathToAI + "/DATA/ENV/GLOBAL/WORLD/GLOBAL_TEXTURES.ALL.PAK");
     }
 
@@ -113,6 +112,14 @@ public class AlienLevelLoader : MonoBehaviour
         {
             LoadMVR();
         }
+
+        // Focus on SceneView, close GameView
+        try
+        {
+            SceneView.FocusWindowIfItsOpen(typeof(SceneView));
+            EditorWindow.GetWindow(typeof(EditorWindow).Assembly.GetType("UnityEditor.GameView")).Close();
+        }
+        catch { }
     }
     public void LoadComposite(ShortGuid guid)
     {

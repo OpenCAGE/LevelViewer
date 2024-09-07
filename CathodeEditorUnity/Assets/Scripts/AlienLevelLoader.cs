@@ -18,10 +18,12 @@ using UnityEditor;
 using System.Collections;
 using CATHODE.EXPERIMENTAL;
 using System.Text.RegularExpressions;
-using UnityEditor.PackageManager.UI;
-using static CATHODE.Textures.TEX4;
-using System.Xml;
-using static CATHODE.Materials.Material;
+using static CATHODE.Materials;
+using UnityEngine.Profiling.Memory.Experimental;
+using static UnityEditor.Rendering.BuiltIn.ShaderGraph.BuiltInBaseShaderGUI;
+using UnityGLTF;
+using UnityEngine.Experimental.Rendering;
+using UnityGLTF.Plugins;
 
 public class AlienLevelLoader : MonoBehaviour
 {
@@ -31,6 +33,9 @@ public class AlienLevelLoader : MonoBehaviour
 
     [Tooltip("Enable this to include objects in the scene that are of an unsupported material type (they will still be inactive by default).")]
     [SerializeField] private bool _populateObjectsWithUnsupportedMaterials = false;
+
+    [Tooltip("Enable this to use UnityGLTF Shaders by default if possible.")]
+    [SerializeField] private bool _useUnityGLTFMaterials = true;
 
     public Action OnLoaded;
 
@@ -48,8 +53,8 @@ public class AlienLevelLoader : MonoBehaviour
     private Dictionary<int, TexOrCube> _texturesGlobal = new Dictionary<int, TexOrCube>();
     private Dictionary<int, TexOrCube> _texturesLevel = new Dictionary<int, TexOrCube>();
     private Dictionary<string, TexOrCube> _texturesGobo = new Dictionary<string, TexOrCube>();
-    private Dictionary<int, Material> _materials = new Dictionary<int, Material>();
-    private Dictionary<Material, bool> _materialSupport = new Dictionary<Material, bool>();
+    private Dictionary<int, OpenCAGEShaderMaterial> _materials = new Dictionary<int, OpenCAGEShaderMaterial>();
+    private Dictionary<OpenCAGEShaderMaterial, bool> _materialSupport = new Dictionary<OpenCAGEShaderMaterial, bool>();
     private Dictionary<int, GameObjectHolder> _modelGOs = new Dictionary<int, GameObjectHolder>();
 
     private List<ReflectionProbe> _envMaps = new List<ReflectionProbe>();
@@ -86,7 +91,7 @@ public class AlienLevelLoader : MonoBehaviour
         _materialSupport.Clear();
         _modelGOs.Clear();
         _envMaps.Clear();
-
+        _texturesGobo.Clear();
         _levelContent = null;
 
         if (_globalTextures == null && _client)
@@ -135,6 +140,7 @@ public class AlienLevelLoader : MonoBehaviour
 
         if (_loadedCompositeGO != null)
             Destroy(_loadedCompositeGO);
+
         _loadedCompositeGO = new GameObject(_levelName);
         Selection.activeGameObject = _loadedCompositeGO;
 
@@ -393,24 +399,6 @@ public class AlienLevelLoader : MonoBehaviour
         return false;
     }
 
-    /* Force select the function entity if someone clicks on the resource */
-    private GameObject _prevSelection = null;
-    private void Update()
-    {
-        if (_prevSelection != Selection.activeGameObject)
-        {
-            if (Selection.activeGameObject != null)
-            {
-                string entityName = Selection.activeGameObject.name;
-                if (entityName.Length > ("[RESOURCE]").Length && entityName.Substring(0, ("[RESOURCE]").Length) == "[RESOURCE]")
-                {
-                    Selection.activeGameObject = Selection.activeGameObject.transform.parent.transform.parent.gameObject;
-                }
-            }
-            _prevSelection = Selection.activeGameObject;
-        }
-    }
-
     #region Asset Handlers
     private MeshRenderer SpawnModel(int binIndex, int mtlIndex, GameObject parent)
     {
@@ -421,27 +409,30 @@ public class AlienLevelLoader : MonoBehaviour
             return null;
         }
 
-        Material material = GetMaterial((mtlIndex == -1) ? holder.DefaultMaterial : mtlIndex);
+        OpenCAGEShaderMaterial material = GetMaterial((mtlIndex == -1) ? holder.DefaultMaterial : mtlIndex);
         if (!_populateObjectsWithUnsupportedMaterials && !_materialSupport[material])
             return null;
 
         //Hack: we spawn the resource in a child of the GameObject hidden in the hierarchy, so that it's selectable in editor still
         GameObject newModelSpawnParent = new GameObject();
+        
         if (parent != null) newModelSpawnParent.transform.parent = parent.transform;
+        
         newModelSpawnParent.transform.localPosition = Vector3.zero;
         newModelSpawnParent.transform.localRotation = Quaternion.identity;
         newModelSpawnParent.name = "[RESOURCE] " + holder.Name;
-        newModelSpawnParent.hideFlags = HideFlags.HideInHierarchy;
 
-        GameObject newModelSpawn = new GameObject();
-        newModelSpawn.transform.parent = newModelSpawnParent.transform;
-        newModelSpawn.transform.localPosition = Vector3.zero;
-        newModelSpawn.transform.localRotation = Quaternion.identity;
-        newModelSpawn.name = newModelSpawnParent.name;
-        newModelSpawn.AddComponent<MeshFilter>().sharedMesh = holder.MainMesh;
-        MeshRenderer renderer = newModelSpawn.AddComponent<MeshRenderer>();
-        renderer.sharedMaterial = material;
-        newModelSpawn.SetActive(_materialSupport[material]);
+        newModelSpawnParent.AddComponent<MeshFilter>().sharedMesh = holder.MainMesh;
+        MeshRenderer renderer = newModelSpawnParent.AddComponent<MeshRenderer>();
+
+        // Add shader component for export 
+        OpenCAGEShaderMaterialWrapper materialWrapper = newModelSpawnParent.AddComponent<OpenCAGEShaderMaterialWrapper>();
+        materialWrapper.openCAGEShaderMaterial = material;
+        materialWrapper.materialName = material.baseMaterial?.name;
+
+        renderer.sharedMaterial = material.baseMaterial;
+        
+        newModelSpawnParent.SetActive(_materialSupport[material]);
 
         //todo apply mvr colour scale here
 
@@ -617,16 +608,13 @@ public class AlienLevelLoader : MonoBehaviour
         return _modelGOs[EntryIndex];
     }
 
-    public Material GetMaterial(int MTLIndex)
+    public OpenCAGEShaderMaterial GetMaterial(int MTLIndex)
     {
         if (!_materials.ContainsKey(MTLIndex))
         {
             Materials.Material InMaterial = _levelContent.ModelsMTL.GetAtWriteIndex(MTLIndex);
             int RemappedIndex = _levelContent.ShadersIDXRemap.Datas[InMaterial.UberShaderIndex].Index;
-            ShadersPAK.ShaderEntry Shader = _levelContent.ShadersPAK.Shaders[RemappedIndex];
-
-            Material toReturn = new Material(UnityEngine.Shader.Find("Standard"));
-            toReturn.name = InMaterial.Name;
+            ShadersPAK.ShaderEntry currentShader = _levelContent.ShadersPAK.Shaders[RemappedIndex];
 
             ShaderMaterialMetadata metadata = _levelContent.ShadersPAK.GetMaterialMetadataFromShader(InMaterial, _levelContent.ShadersIDXRemap);
 
@@ -643,16 +631,17 @@ public class AlienLevelLoader : MonoBehaviour
                 case ShaderCategory.CA_DECAL:
                 case ShaderCategory.CA_VOLUME_LIGHT:
                 case ShaderCategory.CA_REFRACTION:
-                    toReturn.name += " (NOT RENDERED: " + metadata.shaderCategory.ToString() + ")";
-                    _materialSupport.Add(toReturn, false);
-                    return toReturn;
+
+                    OpenCAGEShaderMaterial blankMat = new OpenCAGEShaderMaterial(UnityEngine.Shader.Find("Standard"));
+                    blankMat.baseMaterial.name += " (NOT RENDERED: " + metadata.shaderCategory.ToString() + ")";
+                    _materialSupport.Add(blankMat, false);
+                    return blankMat;
             }
-            toReturn.name += " " + metadata.shaderCategory.ToString();
 
             List<Texture2D> availableTextures = new List<Texture2D>();
-            for (int SlotIndex = 0; SlotIndex < Shader.Header.TextureLinkCount; ++SlotIndex)
+            for (int SlotIndex = 0; SlotIndex < currentShader.Header.TextureLinkCount; ++SlotIndex)
             {
-                int PairIndex = Shader.TextureLinks[SlotIndex];
+                int PairIndex = currentShader.TextureLinks[SlotIndex];
                 // NOTE: PairIndex == 255 means no index.
                 if (PairIndex < InMaterial.TextureReferences.Length)
                 {
@@ -665,114 +654,467 @@ public class AlienLevelLoader : MonoBehaviour
                 }
             }
 
-            //Apply materials
-            for (int i = 0; i < metadata.textures.Count; i++)
+            OpenCAGEShaderMaterial toReturn;
+
+            if (_useUnityGLTFMaterials && Shader.Find("UnityGLTF/PBRGraph") != null) // && InMaterial.Name.Contains("GLASS_Dusty") || InMaterial.Name.Contains("DECAL_Scrapes") || InMaterial.Name.Contains("DECAL_GubbinsA")) 
             {
-                if (i >= availableTextures.Count) continue;
-                switch (metadata.textures[i].Type)
-                {
-                    case ShaderSlot.DIFFUSE_MAP:
-                        toReturn.SetTexture("_MainTex", availableTextures[i]);
-                        break;
-                    case ShaderSlot.DETAIL_MAP:
-                        toReturn.EnableKeyword("_DETAIL_MULX2");
-                        toReturn.SetTexture("_DetailMask", availableTextures[i]);
-                        break;
-                    case ShaderSlot.EMISSIVE:
-                        toReturn.EnableKeyword("_EMISSION");
-                        toReturn.SetTexture("_EmissionMap", availableTextures[i]);
-                        break;
-                    case ShaderSlot.PARALLAX_MAP:
-                        toReturn.EnableKeyword("_PARALLAXMAP");
-                        toReturn.SetTexture("_ParallaxMap", availableTextures[i]);
-                        break;
-                    case ShaderSlot.OCCLUSION:
-                        toReturn.SetTexture("_OcclusionMap", availableTextures[i]);
-                        break;
-                    case ShaderSlot.SPECULAR_MAP:
-                        toReturn.EnableKeyword("_METALLICGLOSSMAP");
-                        toReturn.SetTexture("_MetallicGlossMap", availableTextures[i]); //TODO _SPECGLOSSMAP?
-                        toReturn.SetFloat("_Glossiness", 0.0f);
-                        toReturn.SetFloat("_GlossMapScale", 0.0f);
-                        break;
-                    case ShaderSlot.NORMAL_MAP:
-                        toReturn.EnableKeyword("_NORMALMAP");
-                        toReturn.SetTexture("_BumpMap", availableTextures[i]);
-                        break;
-                }
+                toReturn = GetUnityGltfMaterial(metadata, availableTextures, InMaterial, currentShader);
             }
-
-            float emissiveFactor = 1;
-            Vector4 emissiveColour = Vector4.zero;
-
-            //Apply properties
-            for (int i = 0; i < Shader.Header.CSTCounts.Length; i++)
+            else
             {
-                using (BinaryReader cstReader = new BinaryReader(new MemoryStream(_levelContent.ModelsMTL.CSTData[i])))
-                {
-                    int baseOffset = (InMaterial.ConstantBuffers[i].Offset * 4);
-
-                    if (CSTIndexValid(metadata.cstIndexes.Diffuse0, ref Shader, i))
-                    {
-                        Vector4 colour = LoadFromCST<Vector4>(cstReader, baseOffset + (Shader.CSTLinks[i][metadata.cstIndexes.Diffuse0] * 4));
-                        toReturn.SetColor("_Color", colour);
-                        //if (colour.w != 1)
-                        //{
-                        //    toReturn.SetFloat("_Mode", 1.0f);
-                        //    toReturn.EnableKeyword("_ALPHATEST_ON");
-                        //}
-                    }
-                    if (CSTIndexValid(metadata.cstIndexes.DiffuseMap0UVMultiplier, ref Shader, i))
-                    {
-                        float offset = LoadFromCST<float>(cstReader, baseOffset + (Shader.CSTLinks[i][metadata.cstIndexes.DiffuseMap0UVMultiplier] * 4));
-                        toReturn.SetTextureScale("_MainTex", new Vector2(offset, offset));
-                    }
-                    if (CSTIndexValid(metadata.cstIndexes.NormalMap0UVMultiplier, ref Shader, i))
-                    {
-                        float offset = LoadFromCST<float>(cstReader, baseOffset + (Shader.CSTLinks[i][metadata.cstIndexes.NormalMap0UVMultiplier] * 4));
-                        toReturn.SetTextureScale("_BumpMap", new Vector2(offset, offset));
-                        toReturn.SetFloat("_BumpScale", offset);
-                    }
-                    if (CSTIndexValid(metadata.cstIndexes.OcclusionMapUVMultiplier, ref Shader, i))
-                    {
-                        float offset = LoadFromCST<float>(cstReader, baseOffset + (Shader.CSTLinks[i][metadata.cstIndexes.OcclusionMapUVMultiplier] * 4));
-                        toReturn.SetTextureScale("_OcclusionMap", new Vector2(offset, offset));
-                    }
-                    if (CSTIndexValid(metadata.cstIndexes.SpecularMap0UVMultiplier, ref Shader, i))
-                    {
-                        float offset = LoadFromCST<float>(cstReader, baseOffset + (Shader.CSTLinks[i][metadata.cstIndexes.SpecularMap0UVMultiplier] * 4));
-                        toReturn.SetTextureScale("_MetallicGlossMap", new Vector2(offset, offset));
-                        toReturn.SetFloat("_GlossMapScale", offset);
-                    }
-                    if (CSTIndexValid(metadata.cstIndexes.SpecularFactor0, ref Shader, i))
-                    {
-                        float spec = LoadFromCST<float>(cstReader, baseOffset + (Shader.CSTLinks[i][metadata.cstIndexes.SpecularFactor0] * 4));
-                        toReturn.SetFloat("_Glossiness", spec);
-                        toReturn.SetFloat("_GlossMapScale", spec);
-                    }
-                    if (CSTIndexValid(metadata.cstIndexes.Emission, ref Shader, i))
-                    {
-                        emissiveColour = LoadFromCST<Vector4>(cstReader, baseOffset + (Shader.CSTLinks[i][metadata.cstIndexes.Emission] * 4));
-                    }
-                    if (CSTIndexValid(metadata.cstIndexes.EmissiveFactor, ref Shader, i))
-                    {
-                        emissiveFactor = LoadFromCST<float>(cstReader, baseOffset + (Shader.CSTLinks[i][metadata.cstIndexes.EmissiveFactor] * 4));
-                    }
-                }
-            }
-
-            if (!emissiveColour.Equals(Vector4.zero))
-            {
-                toReturn.globalIlluminationFlags = MaterialGlobalIlluminationFlags.RealtimeEmissive;
-                toReturn.EnableKeyword("_EMISSION");
-                toReturn.SetColor("_EmissionColor", emissiveColour * emissiveFactor);
+                toReturn = GetStandardMaterial(metadata, availableTextures, InMaterial, currentShader);
             }
 
             _materialSupport.Add(toReturn, true);
             _materials.Add(MTLIndex, toReturn);
         }
         return _materials[MTLIndex];
+    } 
+
+    public OpenCAGEShaderMaterial GetStandardMaterial(ShaderMaterialMetadata metadata, List<Texture2D> availableTextures, Materials.Material InMaterial, ShadersPAK.ShaderEntry currentShader)
+    {
+
+        OpenCAGEShaderMaterial openCAGEShaderMaterial = new OpenCAGEShaderMaterial(UnityEngine.Shader.Find("Standard"));
+        UnityEngine.Material baseMaterial = openCAGEShaderMaterial.baseMaterial;
+        baseMaterial.name = InMaterial.Name;
+
+        //Apply materials
+        for (int i = 0; i < metadata.textures.Count; i++)
+        {
+            if (i >= availableTextures.Count) continue;
+            switch (metadata.textures[i].Type)
+            {
+                case ShaderSlot.DIFFUSE_MAP:
+                    baseMaterial.SetTexture("_MainTex", availableTextures[i]);
+                    break;
+                case ShaderSlot.DETAIL_MAP:
+                    baseMaterial.EnableKeyword("_DETAIL_MULX2");
+                    baseMaterial.SetTexture("_DetailMask", availableTextures[i]);
+                    break;
+                case ShaderSlot.EMISSIVE:
+                    baseMaterial.EnableKeyword("_EMISSION");
+                    baseMaterial.SetTexture("_EmissionMap", availableTextures[i]);
+                    break;
+                case ShaderSlot.PARALLAX_MAP:
+                    baseMaterial.EnableKeyword("_PARALLAXMAP");
+                    baseMaterial.SetTexture("_ParallaxMap", availableTextures[i]);
+                    break;
+                case ShaderSlot.OCCLUSION:
+                    baseMaterial.SetTexture("_OcclusionMap", availableTextures[i]);
+                    break;
+                case ShaderSlot.SPECULAR_MAP:
+                    baseMaterial.EnableKeyword("_METALLICGLOSSMAP");
+                    baseMaterial.SetTexture("_MetallicGlossMap", availableTextures[i]); //TODO _SPECGLOSSMAP?
+                    baseMaterial.SetFloat("_Glossiness", 0.0f);
+                    baseMaterial.SetFloat("_GlossMapScale", 0.0f);
+                    break;
+                case ShaderSlot.NORMAL_MAP:
+                    baseMaterial.EnableKeyword("_NORMALMAP");
+                    baseMaterial.SetTexture("_BumpMap", availableTextures[i]);
+                    break;
+            }
+        }
+
+        float emissiveFactor = 1;
+        Vector4 emissiveColour = Vector4.zero;
+
+        //Apply properties
+        for (int i = 0; i < currentShader.Header.CSTCounts.Length; i++)
+        {
+            using (BinaryReader cstReader = new BinaryReader(new MemoryStream(_levelContent.ModelsMTL.CSTData[i])))
+            {
+                int baseOffset = (InMaterial.ConstantBuffers[i].Offset * 4);
+
+                if (CSTIndexValid(metadata.cstIndexes.Diffuse0, ref currentShader, i))
+                {
+                    Vector4 colour = LoadFromCST<Vector4>(cstReader, baseOffset + (currentShader.CSTLinks[i][metadata.cstIndexes.Diffuse0] * 4));
+                    baseMaterial.SetColor("_Color", colour);
+                }
+                if (CSTIndexValid(metadata.cstIndexes.DiffuseMap0UVMultiplier, ref currentShader, i))
+                {
+                    float offset = LoadFromCST<float>(cstReader, baseOffset + (currentShader.CSTLinks[i][metadata.cstIndexes.DiffuseMap0UVMultiplier] * 4));
+                    baseMaterial.SetTextureScale("_MainTex", new Vector2(offset, offset));
+                }
+                if (CSTIndexValid(metadata.cstIndexes.NormalMap0UVMultiplier, ref currentShader, i))
+                {
+                    float offset = LoadFromCST<float>(cstReader, baseOffset + (currentShader.CSTLinks[i][metadata.cstIndexes.NormalMap0UVMultiplier] * 4));
+                    baseMaterial.SetTextureScale("_BumpMap", new Vector2(offset, offset));
+                    baseMaterial.SetFloat("_BumpScale", offset);
+                }
+                if (CSTIndexValid(metadata.cstIndexes.OcclusionMapUVMultiplier, ref currentShader, i))
+                {
+                    float offset = LoadFromCST<float>(cstReader, baseOffset + (currentShader.CSTLinks[i][metadata.cstIndexes.OcclusionMapUVMultiplier] * 4));
+                    baseMaterial.SetTextureScale("_OcclusionMap", new Vector2(offset, offset));
+                }
+                if (CSTIndexValid(metadata.cstIndexes.SpecularMap0UVMultiplier, ref currentShader, i))
+                {
+                    float offset = LoadFromCST<float>(cstReader, baseOffset + (currentShader.CSTLinks[i][metadata.cstIndexes.SpecularMap0UVMultiplier] * 4));
+                    baseMaterial.SetTextureScale("_MetallicGlossMap", new Vector2(offset, offset));
+                    baseMaterial.SetFloat("_GlossMapScale", offset);
+                }
+                if (CSTIndexValid(metadata.cstIndexes.SpecularFactor0, ref currentShader, i))
+                {
+                    float spec = LoadFromCST<float>(cstReader, baseOffset + (currentShader.CSTLinks[i][metadata.cstIndexes.SpecularFactor0] * 4));
+                    baseMaterial.SetFloat("_Glossiness", spec);
+                    baseMaterial.SetFloat("_GlossMapScale", spec);
+                }
+                if (CSTIndexValid(metadata.cstIndexes.Emission, ref currentShader, i))
+                {
+                    emissiveColour = LoadFromCST<Vector4>(cstReader, baseOffset + (currentShader.CSTLinks[i][metadata.cstIndexes.Emission] * 4));
+                }
+                if (CSTIndexValid(metadata.cstIndexes.EmissiveFactor, ref currentShader, i))
+                {
+                    emissiveFactor = LoadFromCST<float>(cstReader, baseOffset + (currentShader.CSTLinks[i][metadata.cstIndexes.EmissiveFactor] * 4));
+                }
+            }
+        }
+
+        if (!emissiveColour.Equals(Vector4.zero))
+        {
+            baseMaterial.globalIlluminationFlags = MaterialGlobalIlluminationFlags.RealtimeEmissive;
+            baseMaterial.EnableKeyword("_EMISSION");
+            baseMaterial.SetColor("_EmissionColor", emissiveColour * emissiveFactor);
+        }
+
+        baseMaterial.name += " " + metadata.shaderCategory.ToString();
+
+        return openCAGEShaderMaterial;
     }
+    public OpenCAGEShaderMaterial GetUnityGltfMaterial(ShaderMaterialMetadata metadata, List<Texture2D> availableTextures, Materials.Material InMaterial, ShadersPAK.ShaderEntry currentShader)
+    {
+        OpenCAGEShaderMaterial openCAGEShaderMaterial = new OpenCAGEShaderMaterial(UnityEngine.Shader.Find("UnityGLTF/PBRGraph"));
+        UnityEngine.Material baseMaterial = openCAGEShaderMaterial.baseMaterial;
+        baseMaterial.name = InMaterial.Name;
+
+        openCAGEShaderMaterial.shaderCategory = metadata.shaderCategory.ToString();
+
+        //Apply materials
+        for (int i = 0; i < metadata.textures.Count; i++)
+        {
+            if (i >= availableTextures.Count) continue;
+            switch (metadata.textures[i].Type)
+            {
+                case ShaderSlot.DIFFUSE_MAP:
+                    baseMaterial.SetTexture("baseColorTexture", availableTextures[i]);
+                    openCAGEShaderMaterial.shaderTextures["DiffuseMap"] = availableTextures[i];
+                    break;
+                case ShaderSlot.COLOR_RAMP_MAP:
+                    openCAGEShaderMaterial.shaderTextures["ColorRampMap"] = availableTextures[i];
+                    break;
+                case ShaderSlot.SECONDARY_DIFFUSE_MAP:
+                    openCAGEShaderMaterial.shaderTextures["SecondaryDiffuseMap"] = availableTextures[i];
+                    break;
+                case ShaderSlot.DIFFUSE_MAP_STATIC:
+                    openCAGEShaderMaterial.shaderTextures["DiffuseMapStatic"] = availableTextures[i];
+                    break;
+                case ShaderSlot.OPACITY:
+                    openCAGEShaderMaterial.shaderTextures["Opacity"] = availableTextures[i];
+                    break;
+                case ShaderSlot.NORMAL_MAP:
+                    baseMaterial.SetTexture("normalTexture", availableTextures[i]);
+                    openCAGEShaderMaterial.shaderTextures["NormalMap"] = availableTextures[i];
+                    break;
+                case ShaderSlot.SECONDARY_NORMAL_MAP:
+                    openCAGEShaderMaterial.shaderTextures["SecondaryNormalMap"] = availableTextures[i];
+                    break;
+                case ShaderSlot.SPECULAR_MAP:
+                    baseMaterial.SetTexture("specularTexture", availableTextures[i]);
+                    openCAGEShaderMaterial.shaderTextures["SpecularMap"] = availableTextures[i];
+                    break;
+                case ShaderSlot.SECONDARY_SPECULAR_MAP:
+                    openCAGEShaderMaterial.shaderTextures["SecondarySpecularMap"] = availableTextures[i];
+                    break;
+                case ShaderSlot.ENVIRONMENT_MAP:
+                    openCAGEShaderMaterial.shaderTextures["EnvironmentMap"] = availableTextures[i];
+                    break;
+                case ShaderSlot.OCCLUSION:
+                    baseMaterial.SetTexture("occlusionTexture", availableTextures[i]);
+                    openCAGEShaderMaterial.shaderTextures["Occlusion"] = availableTextures[i];
+                    break;
+                case ShaderSlot.FRESNEL_LUT:
+                    openCAGEShaderMaterial.shaderTextures["FresnelLut"] = availableTextures[i];
+                    break;
+                case ShaderSlot.PARALLAX_MAP:
+                    openCAGEShaderMaterial.shaderTextures["ParallaxMap"] = availableTextures[i];
+                    break;
+                case ShaderSlot.OPACITY_NOISE_MAP:
+                    openCAGEShaderMaterial.shaderTextures["OpacityNoiseMap"] = availableTextures[i];
+                    break;
+                case ShaderSlot.DIRT_MAP:
+                    openCAGEShaderMaterial.shaderTextures["DirtMap"] = availableTextures[i];
+                    break;
+                case ShaderSlot.WETNESS_NOISE:
+                    openCAGEShaderMaterial.shaderTextures["WetnessNoise"] = availableTextures[i];
+                    break;
+                case ShaderSlot.ALPHA_THRESHOLD:
+                    openCAGEShaderMaterial.shaderTextures["AlphaThreshold"] = availableTextures[i];
+                    break;
+                case ShaderSlot.IRRADIANCE_MAP:
+                    openCAGEShaderMaterial.shaderTextures["IrradianceMap"] = availableTextures[i];
+                    break;
+                case ShaderSlot.CONVOLVED_DIFFUSE:
+                    openCAGEShaderMaterial.shaderTextures["ConvolvedDiffuse"] = availableTextures[i];
+                    break;
+                case ShaderSlot.WRINKLE_MASK:
+                    openCAGEShaderMaterial.shaderTextures["WrinkleMask"] = availableTextures[i];
+                    break;
+                case ShaderSlot.WRINKLE_NORMAL_MAP:
+                    openCAGEShaderMaterial.shaderTextures["WrinkleNormalMap"] = availableTextures[i];
+                    break;
+                case ShaderSlot.SCATTER_MAP:
+                    openCAGEShaderMaterial.shaderTextures["ScatterMap"] = availableTextures[i];
+                    break;
+                case ShaderSlot.EMISSIVE:
+                    baseMaterial.SetTexture("emissiveTexture", availableTextures[i]);
+                    openCAGEShaderMaterial.shaderTextures["Emissive"] = availableTextures[i];
+                    break;
+                case ShaderSlot.BURN_THROUGH:
+                    openCAGEShaderMaterial.shaderTextures["BurnThrough"] = availableTextures[i];
+                    break;
+                case ShaderSlot.LIQUIFY:
+                    openCAGEShaderMaterial.shaderTextures["Liquify"] = availableTextures[i];
+                    break;
+                case ShaderSlot.LIQUIFY2:
+                    openCAGEShaderMaterial.shaderTextures["Liquify2"] = availableTextures[i];
+                    break;
+                case ShaderSlot.COLOR_RAMP:
+                    openCAGEShaderMaterial.shaderTextures["ColorRamp"] = availableTextures[i];
+                    break;
+                case ShaderSlot.FLOW_MAP:
+                    openCAGEShaderMaterial.shaderTextures["FlowMap"] = availableTextures[i];
+                    break;
+                case ShaderSlot.FLOW_TEXTURE_MAP:
+                    openCAGEShaderMaterial.shaderTextures["FlowTextureMap"] = availableTextures[i];
+                    break;
+                case ShaderSlot.ALPHA_MASK:
+                    openCAGEShaderMaterial.shaderTextures["AlphaMask"] = availableTextures[i];
+                    break;
+                case ShaderSlot.LOW_LOD_CHARACTER_MASK:
+                    openCAGEShaderMaterial.shaderTextures["LowLodCharacterMask"] = availableTextures[i];
+                    break;
+                case ShaderSlot.UNSCALED_DIRT_MAP:
+                    openCAGEShaderMaterial.shaderTextures["UnscaledDirtMap"] = availableTextures[i];
+                    break;
+                case ShaderSlot.FACE_MAP:
+                    openCAGEShaderMaterial.shaderTextures["FaceMap"] = availableTextures[i];
+                    break;
+                case ShaderSlot.MASKING_MAP:
+                    openCAGEShaderMaterial.shaderTextures["MaskingMap"] = availableTextures[i];
+                    break;
+                case ShaderSlot.ATMOSPHERE_MAP:
+                    openCAGEShaderMaterial.shaderTextures["AtmosphereMap"] = availableTextures[i];
+                    break;
+                case ShaderSlot.DETAIL_MAP:
+                    openCAGEShaderMaterial.shaderTextures["DetailMap"] = availableTextures[i];
+                    break;
+                case ShaderSlot.LIGHT_MAP:
+                    openCAGEShaderMaterial.shaderTextures["LightMap"] = availableTextures[i];
+                    break;
+            }
+        }
+
+        float emissiveFactor = 1;
+        Vector4 emissiveColour = Vector4.zero;
+        
+        //Apply properties
+        for (int i = 0; i < currentShader.Header.CSTCounts.Length; i++)
+        {
+            using (BinaryReader cstReader = new BinaryReader(new MemoryStream(_levelContent.ModelsMTL.CSTData[i])))
+            {
+                int baseOffset = (InMaterial.ConstantBuffers[i].Offset * 4);
+
+                if (CSTIndexValid(metadata.cstIndexes.Diffuse0, ref currentShader, i))
+                {
+                    Vector4 colour = LoadFromCST<Vector4>(cstReader, baseOffset + (currentShader.CSTLinks[i][metadata.cstIndexes.Diffuse0] * 4));
+                    baseMaterial.SetColor("baseColorFactor", colour);
+                    openCAGEShaderMaterial.shaderParams["Diffuse0"] = colour;
+                }
+                if (CSTIndexValid(metadata.cstIndexes.DiffuseMap0UVMultiplier, ref currentShader, i))
+                {
+                    float offset = LoadFromCST<float>(cstReader, baseOffset + (currentShader.CSTLinks[i][metadata.cstIndexes.DiffuseMap0UVMultiplier] * 4));
+                    baseMaterial.SetTextureScale("baseColorTexture", new Vector2(offset, offset));
+                    openCAGEShaderMaterial.shaderParams["DiffuseMap0UVMultiplier"] = offset;
+                }
+                if (CSTIndexValid(metadata.cstIndexes.NormalMap0UVMultiplier, ref currentShader, i))
+                {
+                    float offset = LoadFromCST<float>(cstReader, baseOffset + (currentShader.CSTLinks[i][metadata.cstIndexes.NormalMap0UVMultiplier] * 4));
+                    baseMaterial.SetTextureScale("normalTexture", new Vector2(offset, offset));
+                    openCAGEShaderMaterial.shaderParams["NormalMap0UVMultiplier"] = offset;
+                }
+                if (CSTIndexValid(metadata.cstIndexes.OcclusionMapUVMultiplier, ref currentShader, i))
+                {
+                    float offset = LoadFromCST<float>(cstReader, baseOffset + (currentShader.CSTLinks[i][metadata.cstIndexes.OcclusionMapUVMultiplier] * 4));
+                    baseMaterial.SetTextureScale("occlusionTexture", new Vector2(offset, offset));
+                    openCAGEShaderMaterial.shaderParams["OcclusionMapUVMultiplier"] = offset;
+                }
+                if (CSTIndexValid(metadata.cstIndexes.SpecularMap0UVMultiplier, ref currentShader, i))
+                {
+                    float offset = LoadFromCST<float>(cstReader, baseOffset + (currentShader.CSTLinks[i][metadata.cstIndexes.SpecularMap0UVMultiplier] * 4));
+                    baseMaterial.SetTextureScale("specularTexture", new Vector2(offset, offset));
+                    openCAGEShaderMaterial.shaderParams["SpecularMap0UVMultiplier"] = offset;
+                }
+                if (CSTIndexValid(metadata.cstIndexes.Emission, ref currentShader, i))
+                { 
+                    emissiveColour = LoadFromCST<Vector4>(cstReader, baseOffset + (currentShader.CSTLinks[i][metadata.cstIndexes.Emission] * 4));
+                    openCAGEShaderMaterial.shaderParams["Emission"] = emissiveColour;
+                }
+                if (CSTIndexValid(metadata.cstIndexes.EmissiveFactor, ref currentShader, i))
+                {
+                    emissiveFactor = LoadFromCST<float>(cstReader, baseOffset + (currentShader.CSTLinks[i][metadata.cstIndexes.EmissiveFactor] * 4));
+                    openCAGEShaderMaterial.shaderParams["EmissiveFactor"] = emissiveFactor;
+                }
+
+                if (CSTIndexValid(metadata.cstIndexes.Diffuse1, ref currentShader, i))
+                    openCAGEShaderMaterial.shaderParams["Diffuse1"] = LoadFromCST<float>(cstReader, baseOffset + (currentShader.CSTLinks[i][metadata.cstIndexes.Diffuse1] * 4));
+                if (CSTIndexValid(metadata.cstIndexes.DiffuseMap1UVMultiplier, ref currentShader, i))
+                    openCAGEShaderMaterial.shaderParams["DiffuseMap1UVMultiplier"] = LoadFromCST<float>(cstReader, baseOffset + (currentShader.CSTLinks[i][metadata.cstIndexes.DiffuseMap1UVMultiplier] * 4));
+                if (CSTIndexValid(metadata.cstIndexes.DirtPower, ref currentShader, i))
+                    openCAGEShaderMaterial.shaderParams["DirtPower"] = LoadFromCST<float>(cstReader, baseOffset + (currentShader.CSTLinks[i][metadata.cstIndexes.DirtPower] * 4));
+                if (CSTIndexValid(metadata.cstIndexes.DirtStrength, ref currentShader, i))
+                    openCAGEShaderMaterial.shaderParams["DirtStrength"] = LoadFromCST<float>(cstReader, baseOffset + (currentShader.CSTLinks[i][metadata.cstIndexes.DirtStrength] * 4));
+                if (CSTIndexValid(metadata.cstIndexes.DirtUVMultiplier, ref currentShader, i))
+                    openCAGEShaderMaterial.shaderParams["DirtUVMultiplier"] = LoadFromCST<float>(cstReader, baseOffset + (currentShader.CSTLinks[i][metadata.cstIndexes.DirtUVMultiplier] * 4));
+                if (CSTIndexValid(metadata.cstIndexes.Emission, ref currentShader, i))
+                    openCAGEShaderMaterial.shaderParams["Emission"] = LoadFromCST<float>(cstReader, baseOffset + (currentShader.CSTLinks[i][metadata.cstIndexes.Emission] * 4));
+                if (CSTIndexValid(metadata.cstIndexes.EmissiveFactor, ref currentShader, i))
+                    openCAGEShaderMaterial.shaderParams["EmissiveFactor"] = LoadFromCST<float>(cstReader, baseOffset + (currentShader.CSTLinks[i][metadata.cstIndexes.EmissiveFactor] * 4));
+                if (CSTIndexValid(metadata.cstIndexes.EnvironmentMapEmission, ref currentShader, i))
+                    openCAGEShaderMaterial.shaderParams["EnvironmentMapEmission"] = LoadFromCST<float>(cstReader, baseOffset + (currentShader.CSTLinks[i][metadata.cstIndexes.EnvironmentMapEmission] * 4));
+                if (CSTIndexValid(metadata.cstIndexes.EnvironmentMapStrength, ref currentShader, i))
+                    openCAGEShaderMaterial.shaderParams["EnvironmentMapStrength"] = LoadFromCST<float>(cstReader, baseOffset + (currentShader.CSTLinks[i][metadata.cstIndexes.EnvironmentMapStrength] * 4));
+                if (CSTIndexValid(metadata.cstIndexes.Iris0, ref currentShader, i))
+                    openCAGEShaderMaterial.shaderParams["Iris0"] = LoadFromCST<float>(cstReader, baseOffset + (currentShader.CSTLinks[i][metadata.cstIndexes.Iris0] * 4));
+                if (CSTIndexValid(metadata.cstIndexes.Iris1, ref currentShader, i))
+                    openCAGEShaderMaterial.shaderParams["Iris1"] = LoadFromCST<float>(cstReader, baseOffset + (currentShader.CSTLinks[i][metadata.cstIndexes.Iris1] * 4));
+                if (CSTIndexValid(metadata.cstIndexes.Iris2, ref currentShader, i))
+                    openCAGEShaderMaterial.shaderParams["Iris2"] = LoadFromCST<float>(cstReader, baseOffset + (currentShader.CSTLinks[i][metadata.cstIndexes.Iris2] * 4));
+                if (CSTIndexValid(metadata.cstIndexes.IrisParallaxDisplacement, ref currentShader, i))
+                    openCAGEShaderMaterial.shaderParams["IrisParallaxDisplacement"] = LoadFromCST<float>(cstReader, baseOffset + (currentShader.CSTLinks[i][metadata.cstIndexes.IrisParallaxDisplacement] * 4));
+                if (CSTIndexValid(metadata.cstIndexes.IsTransparent, ref currentShader, i))
+                    openCAGEShaderMaterial.shaderParams["IsTransparent"] = LoadFromCST<float>(cstReader, baseOffset + (currentShader.CSTLinks[i][metadata.cstIndexes.IsTransparent] * 4));
+                if (CSTIndexValid(metadata.cstIndexes.LimbalSmoothRadius, ref currentShader, i))
+                    openCAGEShaderMaterial.shaderParams["LimbalSmoothRadius"] = LoadFromCST<float>(cstReader, baseOffset + (currentShader.CSTLinks[i][metadata.cstIndexes.LimbalSmoothRadius] * 4));
+                if (CSTIndexValid(metadata.cstIndexes.Metallic, ref currentShader, i))
+                    openCAGEShaderMaterial.shaderParams["Metallic"] = LoadFromCST<float>(cstReader, baseOffset + (currentShader.CSTLinks[i][metadata.cstIndexes.Metallic] * 4));
+                if (CSTIndexValid(metadata.cstIndexes.MetallicFactor0, ref currentShader, i))
+                    openCAGEShaderMaterial.shaderParams["MetallicFactor0"] = LoadFromCST<float>(cstReader, baseOffset + (currentShader.CSTLinks[i][metadata.cstIndexes.MetallicFactor0] * 4));
+                if (CSTIndexValid(metadata.cstIndexes.MetallicFactor1, ref currentShader, i))
+                    openCAGEShaderMaterial.shaderParams["MetallicFactor1"] = LoadFromCST<float>(cstReader, baseOffset + (currentShader.CSTLinks[i][metadata.cstIndexes.MetallicFactor1] * 4));
+                if (CSTIndexValid(metadata.cstIndexes.NormalMap0Strength, ref currentShader, i))
+                    openCAGEShaderMaterial.shaderParams["NormalMap0Strength"] = LoadFromCST<float>(cstReader, baseOffset + (currentShader.CSTLinks[i][metadata.cstIndexes.NormalMap0Strength] * 4));
+                if (CSTIndexValid(metadata.cstIndexes.NormalMap0UVMultiplierOfMultiplier, ref currentShader, i))
+                    openCAGEShaderMaterial.shaderParams["NormalMap0UVMultiplierOfMultiplier"] = LoadFromCST<float>(cstReader, baseOffset + (currentShader.CSTLinks[i][metadata.cstIndexes.NormalMap0UVMultiplierOfMultiplier] * 4));
+                if (CSTIndexValid(metadata.cstIndexes.NormalMap1Strength, ref currentShader, i))
+                    openCAGEShaderMaterial.shaderParams["NormalMap1Strength"] = LoadFromCST<float>(cstReader, baseOffset + (currentShader.CSTLinks[i][metadata.cstIndexes.NormalMap1Strength] * 4));
+                if (CSTIndexValid(metadata.cstIndexes.NormalMap1UVMultiplier, ref currentShader, i))
+                    openCAGEShaderMaterial.shaderParams["NormalMap1UVMultiplier"] = LoadFromCST<float>(cstReader, baseOffset + (currentShader.CSTLinks[i][metadata.cstIndexes.NormalMap1UVMultiplier] * 4));
+                if (CSTIndexValid(metadata.cstIndexes.NormalMapStrength, ref currentShader, i))
+                    openCAGEShaderMaterial.shaderParams["NormalMapStrength"] = LoadFromCST<float>(cstReader, baseOffset + (currentShader.CSTLinks[i][metadata.cstIndexes.NormalMapStrength] * 4));
+                if (CSTIndexValid(metadata.cstIndexes.NormalMapUVMultiplier, ref currentShader, i))
+                    openCAGEShaderMaterial.shaderParams["NormalMapUVMultiplier"] = LoadFromCST<float>(cstReader, baseOffset + (currentShader.CSTLinks[i][metadata.cstIndexes.NormalMapUVMultiplier] * 4));
+                if (CSTIndexValid(metadata.cstIndexes.OcclusionTint, ref currentShader, i))
+                    openCAGEShaderMaterial.shaderParams["OcclusionTint"] = LoadFromCST<float>(cstReader, baseOffset + (currentShader.CSTLinks[i][metadata.cstIndexes.OcclusionTint] * 4));
+                if (CSTIndexValid(metadata.cstIndexes.OpacityMapUVMultiplier, ref currentShader, i))
+                    openCAGEShaderMaterial.shaderParams["OpacityMapUVMultiplier"] = LoadFromCST<float>(cstReader, baseOffset + (currentShader.CSTLinks[i][metadata.cstIndexes.OpacityMapUVMultiplier] * 4));
+                if (CSTIndexValid(metadata.cstIndexes.OpacityNoiseAmplitude, ref currentShader, i))
+                    openCAGEShaderMaterial.shaderParams["OpacityNoiseAmplitude"] = LoadFromCST<float>(cstReader, baseOffset + (currentShader.CSTLinks[i][metadata.cstIndexes.OpacityNoiseAmplitude] * 4));
+                if (CSTIndexValid(metadata.cstIndexes.OpacityNoiseMapUVMultiplier, ref currentShader, i))
+                    openCAGEShaderMaterial.shaderParams["OpacityNoiseMapUVMultiplier"] = LoadFromCST<float>(cstReader, baseOffset + (currentShader.CSTLinks[i][metadata.cstIndexes.OpacityNoiseMapUVMultiplier] * 4));
+                if (CSTIndexValid(metadata.cstIndexes.ParallaxFactor, ref currentShader, i))
+                    openCAGEShaderMaterial.shaderParams["ParallaxFactor"] = LoadFromCST<float>(cstReader, baseOffset + (currentShader.CSTLinks[i][metadata.cstIndexes.ParallaxFactor] * 4));
+                if (CSTIndexValid(metadata.cstIndexes.ParallaxMapUVMultiplier, ref currentShader, i))
+                    openCAGEShaderMaterial.shaderParams["ParallaxMapUVMultiplier"] = LoadFromCST<float>(cstReader, baseOffset + (currentShader.CSTLinks[i][metadata.cstIndexes.ParallaxMapUVMultiplier] * 4));
+                if (CSTIndexValid(metadata.cstIndexes.ParallaxOffset, ref currentShader, i))
+                    openCAGEShaderMaterial.shaderParams["ParallaxOffset"] = LoadFromCST<float>(cstReader, baseOffset + (currentShader.CSTLinks[i][metadata.cstIndexes.ParallaxOffset] * 4));
+                if (CSTIndexValid(metadata.cstIndexes.PupilDilation, ref currentShader, i))
+                    openCAGEShaderMaterial.shaderParams["PupilDilation"] = LoadFromCST<float>(cstReader, baseOffset + (currentShader.CSTLinks[i][metadata.cstIndexes.PupilDilation] * 4));
+                if (CSTIndexValid(metadata.cstIndexes.RetinaIndexOfRefraction, ref currentShader, i))
+                    openCAGEShaderMaterial.shaderParams["RetinaIndexOfRefraction"] = LoadFromCST<float>(cstReader, baseOffset + (currentShader.CSTLinks[i][metadata.cstIndexes.RetinaIndexOfRefraction] * 4));
+                if (CSTIndexValid(metadata.cstIndexes.RetinaRadius, ref currentShader, i))
+                    openCAGEShaderMaterial.shaderParams["RetinaRadius"] = LoadFromCST<float>(cstReader, baseOffset + (currentShader.CSTLinks[i][metadata.cstIndexes.RetinaRadius] * 4));
+                if (CSTIndexValid(metadata.cstIndexes.ScatterMapMultiplier, ref currentShader, i))
+                    openCAGEShaderMaterial.shaderParams["ScatterMapMultiplier"] = LoadFromCST<float>(cstReader, baseOffset + (currentShader.CSTLinks[i][metadata.cstIndexes.ScatterMapMultiplier] * 4));
+                if (CSTIndexValid(metadata.cstIndexes.SpecularFactor0, ref currentShader, i))
+                    openCAGEShaderMaterial.shaderParams["SpecularFactor0"] = LoadFromCST<float>(cstReader, baseOffset + (currentShader.CSTLinks[i][metadata.cstIndexes.SpecularFactor0] * 4));
+                if (CSTIndexValid(metadata.cstIndexes.SpecularFactor1, ref currentShader, i))
+                    openCAGEShaderMaterial.shaderParams["SpecularFactor1"] = LoadFromCST<float>(cstReader, baseOffset + (currentShader.CSTLinks[i][metadata.cstIndexes.SpecularFactor1] * 4));
+                if (CSTIndexValid(metadata.cstIndexes.SpecularMap1UVMultiplier, ref currentShader, i))
+                    openCAGEShaderMaterial.shaderParams["SpecularMap1UVMultiplier"] = LoadFromCST<float>(cstReader, baseOffset + (currentShader.CSTLinks[i][metadata.cstIndexes.SpecularMap1UVMultiplier] * 4));
+            }
+        }
+
+        if (!emissiveColour.Equals(Vector4.zero))
+        {
+
+            baseMaterial.SetColor("emissiveFactor", new Color(emissiveColour.x * emissiveFactor,
+                emissiveColour.y * emissiveFactor,
+                emissiveColour.z * emissiveFactor,
+                emissiveColour.w * emissiveFactor));
+        }
+
+        baseMaterial.name += " " + metadata.shaderCategory.ToString();
+
+        return openCAGEShaderMaterial;
+    }
+
+    void setMaterialTransparent(UnityEngine.Material toReturn)
+    {
+        toReturn.SetOverrideTag("RenderType", "Transparent");
+        toReturn.SetFloat("_BUILTIN_SrcBlend", 5);
+        toReturn.SetFloat("_BUILTIN_DstBlend", 10);
+        toReturn.SetFloat("_BUILTIN_ZWrite", 0);
+        toReturn.SetFloat("_BUILTIN_Surface", 1);
+        toReturn.DisableKeyword("_ALPHATEST_ON");
+        toReturn.EnableKeyword("_ALPHABLEND_ON");
+        toReturn.DisableKeyword("_ALPHAPREMULTIPLY_ON");
+        toReturn.renderQueue = (int)UnityEngine.Rendering.RenderQueue.Transparent;  //3000
+    }
+
+    bool IsAlphaSolidFill(Texture2D tex)
+    {
+        /*
+        for (int x = 0; x < tex.width; x++) { 
+            for (int y = 0; y < tex.height; y++) {
+                if (tex.GetPixel(x, y).a < 0.9f)
+                {
+                    return false;
+                }
+            }
+        }*/
+
+        return true;
+    }
+
+    Texture2D SetTexAlphaFromMask(Texture2D input, Texture2D alphaMask)
+    {
+        Texture2D cloneWithAlpha = null;
+
+        if (input.width == alphaMask.width && input.height == alphaMask.height && input.format == alphaMask.format)
+        {
+            cloneWithAlpha = new Texture2D(input.width, input.height, TextureFormat.RGBA32, false);
+
+            Color[] pixelsInput = input.GetPixels();
+            Color[] pixelsAlpha = input.GetPixels();
+
+            for (int x = 0; x < alphaMask.width; x++)
+            {
+                for (int y = 0; y < alphaMask.height; y++)
+                {
+                    Color pixelInput = pixelsInput[x + y * input.width];
+                    Color pixelAlpha = pixelsInput[x + y * input.width];
+
+                    Color c = new Color(pixelInput.r, pixelInput.g, pixelInput.b, pixelAlpha.grayscale);
+
+                    cloneWithAlpha.SetPixel(x, y, c);
+                }
+            }
+
+            cloneWithAlpha.Apply(false);
+        }
+
+        return cloneWithAlpha;
+    }
+
     private T LoadFromCST<T>(BinaryReader cstReader, int offset)
     {
         cstReader.BaseStream.Position = offset;
@@ -810,8 +1152,10 @@ public class LevelContent
                 break;
         }
 
-        Parallel.For(0, 15, (i) =>
-        {
+        //Parallel.For(0, 15, (i) =>
+        //{
+        for(int i=0; i < 15; i++) { 
+
             switch (i)
             {
                 case 0:
@@ -860,7 +1204,7 @@ public class LevelContent
                     LevelTextures = new Textures(renderablePath + "LEVEL_TEXTURES.ALL.PAK");
                     break;
             }
-        });
+        };//);
     }
 
     public Movers ModelsMVR;

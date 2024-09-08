@@ -24,6 +24,7 @@ using static UnityEditor.Rendering.BuiltIn.ShaderGraph.BuiltInBaseShaderGUI;
 using UnityGLTF;
 using UnityEngine.Experimental.Rendering;
 using UnityGLTF.Plugins;
+using System.Reflection.Emit;
 
 public class AlienLevelLoader : MonoBehaviour
 {
@@ -36,6 +37,9 @@ public class AlienLevelLoader : MonoBehaviour
 
     [Tooltip("Enable this to use UnityGLTF Shaders by default if possible.")]
     [SerializeField] private bool _useUnityGLTFMaterials = true;
+
+    [Tooltip("Disable loading mipmaps (results in better texture visuals but increased memory consumption)")]
+    [SerializeField] private bool _disableMipMaps = true;
 
     public Action OnLoaded;
 
@@ -110,6 +114,7 @@ public class AlienLevelLoader : MonoBehaviour
 
         //Load cubemaps to reflection probes
         List<Textures.TEX4> cubemaps = _levelContent.LevelTextures.Entries.Where(o => o.Type == Textures.AlienTextureType.ENVIRONMENT_MAP).ToList();
+
         GameObject probeHolder = new GameObject("Reflection Probes");
         for (int i = 0; i < cubemaps.Count; i++)
         {
@@ -136,6 +141,7 @@ public class AlienLevelLoader : MonoBehaviour
     }
     public void LoadComposite(ShortGuid guid)
     {
+        
         if (_loadMoverData || _levelContent == null) return;
 
         if (_loadedCompositeGO != null)
@@ -192,6 +198,9 @@ public class AlienLevelLoader : MonoBehaviour
     void ParseComposite(Composite composite, GameObject parentGO, Vector3 parentPos, Quaternion parentRot, List<AliasEntity> aliases)
     {
         if (composite == null) return;
+
+        EditorUtility.DisplayProgressBar("Loading composite" + composite.name, "Initialization", 0);
+
         GameObject compositeGO = new GameObject("[COMPOSITE INSTANCE] " + composite.name);
         compositeGO.transform.parent = parentGO.transform;
         compositeGO.transform.SetLocalPositionAndRotation(parentPos, parentRot);
@@ -208,8 +217,11 @@ public class AlienLevelLoader : MonoBehaviour
         aliases = trimmedAliases;
 
         //Parse all functions in this composite & handle them appropriately
-        foreach (FunctionEntity function in composite.functions)
+        for(int funcIdx=1; funcIdx < composite.functions.Count; funcIdx++)
         {
+            FunctionEntity function = composite.functions[funcIdx];
+            EditorUtility.DisplayProgressBar("Loading function " + function.shortGUID, "Processing function data", (funcIdx + 1 / composite.functions.Count));
+
             //Jump through to the next composite
             if (!CommandsUtils.FunctionTypeExists(function.function))
             {
@@ -257,6 +269,7 @@ public class AlienLevelLoader : MonoBehaviour
                 }
             }
         }
+        EditorUtility.ClearProgressBar();
     }
 
     void ProcessModelReference(FunctionEntity function, GameObject nodeModel)
@@ -577,7 +590,12 @@ public class AlienLevelLoader : MonoBehaviour
                     tex.Cubemap.Apply(false, true);
                     break;
                 default:
-                    tex.Texture = new Texture2D((int)textureDims[0], (int)textureDims[1], format, mipLevels, true);
+
+                    if (_disableMipMaps)
+                        tex.Texture = new Texture2D((int)textureDims[0], (int)textureDims[1], format, false);
+                    else
+                        tex.Texture = new Texture2D((int)textureDims[0], (int)textureDims[1], format, mipLevels, true);
+
                     tex.Texture.name = InTexture.Name;
                     tex.Texture.LoadRawTextureData(tempReader.ReadBytes(textureLength));
                     tex.Texture.wrapMode = wrapMode;
@@ -656,7 +674,8 @@ public class AlienLevelLoader : MonoBehaviour
 
             OpenCAGEShaderMaterial toReturn;
 
-            if (_useUnityGLTFMaterials && Shader.Find("UnityGLTF/PBRGraph") != null) // && InMaterial.Name.Contains("GLASS_Dusty") || InMaterial.Name.Contains("DECAL_Scrapes") || InMaterial.Name.Contains("DECAL_GubbinsA")) 
+            // Use GLTF Mats only if shader is available
+            if (_useUnityGLTFMaterials && Shader.Find("UnityGLTF/PBRGraph") != null)
             {
                 toReturn = GetUnityGltfMaterial(metadata, availableTextures, InMaterial, currentShader);
             }
@@ -1068,51 +1087,6 @@ public class AlienLevelLoader : MonoBehaviour
         toReturn.EnableKeyword("_ALPHABLEND_ON");
         toReturn.DisableKeyword("_ALPHAPREMULTIPLY_ON");
         toReturn.renderQueue = (int)UnityEngine.Rendering.RenderQueue.Transparent;  //3000
-    }
-
-    bool IsAlphaSolidFill(Texture2D tex)
-    {
-        /*
-        for (int x = 0; x < tex.width; x++) { 
-            for (int y = 0; y < tex.height; y++) {
-                if (tex.GetPixel(x, y).a < 0.9f)
-                {
-                    return false;
-                }
-            }
-        }*/
-
-        return true;
-    }
-
-    Texture2D SetTexAlphaFromMask(Texture2D input, Texture2D alphaMask)
-    {
-        Texture2D cloneWithAlpha = null;
-
-        if (input.width == alphaMask.width && input.height == alphaMask.height && input.format == alphaMask.format)
-        {
-            cloneWithAlpha = new Texture2D(input.width, input.height, TextureFormat.RGBA32, false);
-
-            Color[] pixelsInput = input.GetPixels();
-            Color[] pixelsAlpha = input.GetPixels();
-
-            for (int x = 0; x < alphaMask.width; x++)
-            {
-                for (int y = 0; y < alphaMask.height; y++)
-                {
-                    Color pixelInput = pixelsInput[x + y * input.width];
-                    Color pixelAlpha = pixelsInput[x + y * input.width];
-
-                    Color c = new Color(pixelInput.r, pixelInput.g, pixelInput.b, pixelAlpha.grayscale);
-
-                    cloneWithAlpha.SetPixel(x, y, c);
-                }
-            }
-
-            cloneWithAlpha.Apply(false);
-        }
-
-        return cloneWithAlpha;
     }
 
     private T LoadFromCST<T>(BinaryReader cstReader, int offset)

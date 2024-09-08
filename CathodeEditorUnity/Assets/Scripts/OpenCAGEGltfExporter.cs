@@ -28,13 +28,18 @@ namespace UnityGLTF.Plugins
 
     public class OpenCAGE_gltf_export_context : GLTFExportPluginContext
     {
+        // Tracks already exported textures to avoid duplicates
+        private List<string> exportedTextures = new List<string>();
 
         public override void AfterMaterialExport(GLTFSceneExporter exporter, GLTFRoot gltfRoot, Material material, GLTFMaterial materialNode)
         {
             OpenCAGEShaderMaterialWrapper cathodeShaderContainer = null;
 
             if (exporter.RootTransforms == null) return;
-            
+
+            // List textures exported by default to avoid dupes
+            ScanMaterialForBaseTextures(material);
+
             foreach (Transform transform in exporter.RootTransforms)
             {
                 OpenCAGEShaderMaterialWrapper[] shaderMats = transform.GetComponentsInChildren<OpenCAGEShaderMaterialWrapper>();
@@ -87,9 +92,33 @@ namespace UnityGLTF.Plugins
 
                     if (currentTex != null)
                     {
-                        exporter.ExportTexture(currentTex, shaderTexKey);
+                        // Write texture to disk - avoid duplicates
+                        if (!exportedTextures.Contains(currentTex.name))
+                        {
+                            exporter.ExportTexture(currentTex, shaderTexKey);
+                            exportedTextures.Add(currentTex.name);
+                        }
 
                         rootNode.exportTree.shaderTextures.Add(shaderTexKey, Convert.ToString(currentTex.name));
+                    }
+                }
+            }
+        }
+
+        private void ScanMaterialForBaseTextures(Material inMaterial)
+        {
+            Shader shader = inMaterial.shader;
+
+            if (shader != null)
+            {
+                for (int i = 0; i < ShaderUtil.GetPropertyCount(shader); i++)
+                {
+                    if (ShaderUtil.GetPropertyType(shader, i) == ShaderUtil.ShaderPropertyType.TexEnv)
+                    {
+                        string texName = inMaterial.GetTexture(ShaderUtil.GetPropertyName(shader, i))?.name;
+                        
+                        if (!string.IsNullOrEmpty(texName))
+                            exportedTextures.Add(inMaterial.GetTexture(ShaderUtil.GetPropertyName(shader, i))?.name);
                     }
                 }
             }

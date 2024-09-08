@@ -837,7 +837,6 @@ public class AlienLevelLoader : MonoBehaviour
                     openCAGEShaderMaterial.shaderTextures["SecondaryNormalMap"] = availableTextures[i];
                     break;
                 case ShaderSlot.SPECULAR_MAP:
-                    baseMaterial.SetTexture("specularTexture", availableTextures[i]);
                     openCAGEShaderMaterial.shaderTextures["SpecularMap"] = availableTextures[i];
                     break;
                 case ShaderSlot.SECONDARY_SPECULAR_MAP:
@@ -969,7 +968,6 @@ public class AlienLevelLoader : MonoBehaviour
                 if (CSTIndexValid(metadata.cstIndexes.SpecularMap0UVMultiplier, ref currentShader, i))
                 {
                     float offset = LoadFromCST<float>(cstReader, baseOffset + (currentShader.CSTLinks[i][metadata.cstIndexes.SpecularMap0UVMultiplier] * 4));
-                    baseMaterial.SetTextureScale("specularTexture", new Vector2(offset, offset));
                     openCAGEShaderMaterial.shaderParams["SpecularMap0UVMultiplier"] = offset;
                 }
                 if (CSTIndexValid(metadata.cstIndexes.Emission, ref currentShader, i))

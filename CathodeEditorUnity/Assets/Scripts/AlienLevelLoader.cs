@@ -217,7 +217,7 @@ public class AlienLevelLoader : MonoBehaviour
         aliases = trimmedAliases;
 
         //Parse all functions in this composite & handle them appropriately
-        for(int funcIdx=1; funcIdx < composite.functions.Count; funcIdx++)
+        for(int funcIdx=0; funcIdx < composite.functions.Count; funcIdx++)
         {
             FunctionEntity function = composite.functions[funcIdx];
             EditorUtility.DisplayProgressBar("Loading function " + function.shortGUID, "Processing function data", (funcIdx + 1 / composite.functions.Count));

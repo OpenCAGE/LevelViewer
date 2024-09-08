@@ -72,7 +72,7 @@ namespace UnityGLTF.Plugins
                         if (currentShaderParam is float && (float)currentShaderParam < 0.1)
                             continue;
 
-                        rootNode.exportTree.shaderParams.Add("shader_param_" + shaderParamKey, Convert.ToString(shaderMaterial.shaderParams[shaderParamKey]));
+                        rootNode.exportTree.shaderParams.Add(shaderParamKey, Convert.ToString(shaderMaterial.shaderParams[shaderParamKey]));
                     }
                 }
             }
@@ -89,7 +89,7 @@ namespace UnityGLTF.Plugins
                     {
                         exporter.ExportTexture(currentTex, shaderTexKey);
 
-                        rootNode.exportTree.shaderParams.Add("shader_tex_" + shaderTexKey, Convert.ToString(currentTex.name));
+                        rootNode.exportTree.shaderTextures.Add(shaderTexKey, Convert.ToString(currentTex.name));
                     }
                 }
             }

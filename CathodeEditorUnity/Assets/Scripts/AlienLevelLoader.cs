@@ -26,6 +26,9 @@ public class AlienLevelLoader : MonoBehaviour
     [Tooltip("Enable this to include objects in the scene that are of an unsupported material type (they will still be inactive by default).")]
     [SerializeField] private bool _populateObjectsWithUnsupportedMaterials = false;
 
+    [Tooltip("Enable additional material data: this may not look correct, so it's optional.")]
+    [SerializeField] private bool _useAdvancedMaterials = false;
+
     public Action OnLoaded;
 
     private string _levelName = "";
@@ -148,7 +151,7 @@ public class AlienLevelLoader : MonoBehaviour
             {
                 RenderableElements.Element RenderableElement = _levelContent.RenderableREDS.Entries[(int)_levelContent.ModelsMVR.Entries[i].renderable_element_index + x];
                 MeshRenderer renderer = SpawnModel(RenderableElement.ModelIndex, RenderableElement.MaterialIndex, thisParent);
-                if (renderer != null && _levelContent.ModelsMVR.Entries[i].environment_map_index != -1)
+                if (_useAdvancedMaterials && renderer != null && _levelContent.ModelsMVR.Entries[i].environment_map_index != -1)
                 {
                     renderer.reflectionProbeUsage = UnityEngine.Rendering.ReflectionProbeUsage.BlendProbes;
                     int index = _levelContent.EnvironmentMap.Entries[_levelContent.ModelsMVR.Entries[i].environment_map_index].EnvMapIndex;
@@ -467,104 +470,127 @@ public class AlienLevelLoader : MonoBehaviour
             }
             toReturn.name += " " + metadata.shaderCategory.ToString();
 
-            List<Texture2D> availableTextures = new List<Texture2D>();
-            for (int SlotIndex = 0; SlotIndex < Shader.Header.TextureLinkCount; ++SlotIndex)
+            if (_useAdvancedMaterials)
             {
-                int PairIndex = Shader.TextureLinks[SlotIndex];
-                // NOTE: PairIndex == 255 means no index.
-                if (PairIndex < InMaterial.TextureReferences.Length)
+                List<Texture2D> availableTextures = new List<Texture2D>();
+                for (int SlotIndex = 0; SlotIndex < Shader.Header.TextureLinkCount; ++SlotIndex)
                 {
-                    Materials.Material.Texture Pair = InMaterial.TextureReferences[PairIndex];
-                    availableTextures.Add(Pair.BinIndex == -1 ? null : GetTexture(Pair.BinIndex, Pair.Source == Materials.Material.Texture.TextureSource.GLOBAL));
+                    int PairIndex = Shader.TextureLinks[SlotIndex];
+                    // NOTE: PairIndex == 255 means no index.
+                    if (PairIndex < InMaterial.TextureReferences.Length)
+                    {
+                        Materials.Material.Texture Pair = InMaterial.TextureReferences[PairIndex];
+                        availableTextures.Add(Pair.BinIndex == -1 ? null : GetTexture(Pair.BinIndex, Pair.Source == Materials.Material.Texture.TextureSource.GLOBAL));
+                    }
+                    else
+                    {
+                        availableTextures.Add(null);
+                    }
                 }
-                else
+
+                //Apply materials
+                for (int i = 0; i < metadata.textures.Count; i++)
                 {
-                    availableTextures.Add(null);
+                    if (i >= availableTextures.Count) continue;
+                    switch (metadata.textures[i].Type)
+                    {
+                        case ShaderSlot.DIFFUSE_MAP:
+                            toReturn.SetTexture("_MainTex", availableTextures[i]);
+                            break;
+                        case ShaderSlot.DETAIL_MAP:
+                            toReturn.EnableKeyword("_DETAIL_MULX2");
+                            toReturn.SetTexture("_DetailMask", availableTextures[i]);
+                            break;
+                        case ShaderSlot.EMISSIVE:
+                            toReturn.EnableKeyword("_EMISSION");
+                            toReturn.SetTexture("_EmissionMap", availableTextures[i]);
+                            break;
+                        case ShaderSlot.PARALLAX_MAP:
+                            toReturn.EnableKeyword("_PARALLAXMAP");
+                            toReturn.SetTexture("_ParallaxMap", availableTextures[i]);
+                            break;
+                        case ShaderSlot.OCCLUSION:
+                            toReturn.SetTexture("_OcclusionMap", availableTextures[i]);
+                            break;
+                        case ShaderSlot.SPECULAR_MAP:
+                            toReturn.EnableKeyword("_METALLICGLOSSMAP");
+                            toReturn.SetTexture("_MetallicGlossMap", availableTextures[i]); //TODO _SPECGLOSSMAP?
+                            toReturn.SetFloat("_Glossiness", 0.0f);
+                            toReturn.SetFloat("_GlossMapScale", 0.0f);
+                            break;
+                        case ShaderSlot.NORMAL_MAP:
+                            toReturn.EnableKeyword("_NORMALMAP");
+                            toReturn.SetTexture("_BumpMap", availableTextures[i]);
+                            break;
+                    }
+                }
+
+                //Apply properties
+                for (int i = 0; i < Shader.Header.CSTCounts.Length; i++)
+                {
+                    using (BinaryReader cstReader = new BinaryReader(new MemoryStream(_levelContent.ModelsMTL.CSTData[i])))
+                    {
+                        int baseOffset = (InMaterial.ConstantBuffers[i].Offset * 4);
+
+                        if (CSTIndexValid(metadata.cstIndexes.Diffuse0, ref Shader, i))
+                        {
+                            Vector4 colour = LoadFromCST<Vector4>(cstReader, baseOffset + (Shader.CSTLinks[i][metadata.cstIndexes.Diffuse0] * 4));
+                            toReturn.SetColor("_Color", colour);
+                            //if (colour.w != 1)
+                            //{
+                            //    toReturn.SetFloat("_Mode", 1.0f);
+                            //    toReturn.EnableKeyword("_ALPHATEST_ON");
+                            //}
+                        }
+                        if (CSTIndexValid(metadata.cstIndexes.DiffuseMap0UVMultiplier, ref Shader, i))
+                        {
+                            float offset = LoadFromCST<float>(cstReader, baseOffset + (Shader.CSTLinks[i][metadata.cstIndexes.DiffuseMap0UVMultiplier] * 4));
+                            toReturn.SetTextureScale("_MainTex", new Vector2(offset, offset));
+                        }
+                        if (CSTIndexValid(metadata.cstIndexes.NormalMap0UVMultiplier, ref Shader, i))
+                        {
+                            float offset = LoadFromCST<float>(cstReader, baseOffset + (Shader.CSTLinks[i][metadata.cstIndexes.NormalMap0UVMultiplier] * 4));
+                            toReturn.SetTextureScale("_BumpMap", new Vector2(offset, offset));
+                            toReturn.SetFloat("_BumpScale", offset);
+                        }
+                        if (CSTIndexValid(metadata.cstIndexes.OcclusionMapUVMultiplier, ref Shader, i))
+                        {
+                            float offset = LoadFromCST<float>(cstReader, baseOffset + (Shader.CSTLinks[i][metadata.cstIndexes.OcclusionMapUVMultiplier] * 4));
+                            toReturn.SetTextureScale("_OcclusionMap", new Vector2(offset, offset));
+                        }
+                        if (CSTIndexValid(metadata.cstIndexes.SpecularMap0UVMultiplier, ref Shader, i))
+                        {
+                            float offset = LoadFromCST<float>(cstReader, baseOffset + (Shader.CSTLinks[i][metadata.cstIndexes.SpecularMap0UVMultiplier] * 4));
+                            toReturn.SetTextureScale("_MetallicGlossMap", new Vector2(offset, offset));
+                            toReturn.SetFloat("_GlossMapScale", offset);
+                        }
+                        if (CSTIndexValid(metadata.cstIndexes.SpecularFactor0, ref Shader, i))
+                        {
+                            float spec = LoadFromCST<float>(cstReader, baseOffset + (Shader.CSTLinks[i][metadata.cstIndexes.SpecularFactor0] * 4));
+                            toReturn.SetFloat("_Glossiness", spec);
+                            toReturn.SetFloat("_GlossMapScale", spec);
+                        }
+                    }
                 }
             }
-
-            //Apply materials
-            for (int i = 0; i < metadata.textures.Count; i++)
+            else
             {
-                if (i >= availableTextures.Count) continue;
-                switch (metadata.textures[i].Type)
+                for (int i = 0; i < Shader.Header.CSTCounts.Length; i++)
                 {
-                    case ShaderSlot.DIFFUSE_MAP:
-                        toReturn.SetTexture("_MainTex", availableTextures[i]);
-                        break;
-                    case ShaderSlot.DETAIL_MAP:
-                        toReturn.EnableKeyword("_DETAIL_MULX2");
-                        toReturn.SetTexture("_DetailMask", availableTextures[i]);
-                        break;
-                    case ShaderSlot.EMISSIVE:
-                        toReturn.EnableKeyword("_EMISSION");
-                        toReturn.SetTexture("_EmissionMap", availableTextures[i]);
-                        break;
-                    case ShaderSlot.PARALLAX_MAP:
-                        toReturn.EnableKeyword("_PARALLAXMAP");
-                        toReturn.SetTexture("_ParallaxMap", availableTextures[i]);
-                        break;
-                    case ShaderSlot.OCCLUSION:
-                        toReturn.SetTexture("_OcclusionMap", availableTextures[i]);
-                        break;
-                    case ShaderSlot.SPECULAR_MAP:
-                        toReturn.EnableKeyword("_METALLICGLOSSMAP");
-                        toReturn.SetTexture("_MetallicGlossMap", availableTextures[i]); //TODO _SPECGLOSSMAP?
-                        toReturn.SetFloat("_Glossiness", 0.0f);
-                        toReturn.SetFloat("_GlossMapScale", 0.0f);
-                        break;
-                    case ShaderSlot.NORMAL_MAP:
-                        toReturn.EnableKeyword("_NORMALMAP");
-                        toReturn.SetTexture("_BumpMap", availableTextures[i]);
-                        break;
-                }
-            }
+                    using (BinaryReader cstReader = new BinaryReader(new MemoryStream(_levelContent.ModelsMTL.CSTData[i])))
+                    {
+                        int baseOffset = (InMaterial.ConstantBuffers[i].Offset * 4);
 
-
-            //Apply properties
-            for (int i = 0; i < Shader.Header.CSTCounts.Length; i++)
-            {
-                using (BinaryReader cstReader = new BinaryReader(new MemoryStream(_levelContent.ModelsMTL.CSTData[i])))
-                {
-                    int baseOffset = (InMaterial.ConstantBuffers[i].Offset * 4);
-
-                    if (CSTIndexValid(metadata.cstIndexes.Diffuse0, ref Shader, i))
-                    {
-                        Vector4 colour = LoadFromCST<Vector4>(cstReader, baseOffset + (Shader.CSTLinks[i][metadata.cstIndexes.Diffuse0] * 4));
-                        toReturn.SetColor("_Color", colour);
-                        //if (colour.w != 1)
-                        //{
-                        //    toReturn.SetFloat("_Mode", 1.0f);
-                        //    toReturn.EnableKeyword("_ALPHATEST_ON");
-                        //}
-                    }
-                    if (CSTIndexValid(metadata.cstIndexes.DiffuseMap0UVMultiplier, ref Shader, i))
-                    {
-                        float offset = LoadFromCST<float>(cstReader, baseOffset + (Shader.CSTLinks[i][metadata.cstIndexes.DiffuseMap0UVMultiplier] * 4));
-                        toReturn.SetTextureScale("_MainTex", new Vector2(offset, offset));
-                    }
-                    if (CSTIndexValid(metadata.cstIndexes.NormalMap0UVMultiplier, ref Shader, i))
-                    {
-                        float offset = LoadFromCST<float>(cstReader, baseOffset + (Shader.CSTLinks[i][metadata.cstIndexes.NormalMap0UVMultiplier] * 4));
-                        toReturn.SetTextureScale("_BumpMap", new Vector2(offset, offset));
-                        toReturn.SetFloat("_BumpScale", offset);
-                    }
-                    if (CSTIndexValid(metadata.cstIndexes.OcclusionMapUVMultiplier, ref Shader, i))
-                    {
-                        float offset = LoadFromCST<float>(cstReader, baseOffset + (Shader.CSTLinks[i][metadata.cstIndexes.OcclusionMapUVMultiplier] * 4));
-                        toReturn.SetTextureScale("_OcclusionMap", new Vector2(offset, offset));
-                    }
-                    if (CSTIndexValid(metadata.cstIndexes.SpecularMap0UVMultiplier, ref Shader, i))
-                    {
-                        float offset = LoadFromCST<float>(cstReader, baseOffset + (Shader.CSTLinks[i][metadata.cstIndexes.SpecularMap0UVMultiplier] * 4));
-                        toReturn.SetTextureScale("_MetallicGlossMap", new Vector2(offset, offset));
-                        toReturn.SetFloat("_GlossMapScale", offset);
-                    }
-                    if (CSTIndexValid(metadata.cstIndexes.SpecularFactor0, ref Shader, i))
-                    {
-                        float spec = LoadFromCST<float>(cstReader, baseOffset + (Shader.CSTLinks[i][metadata.cstIndexes.SpecularFactor0] * 4));
-                        toReturn.SetFloat("_Glossiness", spec);
-                        toReturn.SetFloat("_GlossMapScale", spec);
+                        if (CSTIndexValid(metadata.cstIndexes.Diffuse0, ref Shader, i))
+                        {
+                            Vector4 colour = LoadFromCST<Vector4>(cstReader, baseOffset + (Shader.CSTLinks[i][metadata.cstIndexes.Diffuse0] * 4));
+                            toReturn.SetColor("_Color", colour);
+                            //if (colour.w != 1)
+                            //{
+                            //    toReturn.SetFloat("_Mode", 1.0f);
+                            //    toReturn.EnableKeyword("_ALPHATEST_ON");
+                            //}
+                        }
                     }
                 }
             }

@@ -33,7 +33,7 @@ public class AlienLevelLoader : MonoBehaviour
 
     private GameObject _loadedCompositeGO = null;
     private Composite _loadedComposite = null;
-    public string CompositeIDString => _loadedComposite == null || _loadedComposite.shortGUID.val == null ? "" : _loadedComposite.shortGUID.ToByteString();
+    public string CompositeIDString => _loadedComposite == null || _loadedComposite.shortGUID == ShortGuid.Invalid ? "" : _loadedComposite.shortGUID.ToByteString();
     public string CompositeName => _loadedComposite == null ? "" : _loadedComposite.name;
 
     private LevelContent _levelContent = null;
@@ -138,20 +138,20 @@ public class AlienLevelLoader : MonoBehaviour
 
         for (int i = 0; i < _levelContent.ModelsMVR.Entries.Count; i++)
         {
-            GameObject thisParent = new GameObject("MVR: " + i + "/" + _levelContent.ModelsMVR.Entries[i].renderableElementIndex + "/" + _levelContent.ModelsMVR.Entries[i].renderableElementCount);
+            GameObject thisParent = new GameObject("MVR: " + i + "/" + _levelContent.ModelsMVR.Entries[i].renderable_element_index + "/" + _levelContent.ModelsMVR.Entries[i].renderable_element_count);
             Matrix4x4 m = _levelContent.ModelsMVR.Entries[i].transform;
             thisParent.transform.position = m.GetColumn(3);
             thisParent.transform.rotation = Quaternion.LookRotation(m.GetColumn(2), m.GetColumn(1));
             thisParent.transform.localScale = new Vector3(m.GetColumn(0).magnitude, m.GetColumn(1).magnitude, m.GetColumn(2).magnitude);
             thisParent.transform.parent = _loadedCompositeGO.transform;
-            for (int x = 0; x < _levelContent.ModelsMVR.Entries[i].renderableElementCount; x++)
+            for (int x = 0; x < _levelContent.ModelsMVR.Entries[i].renderable_element_count; x++)
             {
-                RenderableElements.Element RenderableElement = _levelContent.RenderableREDS.Entries[(int)_levelContent.ModelsMVR.Entries[i].renderableElementIndex + x];
+                RenderableElements.Element RenderableElement = _levelContent.RenderableREDS.Entries[(int)_levelContent.ModelsMVR.Entries[i].renderable_element_index + x];
                 MeshRenderer renderer = SpawnModel(RenderableElement.ModelIndex, RenderableElement.MaterialIndex, thisParent);
-                if (renderer != null && _levelContent.ModelsMVR.Entries[i].environmentMapIndex != -1)
+                if (renderer != null && _levelContent.ModelsMVR.Entries[i].environment_map_index != -1)
                 {
                     renderer.reflectionProbeUsage = UnityEngine.Rendering.ReflectionProbeUsage.BlendProbes;
-                    int index = _levelContent.EnvironmentMap.Entries[_levelContent.ModelsMVR.Entries[i].environmentMapIndex].EnvMapIndex;
+                    int index = _levelContent.EnvironmentMap.Entries[_levelContent.ModelsMVR.Entries[i].environment_map_index].EnvMapIndex;
                     if (index != -1)
                         renderer.probeAnchor = _envMaps[index]?.transform;
                 }
@@ -178,8 +178,9 @@ public class AlienLevelLoader : MonoBehaviour
         List<AliasEntity> trimmedAliases = new List<AliasEntity>();
         for (int i = 0; i < aliases.Count; i++)
         {
-            aliases[i].alias.path.RemoveAt(0);
-            if (aliases[i].alias.path.Count != 0)
+            List<ShortGuid> path = aliases[i].alias.path.ToList();
+            path.RemoveAt(0);
+            if (path.Count != 0)
                 trimmedAliases.Add(aliases[i]);
         }
         trimmedAliases.AddRange(composite.aliases);
@@ -199,7 +200,7 @@ public class AlienLevelLoader : MonoBehaviour
 
                     //Work out our position, accounting for overrides
                     Vector3 position, rotation;
-                    AliasEntity ovrride = trimmedAliases.FirstOrDefault(o => o.alias.path.Count == (o.alias.path[o.alias.path.Count - 1] == ShortGuid.Invalid ? 2 : 1) && o.alias.path[0] == function.shortGUID);
+                    AliasEntity ovrride = trimmedAliases.FirstOrDefault(o => o.alias.path.Length == (o.alias.path[o.alias.path.Length - 1] == ShortGuid.Invalid ? 2 : 1) && o.alias.path[0] == function.shortGUID);
                     if (!GetEntityTransform(ovrride, out position, out rotation))
                         GetEntityTransform(function, out position, out rotation);
 
@@ -213,7 +214,7 @@ public class AlienLevelLoader : MonoBehaviour
             {
                 //Work out our position, accounting for overrides
                 Vector3 position, rotation;
-                AliasEntity ovrride = trimmedAliases.FirstOrDefault(o => o.alias.path.Count == 1 && o.alias.path[0] == function.shortGUID);
+                AliasEntity ovrride = trimmedAliases.FirstOrDefault(o => o.alias.path.Length == 1 && o.alias.path[0] == function.shortGUID);
                 if (!GetEntityTransform(ovrride, out position, out rotation))
                     GetEntityTransform(function, out position, out rotation);
 
@@ -233,7 +234,7 @@ public class AlienLevelLoader : MonoBehaviour
                                 for (int i = 0; i < resourceRef.count; i++)
                                 {
                                     RenderableElements.Element renderable = _levelContent.RenderableREDS.Entries[resourceRef.index + i];
-                                    switch (resourceRef.entryType)
+                                    switch (resourceRef.resource_type)
                                     {
                                         case ResourceType.RENDERABLE_INSTANCE:
                                             SpawnModel(renderable.ModelIndex, renderable.MaterialIndex, nodeModel);
@@ -439,13 +440,13 @@ public class AlienLevelLoader : MonoBehaviour
         if (!_materials.ContainsKey(MTLIndex))
         {
             Materials.Material InMaterial = _levelContent.ModelsMTL.GetAtWriteIndex(MTLIndex);
-            int RemappedIndex = _levelContent.ShadersIDXRemap.Datas[InMaterial.UberShaderIndex].Index;
+            int RemappedIndex = _levelContent.ShadersIDXRemap.Datas[InMaterial.ShaderIndex].Index;
             ShadersPAK.ShaderEntry Shader = _levelContent.ShadersPAK.Shaders[RemappedIndex];
 
             Material toReturn = new Material(UnityEngine.Shader.Find("Standard"));
             toReturn.name = InMaterial.Name;
 
-            ShaderMaterialMetadata metadata = _levelContent.ShadersPAK.GetMaterialMetadataFromShader(InMaterial, _levelContent.ShadersIDXRemap);
+            ShaderMaterialMetadata metadata = _levelContent.ShadersPAK.GetMaterialMetadataFromShader(InMaterial);
 
             switch (metadata.shaderCategory)
             {
@@ -636,7 +637,7 @@ public class LevelContent
                     CollisionMap = new CollisionMaps(worldPath + "COLLISION.MAP");
                     break;
                 case 7:
-                    EnvironmentAnimation = new EnvironmentAnimations(worldPath + "ENVIRONMENT_ANIMATION.DAT");
+                    //EnvironmentAnimation = new EnvironmentAnimations(worldPath + "ENVIRONMENT_ANIMATION.DAT");
                     break;
                 case 8:
                     ModelsCST = File.ReadAllBytes(renderablePath + "LEVEL_MODELS.CST");
@@ -667,7 +668,7 @@ public class LevelContent
     public PhysicsMaps PhysicsMap;
     public EnvironmentMaps EnvironmentMap;
     public CollisionMaps CollisionMap;
-    public EnvironmentAnimations EnvironmentAnimation;
+    //public EnvironmentAnimations EnvironmentAnimation;
     public byte[] ModelsCST;
     public Materials ModelsMTL;
     public Models ModelsPAK;

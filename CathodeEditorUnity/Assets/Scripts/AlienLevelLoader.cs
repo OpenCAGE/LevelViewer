@@ -8,7 +8,6 @@ using static CATHODE.LEGACY.ShadersPAK;
 using System.Threading.Tasks;
 using CATHODE.Scripting;
 using System.Linq;
-using UnityEditor.Experimental.GraphView;
 using CATHODE.Scripting.Internal;
 using UnityEngine.UIElements;
 using System;
@@ -64,12 +63,14 @@ public class AlienLevelLoader : MonoBehaviour
 
         yield return new WaitForEndOfFrame();
 
+#if UNITY_EDITOR
         try
         {
             SceneView.FocusWindowIfItsOpen(typeof(SceneView));
             EditorWindow.GetWindow(typeof(EditorWindow).Assembly.GetType("UnityEditor.GameView")).Close();
         }
         catch { }
+#endif
     }
 
     private void ResetLevel()
@@ -124,7 +125,9 @@ public class AlienLevelLoader : MonoBehaviour
         if (_loadedCompositeGO != null)
             Destroy(_loadedCompositeGO);
         _loadedCompositeGO = new GameObject(_levelName);
+#if UNITY_EDITOR
         Selection.activeGameObject = _loadedCompositeGO;
+#endif
 
         Composite comp = _levelContent.CommandsPAK.GetComposite(guid);
         Debug.Log("Loading composite " + comp?.name + "...");
@@ -137,7 +140,9 @@ public class AlienLevelLoader : MonoBehaviour
     private void LoadMVR()
     {
         _loadedCompositeGO = new GameObject(_levelName);
+#if UNITY_EDITOR
         Selection.activeGameObject = _loadedCompositeGO;
+#endif
 
         for (int i = 0; i < _levelContent.ModelsMVR.Entries.Count; i++)
         {
@@ -278,6 +283,7 @@ public class AlienLevelLoader : MonoBehaviour
     private GameObject _prevSelection = null;
     private void Update()
     {
+#if UNITY_EDITOR
         if (_prevSelection != Selection.activeGameObject)
         {
             if (Selection.activeGameObject != null)
@@ -290,6 +296,7 @@ public class AlienLevelLoader : MonoBehaviour
             }
             _prevSelection = Selection.activeGameObject;
         }
+#endif
     }
 
     #region Asset Handlers

@@ -1,4 +1,4 @@
-# Alien: Isolation Level Editor
+# Alien: Isolation Level Viewer
 
 <img src="https://i.imgur.com/Cw2GbgO.png" width="100%">
 

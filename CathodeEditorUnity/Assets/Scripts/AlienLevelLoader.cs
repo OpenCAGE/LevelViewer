@@ -163,6 +163,16 @@ public class AlienLevelLoader : MonoBehaviour
                     if (index != -1)
                         renderer.probeAnchor = _envMaps[index]?.transform;
                 }
+                else
+                {
+                    renderer.reflectionProbeUsage = UnityEngine.Rendering.ReflectionProbeUsage.Off;
+                    renderer.lightProbeUsage = UnityEngine.Rendering.LightProbeUsage.Off;
+                }
+                if (renderer != null)
+                {
+                    renderer.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+                    renderer.receiveShadows = false;
+                }
             }
         }
 
@@ -245,7 +255,17 @@ public class AlienLevelLoader : MonoBehaviour
                                     switch (resourceRef.resource_type)
                                     {
                                         case ResourceType.RENDERABLE_INSTANCE:
-                                            SpawnModel(renderable.ModelIndex, renderable.MaterialIndex, nodeModel);
+                                            MeshRenderer renderer = SpawnModel(renderable.ModelIndex, renderable.MaterialIndex, nodeModel);
+                                            if (!_useAdvancedMaterials && renderer != null)
+                                            {
+                                                renderer.reflectionProbeUsage = UnityEngine.Rendering.ReflectionProbeUsage.Off;
+                                                renderer.lightProbeUsage = UnityEngine.Rendering.LightProbeUsage.Off;
+                                            }
+                                            if (renderer != null)
+                                            {
+                                                renderer.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+                                                renderer.receiveShadows = false;
+                                            }
                                             break;
                                         case ResourceType.COLLISION_MAPPING:
                                             break;

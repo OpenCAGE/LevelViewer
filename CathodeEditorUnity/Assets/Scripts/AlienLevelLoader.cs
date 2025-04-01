@@ -8,7 +8,6 @@ using static CATHODE.LEGACY.ShadersPAK;
 using System.Threading.Tasks;
 using CATHODE.Scripting;
 using System.Linq;
-using UnityEditor.Experimental.GraphView;
 using CATHODE.Scripting.Internal;
 using UnityEngine.UIElements;
 using System;
@@ -26,6 +25,9 @@ public class AlienLevelLoader : MonoBehaviour
     [Tooltip("Enable this to include objects in the scene that are of an unsupported material type (they will still be inactive by default).")]
     [SerializeField] private bool _populateObjectsWithUnsupportedMaterials = false;
 
+    [Tooltip("Enable additional material data: this may not look correct, so it's optional.")]
+    [SerializeField] private bool _useAdvancedMaterials = false;
+
     public Action OnLoaded;
 
     private string _levelName = "";
@@ -33,7 +35,7 @@ public class AlienLevelLoader : MonoBehaviour
 
     private GameObject _loadedCompositeGO = null;
     private Composite _loadedComposite = null;
-    public string CompositeIDString => _loadedComposite == null || _loadedComposite.shortGUID.val == null ? "" : _loadedComposite.shortGUID.ToByteString();
+    public string CompositeIDString => _loadedComposite == null || _loadedComposite.shortGUID == ShortGuid.Invalid ? "" : _loadedComposite.shortGUID.ToByteString();
     public string CompositeName => _loadedComposite == null ? "" : _loadedComposite.name;
 
     private LevelContent _levelContent = null;
@@ -61,12 +63,14 @@ public class AlienLevelLoader : MonoBehaviour
 
         yield return new WaitForEndOfFrame();
 
+#if UNITY_EDITOR
         try
         {
             SceneView.FocusWindowIfItsOpen(typeof(SceneView));
             EditorWindow.GetWindow(typeof(EditorWindow).Assembly.GetType("UnityEditor.GameView")).Close();
         }
         catch { }
+#endif
     }
 
     private void ResetLevel()
@@ -121,7 +125,9 @@ public class AlienLevelLoader : MonoBehaviour
         if (_loadedCompositeGO != null)
             Destroy(_loadedCompositeGO);
         _loadedCompositeGO = new GameObject(_levelName);
+#if UNITY_EDITOR
         Selection.activeGameObject = _loadedCompositeGO;
+#endif
 
         Composite comp = _levelContent.CommandsPAK.GetComposite(guid);
         Debug.Log("Loading composite " + comp?.name + "...");
@@ -134,26 +140,38 @@ public class AlienLevelLoader : MonoBehaviour
     private void LoadMVR()
     {
         _loadedCompositeGO = new GameObject(_levelName);
+#if UNITY_EDITOR
         Selection.activeGameObject = _loadedCompositeGO;
+#endif
 
         for (int i = 0; i < _levelContent.ModelsMVR.Entries.Count; i++)
         {
-            GameObject thisParent = new GameObject("MVR: " + i + "/" + _levelContent.ModelsMVR.Entries[i].renderableElementIndex + "/" + _levelContent.ModelsMVR.Entries[i].renderableElementCount);
+            GameObject thisParent = new GameObject("MVR: " + i + "/" + _levelContent.ModelsMVR.Entries[i].renderable_element_index + "/" + _levelContent.ModelsMVR.Entries[i].renderable_element_count);
             Matrix4x4 m = _levelContent.ModelsMVR.Entries[i].transform;
             thisParent.transform.position = m.GetColumn(3);
             thisParent.transform.rotation = Quaternion.LookRotation(m.GetColumn(2), m.GetColumn(1));
             thisParent.transform.localScale = new Vector3(m.GetColumn(0).magnitude, m.GetColumn(1).magnitude, m.GetColumn(2).magnitude);
             thisParent.transform.parent = _loadedCompositeGO.transform;
-            for (int x = 0; x < _levelContent.ModelsMVR.Entries[i].renderableElementCount; x++)
+            for (int x = 0; x < _levelContent.ModelsMVR.Entries[i].renderable_element_count; x++)
             {
-                RenderableElements.Element RenderableElement = _levelContent.RenderableREDS.Entries[(int)_levelContent.ModelsMVR.Entries[i].renderableElementIndex + x];
+                RenderableElements.Element RenderableElement = _levelContent.RenderableREDS.Entries[(int)_levelContent.ModelsMVR.Entries[i].renderable_element_index + x];
                 MeshRenderer renderer = SpawnModel(RenderableElement.ModelIndex, RenderableElement.MaterialIndex, thisParent);
-                if (renderer != null && _levelContent.ModelsMVR.Entries[i].environmentMapIndex != -1)
+                if (_useAdvancedMaterials && renderer != null && _levelContent.ModelsMVR.Entries[i].environment_map_index != -1)
                 {
                     renderer.reflectionProbeUsage = UnityEngine.Rendering.ReflectionProbeUsage.BlendProbes;
-                    int index = _levelContent.EnvironmentMap.Entries[_levelContent.ModelsMVR.Entries[i].environmentMapIndex].EnvMapIndex;
+                    int index = _levelContent.EnvironmentMap.Entries[_levelContent.ModelsMVR.Entries[i].environment_map_index].EnvMapIndex;
                     if (index != -1)
                         renderer.probeAnchor = _envMaps[index]?.transform;
+                }
+                else
+                {
+                    renderer.reflectionProbeUsage = UnityEngine.Rendering.ReflectionProbeUsage.Off;
+                    renderer.lightProbeUsage = UnityEngine.Rendering.LightProbeUsage.Off;
+                }
+                if (renderer != null)
+                {
+                    renderer.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+                    renderer.receiveShadows = false;
                 }
             }
         }
@@ -178,8 +196,9 @@ public class AlienLevelLoader : MonoBehaviour
         List<AliasEntity> trimmedAliases = new List<AliasEntity>();
         for (int i = 0; i < aliases.Count; i++)
         {
-            aliases[i].alias.path.RemoveAt(0);
-            if (aliases[i].alias.path.Count != 0)
+            List<ShortGuid> path = aliases[i].alias.path.ToList();
+            path.RemoveAt(0);
+            if (path.Count != 0)
                 trimmedAliases.Add(aliases[i]);
         }
         trimmedAliases.AddRange(composite.aliases);
@@ -199,7 +218,7 @@ public class AlienLevelLoader : MonoBehaviour
 
                     //Work out our position, accounting for overrides
                     Vector3 position, rotation;
-                    AliasEntity ovrride = trimmedAliases.FirstOrDefault(o => o.alias.path.Count == (o.alias.path[o.alias.path.Count - 1] == ShortGuid.Invalid ? 2 : 1) && o.alias.path[0] == function.shortGUID);
+                    AliasEntity ovrride = trimmedAliases.FirstOrDefault(o => o.alias.path.Length == (o.alias.path[o.alias.path.Length - 1] == ShortGuid.Invalid ? 2 : 1) && o.alias.path[0] == function.shortGUID);
                     if (!GetEntityTransform(ovrride, out position, out rotation))
                         GetEntityTransform(function, out position, out rotation);
 
@@ -213,7 +232,7 @@ public class AlienLevelLoader : MonoBehaviour
             {
                 //Work out our position, accounting for overrides
                 Vector3 position, rotation;
-                AliasEntity ovrride = trimmedAliases.FirstOrDefault(o => o.alias.path.Count == 1 && o.alias.path[0] == function.shortGUID);
+                AliasEntity ovrride = trimmedAliases.FirstOrDefault(o => o.alias.path.Length == 1 && o.alias.path[0] == function.shortGUID);
                 if (!GetEntityTransform(ovrride, out position, out rotation))
                     GetEntityTransform(function, out position, out rotation);
 
@@ -233,10 +252,20 @@ public class AlienLevelLoader : MonoBehaviour
                                 for (int i = 0; i < resourceRef.count; i++)
                                 {
                                     RenderableElements.Element renderable = _levelContent.RenderableREDS.Entries[resourceRef.index + i];
-                                    switch (resourceRef.entryType)
+                                    switch (resourceRef.resource_type)
                                     {
                                         case ResourceType.RENDERABLE_INSTANCE:
-                                            SpawnModel(renderable.ModelIndex, renderable.MaterialIndex, nodeModel);
+                                            MeshRenderer renderer = SpawnModel(renderable.ModelIndex, renderable.MaterialIndex, nodeModel);
+                                            if (!_useAdvancedMaterials && renderer != null)
+                                            {
+                                                renderer.reflectionProbeUsage = UnityEngine.Rendering.ReflectionProbeUsage.Off;
+                                                renderer.lightProbeUsage = UnityEngine.Rendering.LightProbeUsage.Off;
+                                            }
+                                            if (renderer != null)
+                                            {
+                                                renderer.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+                                                renderer.receiveShadows = false;
+                                            }
                                             break;
                                         case ResourceType.COLLISION_MAPPING:
                                             break;
@@ -274,6 +303,7 @@ public class AlienLevelLoader : MonoBehaviour
     private GameObject _prevSelection = null;
     private void Update()
     {
+#if UNITY_EDITOR
         if (_prevSelection != Selection.activeGameObject)
         {
             if (Selection.activeGameObject != null)
@@ -286,6 +316,7 @@ public class AlienLevelLoader : MonoBehaviour
             }
             _prevSelection = Selection.activeGameObject;
         }
+#endif
     }
 
     #region Asset Handlers
@@ -439,13 +470,13 @@ public class AlienLevelLoader : MonoBehaviour
         if (!_materials.ContainsKey(MTLIndex))
         {
             Materials.Material InMaterial = _levelContent.ModelsMTL.GetAtWriteIndex(MTLIndex);
-            int RemappedIndex = _levelContent.ShadersIDXRemap.Datas[InMaterial.UberShaderIndex].Index;
+            int RemappedIndex = _levelContent.ShadersIDXRemap.Datas[InMaterial.ShaderIndex].Index;
             ShadersPAK.ShaderEntry Shader = _levelContent.ShadersPAK.Shaders[RemappedIndex];
 
             Material toReturn = new Material(UnityEngine.Shader.Find("Standard"));
             toReturn.name = InMaterial.Name;
 
-            ShaderMaterialMetadata metadata = _levelContent.ShadersPAK.GetMaterialMetadataFromShader(InMaterial, _levelContent.ShadersIDXRemap);
+            ShaderMaterialMetadata metadata = _levelContent.ShadersPAK.GetMaterialMetadataFromShader(InMaterial);
 
             switch (metadata.shaderCategory)
             {
@@ -466,104 +497,127 @@ public class AlienLevelLoader : MonoBehaviour
             }
             toReturn.name += " " + metadata.shaderCategory.ToString();
 
-            List<Texture2D> availableTextures = new List<Texture2D>();
-            for (int SlotIndex = 0; SlotIndex < Shader.Header.TextureLinkCount; ++SlotIndex)
+            if (_useAdvancedMaterials)
             {
-                int PairIndex = Shader.TextureLinks[SlotIndex];
-                // NOTE: PairIndex == 255 means no index.
-                if (PairIndex < InMaterial.TextureReferences.Length)
+                List<Texture2D> availableTextures = new List<Texture2D>();
+                for (int SlotIndex = 0; SlotIndex < Shader.Header.TextureLinkCount; ++SlotIndex)
                 {
-                    Materials.Material.Texture Pair = InMaterial.TextureReferences[PairIndex];
-                    availableTextures.Add(Pair.BinIndex == -1 ? null : GetTexture(Pair.BinIndex, Pair.Source == Materials.Material.Texture.TextureSource.GLOBAL));
+                    int PairIndex = Shader.TextureLinks[SlotIndex];
+                    // NOTE: PairIndex == 255 means no index.
+                    if (PairIndex < InMaterial.TextureReferences.Length)
+                    {
+                        Materials.Material.Texture Pair = InMaterial.TextureReferences[PairIndex];
+                        availableTextures.Add(Pair.BinIndex == -1 ? null : GetTexture(Pair.BinIndex, Pair.Source == Materials.Material.Texture.TextureSource.GLOBAL));
+                    }
+                    else
+                    {
+                        availableTextures.Add(null);
+                    }
                 }
-                else
+
+                //Apply materials
+                for (int i = 0; i < metadata.textures.Count; i++)
                 {
-                    availableTextures.Add(null);
+                    if (i >= availableTextures.Count) continue;
+                    switch (metadata.textures[i].Type)
+                    {
+                        case ShaderSlot.DIFFUSE_MAP:
+                            toReturn.SetTexture("_MainTex", availableTextures[i]);
+                            break;
+                        case ShaderSlot.DETAIL_MAP:
+                            toReturn.EnableKeyword("_DETAIL_MULX2");
+                            toReturn.SetTexture("_DetailMask", availableTextures[i]);
+                            break;
+                        case ShaderSlot.EMISSIVE:
+                            toReturn.EnableKeyword("_EMISSION");
+                            toReturn.SetTexture("_EmissionMap", availableTextures[i]);
+                            break;
+                        case ShaderSlot.PARALLAX_MAP:
+                            toReturn.EnableKeyword("_PARALLAXMAP");
+                            toReturn.SetTexture("_ParallaxMap", availableTextures[i]);
+                            break;
+                        case ShaderSlot.OCCLUSION:
+                            toReturn.SetTexture("_OcclusionMap", availableTextures[i]);
+                            break;
+                        case ShaderSlot.SPECULAR_MAP:
+                            toReturn.EnableKeyword("_METALLICGLOSSMAP");
+                            toReturn.SetTexture("_MetallicGlossMap", availableTextures[i]); //TODO _SPECGLOSSMAP?
+                            toReturn.SetFloat("_Glossiness", 0.0f);
+                            toReturn.SetFloat("_GlossMapScale", 0.0f);
+                            break;
+                        case ShaderSlot.NORMAL_MAP:
+                            toReturn.EnableKeyword("_NORMALMAP");
+                            toReturn.SetTexture("_BumpMap", availableTextures[i]);
+                            break;
+                    }
+                }
+
+                //Apply properties
+                for (int i = 0; i < Shader.Header.CSTCounts.Length; i++)
+                {
+                    using (BinaryReader cstReader = new BinaryReader(new MemoryStream(_levelContent.ModelsMTL.CSTData[i])))
+                    {
+                        int baseOffset = (InMaterial.ConstantBuffers[i].Offset * 4);
+
+                        if (CSTIndexValid(metadata.cstIndexes.Diffuse0, ref Shader, i))
+                        {
+                            Vector4 colour = LoadFromCST<Vector4>(cstReader, baseOffset + (Shader.CSTLinks[i][metadata.cstIndexes.Diffuse0] * 4));
+                            toReturn.SetColor("_Color", colour);
+                            //if (colour.w != 1)
+                            //{
+                            //    toReturn.SetFloat("_Mode", 1.0f);
+                            //    toReturn.EnableKeyword("_ALPHATEST_ON");
+                            //}
+                        }
+                        if (CSTIndexValid(metadata.cstIndexes.DiffuseMap0UVMultiplier, ref Shader, i))
+                        {
+                            float offset = LoadFromCST<float>(cstReader, baseOffset + (Shader.CSTLinks[i][metadata.cstIndexes.DiffuseMap0UVMultiplier] * 4));
+                            toReturn.SetTextureScale("_MainTex", new Vector2(offset, offset));
+                        }
+                        if (CSTIndexValid(metadata.cstIndexes.NormalMap0UVMultiplier, ref Shader, i))
+                        {
+                            float offset = LoadFromCST<float>(cstReader, baseOffset + (Shader.CSTLinks[i][metadata.cstIndexes.NormalMap0UVMultiplier] * 4));
+                            toReturn.SetTextureScale("_BumpMap", new Vector2(offset, offset));
+                            toReturn.SetFloat("_BumpScale", offset);
+                        }
+                        if (CSTIndexValid(metadata.cstIndexes.OcclusionMapUVMultiplier, ref Shader, i))
+                        {
+                            float offset = LoadFromCST<float>(cstReader, baseOffset + (Shader.CSTLinks[i][metadata.cstIndexes.OcclusionMapUVMultiplier] * 4));
+                            toReturn.SetTextureScale("_OcclusionMap", new Vector2(offset, offset));
+                        }
+                        if (CSTIndexValid(metadata.cstIndexes.SpecularMap0UVMultiplier, ref Shader, i))
+                        {
+                            float offset = LoadFromCST<float>(cstReader, baseOffset + (Shader.CSTLinks[i][metadata.cstIndexes.SpecularMap0UVMultiplier] * 4));
+                            toReturn.SetTextureScale("_MetallicGlossMap", new Vector2(offset, offset));
+                            toReturn.SetFloat("_GlossMapScale", offset);
+                        }
+                        if (CSTIndexValid(metadata.cstIndexes.SpecularFactor0, ref Shader, i))
+                        {
+                            float spec = LoadFromCST<float>(cstReader, baseOffset + (Shader.CSTLinks[i][metadata.cstIndexes.SpecularFactor0] * 4));
+                            toReturn.SetFloat("_Glossiness", spec);
+                            toReturn.SetFloat("_GlossMapScale", spec);
+                        }
+                    }
                 }
             }
-
-            //Apply materials
-            for (int i = 0; i < metadata.textures.Count; i++)
+            else
             {
-                if (i >= availableTextures.Count) continue;
-                switch (metadata.textures[i].Type)
+                for (int i = 0; i < Shader.Header.CSTCounts.Length; i++)
                 {
-                    case ShaderSlot.DIFFUSE_MAP:
-                        toReturn.SetTexture("_MainTex", availableTextures[i]);
-                        break;
-                    case ShaderSlot.DETAIL_MAP:
-                        toReturn.EnableKeyword("_DETAIL_MULX2");
-                        toReturn.SetTexture("_DetailMask", availableTextures[i]);
-                        break;
-                    case ShaderSlot.EMISSIVE:
-                        toReturn.EnableKeyword("_EMISSION");
-                        toReturn.SetTexture("_EmissionMap", availableTextures[i]);
-                        break;
-                    case ShaderSlot.PARALLAX_MAP:
-                        toReturn.EnableKeyword("_PARALLAXMAP");
-                        toReturn.SetTexture("_ParallaxMap", availableTextures[i]);
-                        break;
-                    case ShaderSlot.OCCLUSION:
-                        toReturn.SetTexture("_OcclusionMap", availableTextures[i]);
-                        break;
-                    case ShaderSlot.SPECULAR_MAP:
-                        toReturn.EnableKeyword("_METALLICGLOSSMAP");
-                        toReturn.SetTexture("_MetallicGlossMap", availableTextures[i]); //TODO _SPECGLOSSMAP?
-                        toReturn.SetFloat("_Glossiness", 0.0f);
-                        toReturn.SetFloat("_GlossMapScale", 0.0f);
-                        break;
-                    case ShaderSlot.NORMAL_MAP:
-                        toReturn.EnableKeyword("_NORMALMAP");
-                        toReturn.SetTexture("_BumpMap", availableTextures[i]);
-                        break;
-                }
-            }
+                    using (BinaryReader cstReader = new BinaryReader(new MemoryStream(_levelContent.ModelsMTL.CSTData[i])))
+                    {
+                        int baseOffset = (InMaterial.ConstantBuffers[i].Offset * 4);
 
-
-            //Apply properties
-            for (int i = 0; i < Shader.Header.CSTCounts.Length; i++)
-            {
-                using (BinaryReader cstReader = new BinaryReader(new MemoryStream(_levelContent.ModelsMTL.CSTData[i])))
-                {
-                    int baseOffset = (InMaterial.ConstantBuffers[i].Offset * 4);
-
-                    if (CSTIndexValid(metadata.cstIndexes.Diffuse0, ref Shader, i))
-                    {
-                        Vector4 colour = LoadFromCST<Vector4>(cstReader, baseOffset + (Shader.CSTLinks[i][metadata.cstIndexes.Diffuse0] * 4));
-                        toReturn.SetColor("_Color", colour);
-                        //if (colour.w != 1)
-                        //{
-                        //    toReturn.SetFloat("_Mode", 1.0f);
-                        //    toReturn.EnableKeyword("_ALPHATEST_ON");
-                        //}
-                    }
-                    if (CSTIndexValid(metadata.cstIndexes.DiffuseMap0UVMultiplier, ref Shader, i))
-                    {
-                        float offset = LoadFromCST<float>(cstReader, baseOffset + (Shader.CSTLinks[i][metadata.cstIndexes.DiffuseMap0UVMultiplier] * 4));
-                        toReturn.SetTextureScale("_MainTex", new Vector2(offset, offset));
-                    }
-                    if (CSTIndexValid(metadata.cstIndexes.NormalMap0UVMultiplier, ref Shader, i))
-                    {
-                        float offset = LoadFromCST<float>(cstReader, baseOffset + (Shader.CSTLinks[i][metadata.cstIndexes.NormalMap0UVMultiplier] * 4));
-                        toReturn.SetTextureScale("_BumpMap", new Vector2(offset, offset));
-                        toReturn.SetFloat("_BumpScale", offset);
-                    }
-                    if (CSTIndexValid(metadata.cstIndexes.OcclusionMapUVMultiplier, ref Shader, i))
-                    {
-                        float offset = LoadFromCST<float>(cstReader, baseOffset + (Shader.CSTLinks[i][metadata.cstIndexes.OcclusionMapUVMultiplier] * 4));
-                        toReturn.SetTextureScale("_OcclusionMap", new Vector2(offset, offset));
-                    }
-                    if (CSTIndexValid(metadata.cstIndexes.SpecularMap0UVMultiplier, ref Shader, i))
-                    {
-                        float offset = LoadFromCST<float>(cstReader, baseOffset + (Shader.CSTLinks[i][metadata.cstIndexes.SpecularMap0UVMultiplier] * 4));
-                        toReturn.SetTextureScale("_MetallicGlossMap", new Vector2(offset, offset));
-                        toReturn.SetFloat("_GlossMapScale", offset);
-                    }
-                    if (CSTIndexValid(metadata.cstIndexes.SpecularFactor0, ref Shader, i))
-                    {
-                        float spec = LoadFromCST<float>(cstReader, baseOffset + (Shader.CSTLinks[i][metadata.cstIndexes.SpecularFactor0] * 4));
-                        toReturn.SetFloat("_Glossiness", spec);
-                        toReturn.SetFloat("_GlossMapScale", spec);
+                        if (CSTIndexValid(metadata.cstIndexes.Diffuse0, ref Shader, i))
+                        {
+                            Vector4 colour = LoadFromCST<Vector4>(cstReader, baseOffset + (Shader.CSTLinks[i][metadata.cstIndexes.Diffuse0] * 4));
+                            toReturn.SetColor("_Color", colour);
+                            //if (colour.w != 1)
+                            //{
+                            //    toReturn.SetFloat("_Mode", 1.0f);
+                            //    toReturn.EnableKeyword("_ALPHATEST_ON");
+                            //}
+                        }
                     }
                 }
             }
@@ -636,7 +690,7 @@ public class LevelContent
                     CollisionMap = new CollisionMaps(worldPath + "COLLISION.MAP");
                     break;
                 case 7:
-                    EnvironmentAnimation = new EnvironmentAnimations(worldPath + "ENVIRONMENT_ANIMATION.DAT");
+                    //EnvironmentAnimation = new EnvironmentAnimations(worldPath + "ENVIRONMENT_ANIMATION.DAT");
                     break;
                 case 8:
                     ModelsCST = File.ReadAllBytes(renderablePath + "LEVEL_MODELS.CST");
@@ -667,7 +721,7 @@ public class LevelContent
     public PhysicsMaps PhysicsMap;
     public EnvironmentMaps EnvironmentMap;
     public CollisionMaps CollisionMap;
-    public EnvironmentAnimations EnvironmentAnimation;
+    //public EnvironmentAnimations EnvironmentAnimation;
     public byte[] ModelsCST;
     public Materials ModelsMTL;
     public Models ModelsPAK;

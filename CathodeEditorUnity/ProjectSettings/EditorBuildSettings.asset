@@ -8,16 +8,4 @@ EditorBuildSettings:
   - enabled: 1
     path: Assets/Scene.unity
     guid: fb6f1c497c254f346ac26080dedd611a
-  - enabled: 0
-    path: Assets/Scenes/TextureEditor.unity
-    guid: b8221448373b29945a9e23f1a7212086
-  - enabled: 0
-    path: Assets/Scenes/LevelSelect.unity
-    guid: c6151b59f56a4d548882f290357a4f28
-  - enabled: 0
-    path: Assets/Scenes/Loadscreen.unity
-    guid: 28c1a44a8339e30469fac4a1b39e40f5
-  - enabled: 0
-    path: Assets/Scenes/LevelLoader.unity
-    guid: 9fc0d4010bbf28b4594072e72b8655ab
   m_configObjects: {}

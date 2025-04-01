@@ -4,7 +4,6 @@ using System.Collections;
 using System.Collections.Generic;
 using System.Threading;
 using UnityEditor;
-using UnityEditor.PackageManager;
 using UnityEngine;
 using WebSocketSharp;
 using System.Numerics;
@@ -59,7 +58,9 @@ public class WebsocketClient : MonoBehaviour
             //Camera.main.transform.position = camPositionUnity - new UnityEngine.Vector3(0, 1, 0);
             //Camera.main.transform.LookAt(camPositionUnity);
             this.transform.position = camPositionUnity;
+#if UNITY_EDITOR
             Selection.activeGameObject = this.gameObject;
+#endif
             StartCoroutine(FocusDelayed());
             shouldRepositionCam = false;
         }
@@ -67,7 +68,9 @@ public class WebsocketClient : MonoBehaviour
         {
             List<UnityEngine.Object> objs = new List<UnityEngine.Object>(redsIndex.Length);
             for (int i = 0; i < redsIndex.Length; i++) objs.Add(GameObject.Find(levelToLoad).transform.GetChild(redsIndex[i]));
+#if UNITY_EDITOR
             Selection.objects = objs.ToArray();
+#endif
             StartCoroutine(FocusDelayed());
             shouldFocusOnReds = false;
         }
@@ -82,7 +85,9 @@ public class WebsocketClient : MonoBehaviour
 
     private void OnDrawGizmos()
     {
+#if UNITY_EDITOR
         Handles.Label(this.transform.position, labelToShow);
+#endif
     }
 
     private void OnMessage(object sender, MessageEventArgs e)

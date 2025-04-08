@@ -75,7 +75,7 @@ public class Startup
     {
         if (!EditorApplication.isPlaying)
         {
-            EditorApplication.EnterPlaymode();
+            //EditorApplication.EnterPlaymode();
             return;
         }
 

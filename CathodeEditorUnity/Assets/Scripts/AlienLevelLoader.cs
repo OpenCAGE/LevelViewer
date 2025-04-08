@@ -18,16 +18,6 @@ using System.Collections;
 
 public class AlienLevelLoader : MonoBehaviour
 {
-    //Support soon for combined Commands and Mover - but for now, lets let people toggle 
-    [Tooltip("Enable this option to load data from the MVR file, which will apply additional instance-specific properties, such as cubemaps and texture overrides. Toggle this setting before hitting play.")]
-    [SerializeField] private bool _loadMoverData = false;
-
-    [Tooltip("Enable this to include objects in the scene that are of an unsupported material type (they will still be inactive by default).")]
-    [SerializeField] private bool _populateObjectsWithUnsupportedMaterials = false;
-
-    [Tooltip("Enable additional material data: this may not look correct, so it's optional.")]
-    [SerializeField] private bool _useAdvancedMaterials = false;
-
     public Action OnLoaded;
 
     private string _levelName = "";
@@ -35,31 +25,22 @@ public class AlienLevelLoader : MonoBehaviour
 
     private GameObject _loadedCompositeGO = null;
     private Composite _loadedComposite = null;
+    public uint CompositeID => _loadedComposite == null ? 0 : _loadedComposite.shortGUID.ToUInt32();
     public string CompositeIDString => _loadedComposite == null || _loadedComposite.shortGUID == ShortGuid.Invalid ? "" : _loadedComposite.shortGUID.ToByteString();
     public string CompositeName => _loadedComposite == null ? "" : _loadedComposite.name;
 
     private LevelContent _levelContent = null;
     private Textures _globalTextures = null;
 
-    private Dictionary<int, TexOrCube> _texturesGlobal = new Dictionary<int, TexOrCube>();
-    private Dictionary<int, TexOrCube> _texturesLevel = new Dictionary<int, TexOrCube>();
     private Dictionary<int, Material> _materials = new Dictionary<int, Material>();
     private Dictionary<Material, bool> _materialSupport = new Dictionary<Material, bool>();
     private Dictionary<int, GameObjectHolder> _modelGOs = new Dictionary<int, GameObjectHolder>();
 
-    private List<ReflectionProbe> _envMaps = new List<ReflectionProbe>();
-
-    public class TexOrCube
-    {
-        public Texture2D Texture = null;
-        public Cubemap Cubemap = null;
-    }
-
-    private WebsocketClient _client;
+    private CommandsEditorConnection _client;
 
     IEnumerator Start()
     {
-        _client = GetComponent<WebsocketClient>();
+        _client = GetComponent<CommandsEditorConnection>();
 
         yield return new WaitForEndOfFrame();
 
@@ -78,12 +59,9 @@ public class AlienLevelLoader : MonoBehaviour
         if (_loadedCompositeGO != null)
             Destroy(_loadedCompositeGO);
 
-        _texturesGlobal.Clear();
-        _texturesLevel.Clear();
         _materials.Clear();
         _materialSupport.Clear();
         _modelGOs.Clear();
-        _envMaps.Clear();
 
         _levelContent = null;
 
@@ -99,28 +77,10 @@ public class AlienLevelLoader : MonoBehaviour
 
         _levelName = level;
         _levelContent = new LevelContent(_client.PathToAI, level);
-
-        //Load cubemaps to reflection probes
-        List<Textures.TEX4> cubemaps = _levelContent.LevelTextures.Entries.Where(o => o.Type == Textures.AlienTextureType.ENVIRONMENT_MAP).ToList();
-        GameObject probeHolder = new GameObject("Reflection Probes");
-        for (int i = 0; i <  cubemaps.Count; i++)
-        {
-            Cubemap cubemap = GetCubemap(_levelContent.LevelTextures.GetWriteIndex(cubemaps[i]), false);
-            ReflectionProbe probe = new GameObject(cubemaps[i].Name).AddComponent<ReflectionProbe>();
-            probe.transform.parent = probeHolder.transform;
-            probe.mode = UnityEngine.Rendering.ReflectionProbeMode.Custom;
-            probe.customBakedTexture = cubemap;
-            _envMaps.Add(probe);
-        }
-
-        if (_loadMoverData)
-        {
-            LoadMVR();
-        }
     }
     public void LoadComposite(ShortGuid guid)
     {
-        if (_loadMoverData || _levelContent == null) return;
+        if (_levelContent == null) return;
 
         if (_loadedCompositeGO != null)
             Destroy(_loadedCompositeGO);
@@ -132,49 +92,6 @@ public class AlienLevelLoader : MonoBehaviour
         Composite comp = _levelContent.CommandsPAK.GetComposite(guid);
         Debug.Log("Loading composite " + comp?.name + "...");
         LoadCommands(comp);
-
-        OnLoaded?.Invoke();
-    }
-
-    /* Load MVR data */
-    private void LoadMVR()
-    {
-        _loadedCompositeGO = new GameObject(_levelName);
-#if UNITY_EDITOR
-        Selection.activeGameObject = _loadedCompositeGO;
-#endif
-
-        for (int i = 0; i < _levelContent.ModelsMVR.Entries.Count; i++)
-        {
-            GameObject thisParent = new GameObject("MVR: " + i + "/" + _levelContent.ModelsMVR.Entries[i].renderable_element_index + "/" + _levelContent.ModelsMVR.Entries[i].renderable_element_count);
-            Matrix4x4 m = _levelContent.ModelsMVR.Entries[i].transform;
-            thisParent.transform.position = m.GetColumn(3);
-            thisParent.transform.rotation = Quaternion.LookRotation(m.GetColumn(2), m.GetColumn(1));
-            thisParent.transform.localScale = new Vector3(m.GetColumn(0).magnitude, m.GetColumn(1).magnitude, m.GetColumn(2).magnitude);
-            thisParent.transform.parent = _loadedCompositeGO.transform;
-            for (int x = 0; x < _levelContent.ModelsMVR.Entries[i].renderable_element_count; x++)
-            {
-                RenderableElements.Element RenderableElement = _levelContent.RenderableREDS.Entries[(int)_levelContent.ModelsMVR.Entries[i].renderable_element_index + x];
-                MeshRenderer renderer = SpawnModel(RenderableElement.ModelIndex, RenderableElement.MaterialIndex, thisParent);
-                if (_useAdvancedMaterials && renderer != null && _levelContent.ModelsMVR.Entries[i].environment_map_index != -1)
-                {
-                    renderer.reflectionProbeUsage = UnityEngine.Rendering.ReflectionProbeUsage.BlendProbes;
-                    int index = _levelContent.EnvironmentMap.Entries[_levelContent.ModelsMVR.Entries[i].environment_map_index].EnvMapIndex;
-                    if (index != -1)
-                        renderer.probeAnchor = _envMaps[index]?.transform;
-                }
-                else
-                {
-                    renderer.reflectionProbeUsage = UnityEngine.Rendering.ReflectionProbeUsage.Off;
-                    renderer.lightProbeUsage = UnityEngine.Rendering.LightProbeUsage.Off;
-                }
-                if (renderer != null)
-                {
-                    renderer.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
-                    renderer.receiveShadows = false;
-                }
-            }
-        }
 
         OnLoaded?.Invoke();
     }
@@ -256,13 +173,10 @@ public class AlienLevelLoader : MonoBehaviour
                                     {
                                         case ResourceType.RENDERABLE_INSTANCE:
                                             MeshRenderer renderer = SpawnModel(renderable.ModelIndex, renderable.MaterialIndex, nodeModel);
-                                            if (!_useAdvancedMaterials && renderer != null)
+                                            if (renderer != null)
                                             {
                                                 renderer.reflectionProbeUsage = UnityEngine.Rendering.ReflectionProbeUsage.Off;
                                                 renderer.lightProbeUsage = UnityEngine.Rendering.LightProbeUsage.Off;
-                                            }
-                                            if (renderer != null)
-                                            {
                                                 renderer.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
                                                 renderer.receiveShadows = false;
                                             }
@@ -311,7 +225,7 @@ public class AlienLevelLoader : MonoBehaviour
                 string entityName = Selection.activeGameObject.name;
                 if (entityName.Length > ("[RESOURCE]").Length && entityName.Substring(0, ("[RESOURCE]").Length) == "[RESOURCE]")
                 {
-                    Selection.activeGameObject = Selection.activeGameObject.transform.parent.transform.parent.gameObject;
+                    //Selection.activeGameObject = Selection.activeGameObject.transform.parent.transform.parent.gameObject;
                 }
             }
             _prevSelection = Selection.activeGameObject;
@@ -330,7 +244,7 @@ public class AlienLevelLoader : MonoBehaviour
         }
 
         Material material = GetMaterial((mtlIndex == -1) ? holder.DefaultMaterial : mtlIndex);
-        if (!_populateObjectsWithUnsupportedMaterials && !_materialSupport[material]) 
+        if (!_materialSupport[material]) 
             return null;
 
         //Hack: we spawn the resource in a child of the GameObject hidden in the hierarchy, so that it's selectable in editor still
@@ -354,96 +268,6 @@ public class AlienLevelLoader : MonoBehaviour
         //todo apply mvr colour scale here
 
         return renderer;
-    }
-
-    private Texture2D GetTexture(int index, bool global)
-    {
-        return GetTexOrCube(index, global)?.Texture;
-    }
-    private Cubemap GetCubemap(int index, bool global)
-    {
-        return GetTexOrCube(index, global)?.Cubemap;
-    }
-    
-    private TexOrCube GetTexOrCube(int index, bool global)
-    {
-        if ((global && !_texturesGlobal.ContainsKey(index)) || (!global && !_texturesLevel.ContainsKey(index)))
-        {
-            Textures.TEX4 InTexture = (global ? _globalTextures : _levelContent.LevelTextures).GetAtWriteIndex(index);
-            if (InTexture == null) return null;
-            Textures.TEX4.Part TexPart = InTexture.tex_HighRes;
-
-            Vector2 textureDims;
-            int textureLength = 0;
-            int mipLevels = 0;
-
-            textureDims = new Vector2(TexPart.Width, TexPart.Height);
-            if (TexPart.Content == null || TexPart.Content.Length == 0)
-            {
-                //Debug.LogWarning("LENGTH ZERO - NOT LOADING");
-                return null;
-            }
-            textureLength = TexPart.Content.Length;
-            mipLevels = TexPart.MipLevels;
-
-            UnityEngine.TextureFormat format = UnityEngine.TextureFormat.BC7;
-            switch (InTexture.Format)
-            {
-                case Textures.TextureFormat.DXGI_FORMAT_BC1_UNORM:
-                    format = UnityEngine.TextureFormat.DXT1;
-                    break;
-                case Textures.TextureFormat.DXGI_FORMAT_BC3_UNORM:
-                    format = UnityEngine.TextureFormat.DXT5;
-                    break;
-                case Textures.TextureFormat.DXGI_FORMAT_BC5_UNORM:
-                    format = UnityEngine.TextureFormat.BC5;
-                    break;
-                case Textures.TextureFormat.DXGI_FORMAT_BC7_UNORM:
-                    format = UnityEngine.TextureFormat.BC7;
-                    break;
-                case Textures.TextureFormat.DXGI_FORMAT_B8G8R8_UNORM:
-                    //Debug.LogWarning("BGR24 UNSUPPORTED!");
-                    return null;
-                case Textures.TextureFormat.DXGI_FORMAT_B8G8R8A8_UNORM:
-                    format = UnityEngine.TextureFormat.BGRA32;
-                    break;
-            }
-
-            TexOrCube tex = new TexOrCube();
-            using (BinaryReader tempReader = new BinaryReader(new MemoryStream(TexPart.Content)))
-            {
-                switch (InTexture.Type)
-                {
-                    case Textures.AlienTextureType.ENVIRONMENT_MAP:
-                        tex.Cubemap = new Cubemap((int)textureDims.x, format, false);
-                        tex.Cubemap.name = InTexture.Name;
-                        tex.Cubemap.SetPixelData(tempReader.ReadBytes(textureLength / 6), 0, CubemapFace.PositiveX);
-                        tex.Cubemap.SetPixelData(tempReader.ReadBytes(textureLength / 6), 0, CubemapFace.NegativeX);
-                        tex.Cubemap.SetPixelData(tempReader.ReadBytes(textureLength / 6), 0, CubemapFace.PositiveY);
-                        tex.Cubemap.SetPixelData(tempReader.ReadBytes(textureLength / 6), 0, CubemapFace.NegativeY);
-                        tex.Cubemap.SetPixelData(tempReader.ReadBytes(textureLength / 6), 0, CubemapFace.PositiveZ);
-                        tex.Cubemap.SetPixelData(tempReader.ReadBytes(textureLength / 6), 0, CubemapFace.NegativeZ);
-                        tex.Cubemap.Apply(false, true);
-                        break;
-                    default:
-                        tex.Texture = new Texture2D((int)textureDims[0], (int)textureDims[1], format, mipLevels, true);
-                        tex.Texture.name = InTexture.Name;
-                        tex.Texture.LoadRawTextureData(tempReader.ReadBytes(textureLength));
-                        tex.Texture.Apply();
-                        break;
-                }
-            }
-
-            if (global)
-                _texturesGlobal.Add(index, tex);
-            else
-                _texturesLevel.Add(index, tex);
-        }
-
-        if (global)
-            return _texturesGlobal[index];
-        else
-            return _texturesLevel[index];
     }
 
     private GameObjectHolder GetModel(int EntryIndex)
@@ -471,6 +295,10 @@ public class AlienLevelLoader : MonoBehaviour
         {
             Materials.Material InMaterial = _levelContent.ModelsMTL.GetAtWriteIndex(MTLIndex);
             int RemappedIndex = _levelContent.ShadersIDXRemap.Datas[InMaterial.ShaderIndex].Index;
+            if (RemappedIndex != InMaterial.ShaderIndex)
+            {
+                string sfdsdf = "";
+            }
             ShadersPAK.ShaderEntry Shader = _levelContent.ShadersPAK.Shaders[RemappedIndex];
 
             Material toReturn = new Material(UnityEngine.Shader.Find("Standard"));
@@ -497,127 +325,16 @@ public class AlienLevelLoader : MonoBehaviour
             }
             toReturn.name += " " + metadata.shaderCategory.ToString();
 
-            if (_useAdvancedMaterials)
+            for (int i = 0; i < Shader.Header.CSTCounts.Length; i++)
             {
-                List<Texture2D> availableTextures = new List<Texture2D>();
-                for (int SlotIndex = 0; SlotIndex < Shader.Header.TextureLinkCount; ++SlotIndex)
+                using (BinaryReader cstReader = new BinaryReader(new MemoryStream(_levelContent.ModelsMTL.CSTData[i])))
                 {
-                    int PairIndex = Shader.TextureLinks[SlotIndex];
-                    // NOTE: PairIndex == 255 means no index.
-                    if (PairIndex < InMaterial.TextureReferences.Length)
-                    {
-                        Materials.Material.Texture Pair = InMaterial.TextureReferences[PairIndex];
-                        availableTextures.Add(Pair.BinIndex == -1 ? null : GetTexture(Pair.BinIndex, Pair.Source == Materials.Material.Texture.TextureSource.GLOBAL));
-                    }
-                    else
-                    {
-                        availableTextures.Add(null);
-                    }
-                }
+                    int baseOffset = (InMaterial.ConstantBuffers[i].Offset * 4);
 
-                //Apply materials
-                for (int i = 0; i < metadata.textures.Count; i++)
-                {
-                    if (i >= availableTextures.Count) continue;
-                    switch (metadata.textures[i].Type)
+                    if (CSTIndexValid(metadata.cstIndexes.Diffuse0, ref Shader, i))
                     {
-                        case ShaderSlot.DIFFUSE_MAP:
-                            toReturn.SetTexture("_MainTex", availableTextures[i]);
-                            break;
-                        case ShaderSlot.DETAIL_MAP:
-                            toReturn.EnableKeyword("_DETAIL_MULX2");
-                            toReturn.SetTexture("_DetailMask", availableTextures[i]);
-                            break;
-                        case ShaderSlot.EMISSIVE:
-                            toReturn.EnableKeyword("_EMISSION");
-                            toReturn.SetTexture("_EmissionMap", availableTextures[i]);
-                            break;
-                        case ShaderSlot.PARALLAX_MAP:
-                            toReturn.EnableKeyword("_PARALLAXMAP");
-                            toReturn.SetTexture("_ParallaxMap", availableTextures[i]);
-                            break;
-                        case ShaderSlot.OCCLUSION:
-                            toReturn.SetTexture("_OcclusionMap", availableTextures[i]);
-                            break;
-                        case ShaderSlot.SPECULAR_MAP:
-                            toReturn.EnableKeyword("_METALLICGLOSSMAP");
-                            toReturn.SetTexture("_MetallicGlossMap", availableTextures[i]); //TODO _SPECGLOSSMAP?
-                            toReturn.SetFloat("_Glossiness", 0.0f);
-                            toReturn.SetFloat("_GlossMapScale", 0.0f);
-                            break;
-                        case ShaderSlot.NORMAL_MAP:
-                            toReturn.EnableKeyword("_NORMALMAP");
-                            toReturn.SetTexture("_BumpMap", availableTextures[i]);
-                            break;
-                    }
-                }
-
-                //Apply properties
-                for (int i = 0; i < Shader.Header.CSTCounts.Length; i++)
-                {
-                    using (BinaryReader cstReader = new BinaryReader(new MemoryStream(_levelContent.ModelsMTL.CSTData[i])))
-                    {
-                        int baseOffset = (InMaterial.ConstantBuffers[i].Offset * 4);
-
-                        if (CSTIndexValid(metadata.cstIndexes.Diffuse0, ref Shader, i))
-                        {
-                            Vector4 colour = LoadFromCST<Vector4>(cstReader, baseOffset + (Shader.CSTLinks[i][metadata.cstIndexes.Diffuse0] * 4));
-                            toReturn.SetColor("_Color", colour);
-                            //if (colour.w != 1)
-                            //{
-                            //    toReturn.SetFloat("_Mode", 1.0f);
-                            //    toReturn.EnableKeyword("_ALPHATEST_ON");
-                            //}
-                        }
-                        if (CSTIndexValid(metadata.cstIndexes.DiffuseMap0UVMultiplier, ref Shader, i))
-                        {
-                            float offset = LoadFromCST<float>(cstReader, baseOffset + (Shader.CSTLinks[i][metadata.cstIndexes.DiffuseMap0UVMultiplier] * 4));
-                            toReturn.SetTextureScale("_MainTex", new Vector2(offset, offset));
-                        }
-                        if (CSTIndexValid(metadata.cstIndexes.NormalMap0UVMultiplier, ref Shader, i))
-                        {
-                            float offset = LoadFromCST<float>(cstReader, baseOffset + (Shader.CSTLinks[i][metadata.cstIndexes.NormalMap0UVMultiplier] * 4));
-                            toReturn.SetTextureScale("_BumpMap", new Vector2(offset, offset));
-                            toReturn.SetFloat("_BumpScale", offset);
-                        }
-                        if (CSTIndexValid(metadata.cstIndexes.OcclusionMapUVMultiplier, ref Shader, i))
-                        {
-                            float offset = LoadFromCST<float>(cstReader, baseOffset + (Shader.CSTLinks[i][metadata.cstIndexes.OcclusionMapUVMultiplier] * 4));
-                            toReturn.SetTextureScale("_OcclusionMap", new Vector2(offset, offset));
-                        }
-                        if (CSTIndexValid(metadata.cstIndexes.SpecularMap0UVMultiplier, ref Shader, i))
-                        {
-                            float offset = LoadFromCST<float>(cstReader, baseOffset + (Shader.CSTLinks[i][metadata.cstIndexes.SpecularMap0UVMultiplier] * 4));
-                            toReturn.SetTextureScale("_MetallicGlossMap", new Vector2(offset, offset));
-                            toReturn.SetFloat("_GlossMapScale", offset);
-                        }
-                        if (CSTIndexValid(metadata.cstIndexes.SpecularFactor0, ref Shader, i))
-                        {
-                            float spec = LoadFromCST<float>(cstReader, baseOffset + (Shader.CSTLinks[i][metadata.cstIndexes.SpecularFactor0] * 4));
-                            toReturn.SetFloat("_Glossiness", spec);
-                            toReturn.SetFloat("_GlossMapScale", spec);
-                        }
-                    }
-                }
-            }
-            else
-            {
-                for (int i = 0; i < Shader.Header.CSTCounts.Length; i++)
-                {
-                    using (BinaryReader cstReader = new BinaryReader(new MemoryStream(_levelContent.ModelsMTL.CSTData[i])))
-                    {
-                        int baseOffset = (InMaterial.ConstantBuffers[i].Offset * 4);
-
-                        if (CSTIndexValid(metadata.cstIndexes.Diffuse0, ref Shader, i))
-                        {
-                            Vector4 colour = LoadFromCST<Vector4>(cstReader, baseOffset + (Shader.CSTLinks[i][metadata.cstIndexes.Diffuse0] * 4));
-                            toReturn.SetColor("_Color", colour);
-                            //if (colour.w != 1)
-                            //{
-                            //    toReturn.SetFloat("_Mode", 1.0f);
-                            //    toReturn.EnableKeyword("_ALPHATEST_ON");
-                            //}
-                        }
+                        Vector4 colour = LoadFromCST<Vector4>(cstReader, baseOffset + (Shader.CSTLinks[i][metadata.cstIndexes.Diffuse0] * 4));
+                        toReturn.SetColor("_Color", colour);
                     }
                 }
             }
@@ -668,9 +385,6 @@ public class LevelContent
         {
             switch (i)
             {
-                case 0:
-                    ModelsMVR = new Movers(worldPath + "MODELS.MVR");
-                    break;
                 case 1:
                     CommandsPAK = new Commands(worldPath + "COMMANDS.PAK");
                     break;
@@ -679,18 +393,6 @@ public class LevelContent
                     break;
                 case 3:
                     ResourcesBIN = new CATHODE.Resources(worldPath + "RESOURCES.BIN");
-                    break;
-                case 4:
-                    PhysicsMap = new PhysicsMaps(worldPath + "PHYSICS.MAP");
-                    break;
-                case 5:
-                    EnvironmentMap = new EnvironmentMaps(worldPath + "ENVIRONMENTMAP.BIN");
-                    break;
-                case 6:
-                    CollisionMap = new CollisionMaps(worldPath + "COLLISION.MAP");
-                    break;
-                case 7:
-                    //EnvironmentAnimation = new EnvironmentAnimations(worldPath + "ENVIRONMENT_ANIMATION.DAT");
                     break;
                 case 8:
                     ModelsCST = File.ReadAllBytes(renderablePath + "LEVEL_MODELS.CST");
@@ -707,26 +409,16 @@ public class LevelContent
                 case 12:
                     ShadersIDXRemap = new IDXRemap(renderablePath + "LEVEL_SHADERS_DX11_IDX_REMAP.PAK");
                     break;
-                case 13:
-                    LevelTextures = new Textures(renderablePath + "LEVEL_TEXTURES.ALL.PAK");
-                    break;
             }
         });
     }
 
-    public Movers ModelsMVR;
     public Commands CommandsPAK;
     public RenderableElements RenderableREDS;
     public CATHODE.Resources ResourcesBIN;
-    public PhysicsMaps PhysicsMap;
-    public EnvironmentMaps EnvironmentMap;
-    public CollisionMaps CollisionMap;
-    //public EnvironmentAnimations EnvironmentAnimation;
     public byte[] ModelsCST;
     public Materials ModelsMTL;
     public Models ModelsPAK;
-    public Textures LevelTextures;
     public ShadersPAK ShadersPAK;
-    public alien_shader_bin_pak ShadersBIN;
     public IDXRemap ShadersIDXRemap;
 };

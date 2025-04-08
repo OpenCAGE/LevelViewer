@@ -70,6 +70,9 @@ public class AlienLevelLoader : MonoBehaviour
 
     public void LoadLevel(string level)
     {
+        if (level == "")
+            return;
+
         Debug.Log("Loading level " + level + "...");
 
         ResetLevel();

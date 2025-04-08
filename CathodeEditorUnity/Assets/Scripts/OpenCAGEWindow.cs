@@ -71,8 +71,16 @@ public class OpenCAGEWindow : EditorWindow
 [InitializeOnLoad]
 public class Startup
 {
+    private static bool _subbed = false;
+
     static Startup()
     {
+        if (!_subbed)
+        {
+            EditorApplication.update += ForceNoTools;
+            _subbed = true;
+        }
+
         if (!EditorApplication.isPlaying)
         {
             //EditorApplication.EnterPlaymode();
@@ -85,9 +93,15 @@ public class Startup
         {
             EditorSceneManager.OpenScene("Assets/Scene.unity");
             SceneView.lastActiveSceneView.drawGizmos = false;
-            EditorUtility.LoadWindowLayout(Directory.GetCurrentDirectory() + "/../OpenCAGE.wlt");
+            EditorUtility.LoadWindowLayout(Directory.GetCurrentDirectory() + "/../OpenCAGE.wlt"); //todo: this should just be "scene" view
         }
-        catch { } 
+        catch { }
+    }
+
+    static void ForceNoTools()
+    {
+        if (Tools.current != Tool.Custom)
+            Tools.current = Tool.Custom;
     }
 }
 #endif

@@ -39,7 +39,7 @@ public class CommandsEditorConnection : MonoBehaviour
         StartCoroutine(ReconnectLoop());
     }
 
-    private void Update()
+    private void FixedUpdate()
     {
         if (_levelName != "" && _loader.LevelName != _levelName)
             _loader.LoadLevel(_levelName);
@@ -47,20 +47,36 @@ public class CommandsEditorConnection : MonoBehaviour
         if (_composite != 0 && _loader.CompositeID != _composite)
             _loader.LoadComposite(new ShortGuid(_composite));
 
+        GameObject entity = null;
         if (_entity != 0)
         {
-            GameObject entity = ResolvePath();
+            entity = ResolvePath();
             Selection.activeGameObject = entity;
         }
 
         if (_entityMoved)
         {
+            if (entity != null)
+            {
+                entity.transform.position = _position;
+                entity.transform.rotation = Quaternion.Euler(_rotation);
+            }
             _entityMoved = false;
         }
 
         if (_renderableUpdated)
         {
-
+            if (entity != null)
+            {
+                for (int i = 0; i < entity.transform.childCount; i++)
+                {
+                    Destroy(entity.transform.GetChild(i).gameObject);
+                }
+                for (int i = 0; i < _renderable.Count; i++)
+                {
+                    _loader.SpawnRenderable(entity, _renderable[i].Item1, _renderable[i].Item2);
+                }
+            }
             _renderableUpdated = false;
         }
     }

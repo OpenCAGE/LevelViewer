@@ -15,6 +15,7 @@ using Newtonsoft.Json;
 using System.Reflection;
 using UnityEditor;
 using System.Collections;
+using static CATHODE.Textures.TEX4;
 
 public class AlienLevelLoader : MonoBehaviour
 {
@@ -168,14 +169,7 @@ public class AlienLevelLoader : MonoBehaviour
                                     switch (resourceRef.resource_type)
                                     {
                                         case ResourceType.RENDERABLE_INSTANCE:
-                                            MeshRenderer renderer = SpawnModel(renderable.ModelIndex, renderable.MaterialIndex, nodeModel);
-                                            if (renderer != null)
-                                            {
-                                                renderer.reflectionProbeUsage = UnityEngine.Rendering.ReflectionProbeUsage.Off;
-                                                renderer.lightProbeUsage = UnityEngine.Rendering.LightProbeUsage.Off;
-                                                renderer.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
-                                                renderer.receiveShadows = false;
-                                            }
+                                            SpawnRenderable(nodeModel, renderable.ModelIndex, renderable.MaterialIndex);
                                             break;
                                         case ResourceType.COLLISION_MAPPING:
                                             break;
@@ -188,6 +182,46 @@ public class AlienLevelLoader : MonoBehaviour
             }
         }
     }
+
+    public void SpawnRenderable(GameObject parent, int modelIndex, int materialIndex)
+    {
+        GameObjectHolder holder = GetModel(modelIndex);
+        if (holder == null)
+        {
+            Debug.Log("Attempted to load non-parsed model (" + modelIndex + "). Skipping!");
+            return;
+        }
+
+        Material material = GetMaterial((materialIndex == -1) ? holder.DefaultMaterial : materialIndex);
+        if (!_materialSupport[material])
+            return;
+
+        //Hack: we spawn the resource in a child of the GameObject hidden in the hierarchy, so that it's selectable in editor still
+        GameObject newModelSpawnParent = new GameObject();
+        if (parent != null) newModelSpawnParent.transform.parent = parent.transform;
+        newModelSpawnParent.transform.localPosition = Vector3.zero;
+        newModelSpawnParent.transform.localRotation = Quaternion.identity;
+        newModelSpawnParent.name = holder.Name;
+
+        GameObject newModelSpawn = new GameObject();
+        newModelSpawn.transform.parent = newModelSpawnParent.transform;
+        newModelSpawn.transform.localPosition = Vector3.zero;
+        newModelSpawn.transform.localRotation = Quaternion.identity;
+        newModelSpawn.name = newModelSpawnParent.name;
+        newModelSpawn.AddComponent<MeshFilter>().sharedMesh = holder.MainMesh;
+        MeshRenderer renderer = newModelSpawn.AddComponent<MeshRenderer>();
+        renderer.sharedMaterial = material;
+        newModelSpawn.SetActive(_materialSupport[material]);
+
+        if (renderer != null)
+        {
+            renderer.reflectionProbeUsage = UnityEngine.Rendering.ReflectionProbeUsage.Off;
+            renderer.lightProbeUsage = UnityEngine.Rendering.LightProbeUsage.Off;
+            renderer.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+            renderer.receiveShadows = false;
+        }
+    }
+
     bool GetEntityTransform(Entity entity, out Vector3 position, out Vector3 rotation)
     {
         position = Vector3.zero;
@@ -210,39 +244,6 @@ public class AlienLevelLoader : MonoBehaviour
     }
 
     #region Asset Handlers
-    private MeshRenderer SpawnModel(int binIndex, int mtlIndex, GameObject parent)
-    {
-        GameObjectHolder holder = GetModel(binIndex);
-        if (holder == null)
-        {
-            Debug.Log("Attempted to load non-parsed model (" + binIndex + "). Skipping!");
-            return null;
-        }
-
-        Material material = GetMaterial((mtlIndex == -1) ? holder.DefaultMaterial : mtlIndex);
-        if (!_materialSupport[material]) 
-            return null;
-
-        //Hack: we spawn the resource in a child of the GameObject hidden in the hierarchy, so that it's selectable in editor still
-        GameObject newModelSpawnParent = new GameObject();
-        if (parent != null) newModelSpawnParent.transform.parent = parent.transform;
-        newModelSpawnParent.transform.localPosition = Vector3.zero;
-        newModelSpawnParent.transform.localRotation = Quaternion.identity;
-        newModelSpawnParent.name = holder.Name;
-
-        GameObject newModelSpawn = new GameObject();
-        newModelSpawn.transform.parent = newModelSpawnParent.transform;
-        newModelSpawn.transform.localPosition = Vector3.zero;
-        newModelSpawn.transform.localRotation = Quaternion.identity;
-        newModelSpawn.name = newModelSpawnParent.name;
-        newModelSpawn.AddComponent<MeshFilter>().sharedMesh = holder.MainMesh;
-        MeshRenderer renderer = newModelSpawn.AddComponent<MeshRenderer>();
-        renderer.sharedMaterial = material;
-        newModelSpawn.SetActive(_materialSupport[material]);
-
-        return renderer;
-    }
-
     private GameObjectHolder GetModel(int EntryIndex)
     {
         if (!_modelGOs.ContainsKey(EntryIndex))

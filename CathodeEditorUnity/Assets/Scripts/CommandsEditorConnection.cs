@@ -8,6 +8,7 @@ using UnityEngine;
 using WebSocketSharp;
 using CATHODE.Scripting;
 using System.IO;
+using UnityEngine.UIElements;
 
 public class CommandsEditorConnection : MonoBehaviour
 {
@@ -46,9 +47,14 @@ public class CommandsEditorConnection : MonoBehaviour
         if (_composite != 0 && _loader.CompositeID != _composite)
             _loader.LoadComposite(new ShortGuid(_composite));
 
+        if (_entity != 0)
+        {
+            GameObject entity = ResolvePath();
+            Selection.activeGameObject = entity;
+        }
+
         if (_entityMoved)
         {
-
             _entityMoved = false;
         }
 
@@ -59,10 +65,23 @@ public class CommandsEditorConnection : MonoBehaviour
         }
     }
 
-    //private GameObject ResolvePath()
-    //{
-    //
-    //}
+    private GameObject ResolvePath()
+    {
+        try
+        {
+            Transform t = _loader.ParentGameObject.transform;
+            for (int i = 0; i < _path.Count + 1; i++)
+            {
+                t = t.Find(_path.Count == i ? _entity.ToString() : _path[i].ToString());
+            }
+            return t.gameObject;
+        }
+        catch
+        {
+            //This can fail if we're selecting an entity which isn't a function. Should handle it better.
+            return null;
+        }
+    }
 
     private void OnMessage(object sender, MessageEventArgs e)
     {
@@ -76,11 +95,12 @@ public class CommandsEditorConnection : MonoBehaviour
             return;
         }
 
-        if (packet.dirty)
-        {
-            Debug.LogError("Content has been modified inside the Commands editor without saving before opening Unity. Please save inside the Commands editor and re-play Unity to sync changes.");
-            return;
-        }
+        //TODO: this isn't working right just yet, so commenting out.
+        //if (packet.dirty)
+        //{
+        //    Debug.LogError("Content has been modified inside the Commands editor without saving before opening Unity. Please save inside the Commands editor and re-play Unity to sync changes.");
+        //    return;
+        //}
 
         lock (_lock)
         {

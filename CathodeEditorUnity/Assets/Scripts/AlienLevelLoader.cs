@@ -23,14 +23,15 @@ public class AlienLevelLoader : MonoBehaviour
     private string _levelName = "";
     public string LevelName => _levelName;
 
-    private GameObject _loadedCompositeGO = null;
+    private GameObject _parentGameObject = null;
+    public GameObject ParentGameObject => _parentGameObject;
+
     private Composite _loadedComposite = null;
     public uint CompositeID => _loadedComposite == null ? 0 : _loadedComposite.shortGUID.ToUInt32();
     public string CompositeIDString => _loadedComposite == null || _loadedComposite.shortGUID == ShortGuid.Invalid ? "" : _loadedComposite.shortGUID.ToByteString();
     public string CompositeName => _loadedComposite == null ? "" : _loadedComposite.name;
 
     private LevelContent _levelContent = null;
-    private Textures _globalTextures = null;
 
     private Dictionary<int, Material> _materials = new Dictionary<int, Material>();
     private Dictionary<Material, bool> _materialSupport = new Dictionary<Material, bool>();
@@ -56,17 +57,14 @@ public class AlienLevelLoader : MonoBehaviour
 
     private void ResetLevel()
     {
-        if (_loadedCompositeGO != null)
-            Destroy(_loadedCompositeGO);
+        if (_parentGameObject != null)
+            Destroy(_parentGameObject);
 
         _materials.Clear();
         _materialSupport.Clear();
         _modelGOs.Clear();
 
         _levelContent = null;
-
-        if (_globalTextures == null)
-            _globalTextures = new Textures(_client.PathToAI + "/DATA/ENV/GLOBAL/WORLD/GLOBAL_TEXTURES.ALL.PAK");
     }
 
     public void LoadLevel(string level)
@@ -82,30 +80,28 @@ public class AlienLevelLoader : MonoBehaviour
     {
         if (_levelContent == null) return;
 
-        if (_loadedCompositeGO != null)
-            Destroy(_loadedCompositeGO);
-        _loadedCompositeGO = new GameObject(_levelName);
-#if UNITY_EDITOR
-        Selection.activeGameObject = _loadedCompositeGO;
-#endif
+        if (_parentGameObject != null)
+            Destroy(_parentGameObject);
+        _parentGameObject = new GameObject(_levelName);
+        //_parentGameObject.hideFlags = HideFlags.HideInHierarchy;  <- enable this!!
 
         Composite comp = _levelContent.CommandsPAK.GetComposite(guid);
         Debug.Log("Loading composite " + comp?.name + "...");
-        LoadCommands(comp);
+        LoadComposite(comp);
 
         OnLoaded?.Invoke();
     }
 
     /* Load Commands data */
-    private void LoadCommands(Composite composite)
+    private void LoadComposite(Composite composite)
     {
         _loadedComposite = composite;
-        ParseComposite(composite, _loadedCompositeGO, Vector3.zero, Quaternion.identity, new List<AliasEntity>());
+        ParseComposite(composite, _parentGameObject, null, Vector3.zero, Quaternion.identity, new List<AliasEntity>());
     }
-    void ParseComposite(Composite composite, GameObject parentGO, Vector3 parentPos, Quaternion parentRot, List<AliasEntity> aliases)
+    void ParseComposite(Composite composite, GameObject parentGO, Entity parentEntity, Vector3 parentPos, Quaternion parentRot, List<AliasEntity> aliases)
     {
         if (composite == null) return;
-        GameObject compositeGO = new GameObject("[COMPOSITE INSTANCE] " + composite.name);
+        GameObject compositeGO = parentEntity == null ? _parentGameObject : new GameObject(parentEntity.shortGUID.ToUInt32().ToString());
         compositeGO.transform.parent = parentGO.transform;
         compositeGO.transform.SetLocalPositionAndRotation(parentPos, parentRot);
 
@@ -140,7 +136,7 @@ public class AlienLevelLoader : MonoBehaviour
                         GetEntityTransform(function, out position, out rotation);
 
                     //Continue
-                    ParseComposite(compositeNext, compositeGO, position, Quaternion.Euler(rotation), overridesNext);
+                    ParseComposite(compositeNext, compositeGO, function, position, Quaternion.Euler(rotation), overridesNext);
                 }
             }
 
@@ -153,7 +149,7 @@ public class AlienLevelLoader : MonoBehaviour
                 if (!GetEntityTransform(ovrride, out position, out rotation))
                     GetEntityTransform(function, out position, out rotation);
 
-                GameObject nodeModel = new GameObject("[FUNCTION ENTITY] [ModelReference] " + function.shortGUID.ToByteString());
+                GameObject nodeModel = new GameObject(function.shortGUID.ToUInt32().ToString());
                 nodeModel.transform.parent = compositeGO.transform;
                 nodeModel.transform.SetLocalPositionAndRotation(position, Quaternion.Euler(rotation));
 
@@ -213,26 +209,6 @@ public class AlienLevelLoader : MonoBehaviour
         return false;
     }
 
-    /* Force select the function entity if someone clicks on the resource */
-    private GameObject _prevSelection = null;
-    private void Update()
-    {
-#if UNITY_EDITOR
-        if (_prevSelection != Selection.activeGameObject)
-        {
-            if (Selection.activeGameObject != null)
-            {
-                string entityName = Selection.activeGameObject.name;
-                if (entityName.Length > ("[RESOURCE]").Length && entityName.Substring(0, ("[RESOURCE]").Length) == "[RESOURCE]")
-                {
-                    //Selection.activeGameObject = Selection.activeGameObject.transform.parent.transform.parent.gameObject;
-                }
-            }
-            _prevSelection = Selection.activeGameObject;
-        }
-#endif
-    }
-
     #region Asset Handlers
     private MeshRenderer SpawnModel(int binIndex, int mtlIndex, GameObject parent)
     {
@@ -252,8 +228,7 @@ public class AlienLevelLoader : MonoBehaviour
         if (parent != null) newModelSpawnParent.transform.parent = parent.transform;
         newModelSpawnParent.transform.localPosition = Vector3.zero;
         newModelSpawnParent.transform.localRotation = Quaternion.identity;
-        newModelSpawnParent.name = "[RESOURCE] " + holder.Name;
-        newModelSpawnParent.hideFlags = HideFlags.HideInHierarchy;
+        newModelSpawnParent.name = holder.Name;
 
         GameObject newModelSpawn = new GameObject();
         newModelSpawn.transform.parent = newModelSpawnParent.transform;
@@ -264,8 +239,6 @@ public class AlienLevelLoader : MonoBehaviour
         MeshRenderer renderer = newModelSpawn.AddComponent<MeshRenderer>();
         renderer.sharedMaterial = material;
         newModelSpawn.SetActive(_materialSupport[material]);
-
-        //todo apply mvr colour scale here
 
         return renderer;
     }
@@ -295,10 +268,6 @@ public class AlienLevelLoader : MonoBehaviour
         {
             Materials.Material InMaterial = _levelContent.ModelsMTL.GetAtWriteIndex(MTLIndex);
             int RemappedIndex = _levelContent.ShadersIDXRemap.Datas[InMaterial.ShaderIndex].Index;
-            if (RemappedIndex != InMaterial.ShaderIndex)
-            {
-                string sfdsdf = "";
-            }
             ShadersPAK.ShaderEntry Shader = _levelContent.ShadersPAK.Shaders[RemappedIndex];
 
             Material toReturn = new Material(UnityEngine.Shader.Find("Standard"));
@@ -381,32 +350,32 @@ public class LevelContent
                 break;
         }
 
-        Parallel.For(0, 14, (i) =>
+        Parallel.For(0, 8, (i) =>
         {
             switch (i)
             {
-                case 1:
+                case 0:
                     CommandsPAK = new Commands(worldPath + "COMMANDS.PAK");
                     break;
-                case 2:
+                case 1:
                     RenderableREDS = new RenderableElements(worldPath + "REDS.BIN");
                     break;
-                case 3:
+                case 2:
                     ResourcesBIN = new CATHODE.Resources(worldPath + "RESOURCES.BIN");
                     break;
-                case 8:
+                case 3:
                     ModelsCST = File.ReadAllBytes(renderablePath + "LEVEL_MODELS.CST");
                     break;
-                case 9:
+                case 4:
                     ModelsMTL = new Materials(renderablePath + "LEVEL_MODELS.MTL");
                     break;
-                case 10:
+                case 5:
                     ModelsPAK = new Models(renderablePath + "LEVEL_MODELS.PAK");
                     break;
-                case 11:
+                case 6:
                     ShadersPAK = new ShadersPAK(renderablePath + "LEVEL_SHADERS_DX11.PAK");
                     break;
-                case 12:
+                case 7:
                     ShadersIDXRemap = new IDXRemap(renderablePath + "LEVEL_SHADERS_DX11_IDX_REMAP.PAK");
                     break;
             }

@@ -22,9 +22,15 @@ public class CommandsEditorConnection : MonoBehaviour
     private string _pathToAI = "";
     public string PathToAI => _pathToAI;
 
-    private uint _composite;
-    private List<uint> _path;
-    private uint _entity;
+    private List<uint> _pathComposites;
+    private List<uint> _pathEntities;
+    private bool _compositeLoaded;
+    private bool _entitySelected;
+    private bool _entitySelectionChanged = false;
+    private uint _currentComposite;
+    private uint _currentEntity;
+
+    GameObject _currentEntityGO = null;
 
     private Vector3 _position;
     private Vector3 _rotation;
@@ -42,39 +48,44 @@ public class CommandsEditorConnection : MonoBehaviour
     private void FixedUpdate()
     {
         if (_levelName != "" && _loader.LevelName != _levelName)
-            _loader.LoadLevel(_levelName);
-
-        if (_composite != 0 && _loader.CompositeID != _composite)
-            _loader.LoadComposite(new ShortGuid(_composite));
-
-        GameObject entity = null;
-        if (_entity != 0)
         {
-            entity = ResolvePath();
-            Selection.activeGameObject = entity;
+            _loader.LoadLevel(_levelName);
+        }
+
+        if (_compositeLoaded) 
+        {
+            if (_loader.CompositeID != _pathComposites[0])
+                _loader.LoadComposite(new ShortGuid(_pathComposites[0]));
+            //if (_loader.highlighted) <- todo: add highlighting for actual active composite. the modification should apply to ALL instances of the composite too, unless we apply as aliases in the editor... hmm...
+        }
+
+        if (_entitySelectionChanged)
+        {
+            _currentEntityGO = ResolvePath();
+            Selection.activeGameObject = _currentEntityGO;
         }
 
         if (_entityMoved)
         {
-            if (entity != null)
+            if (_currentEntityGO != null)
             {
-                entity.transform.position = _position;
-                entity.transform.rotation = Quaternion.Euler(_rotation);
+                _currentEntityGO.transform.position = _position;
+                _currentEntityGO.transform.rotation = Quaternion.Euler(_rotation);
             }
             _entityMoved = false;
         }
 
         if (_renderableUpdated)
         {
-            if (entity != null)
+            if (_currentEntityGO != null)
             {
-                for (int i = 0; i < entity.transform.childCount; i++)
+                for (int i = 0; i < _currentEntityGO.transform.childCount; i++)
                 {
-                    Destroy(entity.transform.GetChild(i).gameObject);
+                    Destroy(_currentEntityGO.transform.GetChild(i).gameObject);
                 }
                 for (int i = 0; i < _renderable.Count; i++)
                 {
-                    _loader.SpawnRenderable(entity, _renderable[i].Item1, _renderable[i].Item2);
+                    _loader.SpawnRenderable(_currentEntityGO, _renderable[i].Item1, _renderable[i].Item2);
                 }
             }
             _renderableUpdated = false;
@@ -86,10 +97,8 @@ public class CommandsEditorConnection : MonoBehaviour
         try
         {
             Transform t = _loader.ParentGameObject.transform;
-            for (int i = 0; i < _path.Count + 1; i++)
-            {
-                t = t.Find(_path.Count == i ? _entity.ToString() : _path[i].ToString());
-            }
+            for (int i = 0; i < _pathEntities.Count; i++)
+                t = t.Find(_pathEntities[i].ToString());
             return t.gameObject;
         }
         catch
@@ -111,7 +120,6 @@ public class CommandsEditorConnection : MonoBehaviour
             return;
         }
 
-        //TODO: this isn't working right just yet, so commenting out.
         //if (packet.dirty)
         //{
         //    Debug.LogError("Content has been modified inside the Commands editor without saving before opening Unity. Please save inside the Commands editor and re-play Unity to sync changes.");
@@ -122,9 +130,17 @@ public class CommandsEditorConnection : MonoBehaviour
         {
             _levelName = packet.level_name;
             _pathToAI = packet.system_folder;
-            _composite = packet.composite;
-            _path = packet.path;
-            _entity = packet.entity;
+
+            _pathComposites = packet.path_composites;
+            _pathEntities = packet.path_entities;
+
+            _compositeLoaded = _pathComposites.Count != 0;
+            _entitySelected = _compositeLoaded && _pathComposites.Count == _pathEntities.Count;
+
+            _entitySelectionChanged = (_entitySelected ? _pathEntities[_pathEntities.Count - 1] : 0) != _currentEntity;
+
+            _currentComposite = _compositeLoaded ? _pathComposites[_pathComposites.Count - 1] : 0;
+            _currentEntity = _entitySelected ? _pathEntities[_pathEntities.Count - 1] : 0;
         }
 
         switch (packet.packet_event)
@@ -206,7 +222,7 @@ public class CommandsEditorConnection : MonoBehaviour
         LEVEL_LOADED,
 
         COMPOSITE_SELECTED,
-        COMPOSITE_PATH_STEPPED,
+        COMPOSITE_RELOADED,
         COMPOSITE_DELETED,
 
         ENTITY_SELECTED,
@@ -234,9 +250,8 @@ public class CommandsEditorConnection : MonoBehaviour
         public string system_folder = "";
 
         //Selection metadata
-        public uint composite = 0;
-        public List<uint> path = new List<uint>();
-        public uint entity = 0;
+        public List<uint> path_entities = new List<uint>();
+        public List<uint> path_composites = new List<uint>();
 
         //Transform
         public System.Numerics.Vector3 position = new System.Numerics.Vector3();

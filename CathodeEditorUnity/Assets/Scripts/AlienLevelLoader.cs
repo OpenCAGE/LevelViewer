@@ -70,7 +70,7 @@ public class AlienLevelLoader : MonoBehaviour
 
     public void LoadLevel(string level)
     {
-        if (level == "")
+        if (level == null || level == "" || _client.PathToAI == "")
             return;
 
         Debug.Log("Loading level " + level + "...");

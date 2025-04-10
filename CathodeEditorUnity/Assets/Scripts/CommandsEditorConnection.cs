@@ -26,11 +26,11 @@ public class CommandsEditorConnection : MonoBehaviour
     private List<uint> _pathEntities;
     private bool _compositeLoaded;
     private bool _entitySelected;
-    private bool _entitySelectionChanged = false;
     private uint _currentComposite;
     private uint _currentEntity;
 
     GameObject _currentEntityGO = null;
+    private uint _currentEntityGOID = 0;
 
     private Vector3 _position;
     private Vector3 _rotation;
@@ -59,14 +59,16 @@ public class CommandsEditorConnection : MonoBehaviour
             //if (_loader.highlighted) <- todo: add highlighting for actual active composite. the modification should apply to ALL instances of the composite too, unless we apply as aliases in the editor... hmm...
         }
 
-        if (_entitySelectionChanged)
+        if (_currentEntityGOID != _currentEntity)
         {
             _currentEntityGO = ResolvePath();
+            _currentEntityGOID = _currentEntity;
         }
 
         if (Selection.activeGameObject != _currentEntityGO)
         {
             Selection.activeGameObject = _currentEntityGO;
+            SceneView.FrameLastActiveSceneView();
         }
 
         if (_entityMoved)
@@ -78,6 +80,8 @@ public class CommandsEditorConnection : MonoBehaviour
             }
             _entityMoved = false;
         }
+
+        //TODO: we should show a fake gizmo with the current position
 
         if (_renderableUpdated)
         {
@@ -107,7 +111,8 @@ public class CommandsEditorConnection : MonoBehaviour
         }
         catch
         {
-            //This can fail if we're selecting an entity which isn't a function. Should handle it better.
+            //This can fail if we're selecting an entity which isn't a function.
+            //We should populate placeholders for these so we can still show the transforms probably.
             return null;
         }
     }
@@ -140,8 +145,6 @@ public class CommandsEditorConnection : MonoBehaviour
 
             _compositeLoaded = _pathComposites.Count != 0;
             _entitySelected = _compositeLoaded && _pathComposites.Count == _pathEntities.Count;
-
-            _entitySelectionChanged = (_entitySelected ? _pathEntities[_pathEntities.Count - 1] : 0) != _currentEntity;
 
             _currentComposite = _compositeLoaded ? _pathComposites[_pathComposites.Count - 1] : 0;
             _currentEntity = _entitySelected ? _pathEntities[_pathEntities.Count - 1] : 0;

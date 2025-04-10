@@ -120,6 +120,9 @@ public static class CloseAllExceptSceneView
             {
                 var maximizeMethod = typeof(EditorWindow).GetMethod("Maximize", BindingFlags.NonPublic | BindingFlags.Instance);
                 maximizeMethod?.Invoke(sceneView, new object[] { true });
+
+                sceneView.sceneLighting = false;
+                sceneView.Repaint();
             }
         };
     }

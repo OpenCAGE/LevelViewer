@@ -87,7 +87,10 @@ public class AlienLevelLoader : MonoBehaviour
         if (_parentGameObject != null)
             Destroy(_parentGameObject);
         _parentGameObject = new GameObject(_levelName);
-        //_parentGameObject.hideFlags = HideFlags.HideInHierarchy;  <- enable this!!
+#if UNITY_EDITOR
+        _parentGameObject.hideFlags |= HideFlags.HideInHierarchy;
+        _parentGameObject.hideFlags |= HideFlags.NotEditable;
+#endif
 
         Composite comp = _levelContent.CommandsPAK.GetComposite(guid);
         Debug.Log("Loading composite " + comp?.name + "...");
@@ -108,6 +111,9 @@ public class AlienLevelLoader : MonoBehaviour
         GameObject compositeGO = parentEntity == null ? _parentGameObject : new GameObject(parentEntity.shortGUID.ToUInt32().ToString());
         compositeGO.transform.parent = parentGO.transform;
         compositeGO.transform.SetLocalPositionAndRotation(parentPos, parentRot);
+#if UNITY_EDITOR
+        compositeGO.hideFlags |= HideFlags.NotEditable;
+#endif
 
         //Compile all appropriate overrides, and keep the hierarchies trimmed so that index zero is accurate to this composite
         List<AliasEntity> trimmedAliases = new List<AliasEntity>();
@@ -156,6 +162,9 @@ public class AlienLevelLoader : MonoBehaviour
                 GameObject nodeModel = new GameObject(function.shortGUID.ToUInt32().ToString());
                 nodeModel.transform.parent = compositeGO.transform;
                 nodeModel.transform.SetLocalPositionAndRotation(position, Quaternion.Euler(rotation));
+#if UNITY_EDITOR
+                nodeModel.hideFlags |= HideFlags.NotEditable;
+#endif
 
                 Parameter resourceParam = function.GetParameter("resource");
                 if (resourceParam != null && resourceParam.content != null)
@@ -199,30 +208,23 @@ public class AlienLevelLoader : MonoBehaviour
         if (!_materialSupport[material])
             return;
 
-        //Hack: we spawn the resource in a child of the GameObject hidden in the hierarchy, so that it's selectable in editor still
-        GameObject newModelSpawnParent = new GameObject();
-        if (parent != null) newModelSpawnParent.transform.parent = parent.transform;
-        newModelSpawnParent.transform.localPosition = Vector3.zero;
-        newModelSpawnParent.transform.localRotation = Quaternion.identity;
-        newModelSpawnParent.name = holder.Name;
-
         GameObject newModelSpawn = new GameObject();
-        newModelSpawn.transform.parent = newModelSpawnParent.transform;
+        newModelSpawn.transform.parent = parent.transform;
         newModelSpawn.transform.localPosition = Vector3.zero;
         newModelSpawn.transform.localRotation = Quaternion.identity;
-        newModelSpawn.name = newModelSpawnParent.name;
+        newModelSpawn.name = parent.name;
         newModelSpawn.AddComponent<MeshFilter>().sharedMesh = holder.MainMesh;
+#if UNITY_EDITOR
+        newModelSpawn.hideFlags |= HideFlags.NotEditable;
+#endif
+
         MeshRenderer renderer = newModelSpawn.AddComponent<MeshRenderer>();
         renderer.sharedMaterial = material;
+        renderer.reflectionProbeUsage = UnityEngine.Rendering.ReflectionProbeUsage.Off;
+        renderer.lightProbeUsage = UnityEngine.Rendering.LightProbeUsage.Off;
+        renderer.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+        renderer.receiveShadows = false;
         newModelSpawn.SetActive(_materialSupport[material]);
-
-        if (renderer != null)
-        {
-            renderer.reflectionProbeUsage = UnityEngine.Rendering.ReflectionProbeUsage.Off;
-            renderer.lightProbeUsage = UnityEngine.Rendering.LightProbeUsage.Off;
-            renderer.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
-            renderer.receiveShadows = false;
-        }
     }
 
     bool GetEntityTransform(Entity entity, out Vector3 position, out Vector3 rotation)

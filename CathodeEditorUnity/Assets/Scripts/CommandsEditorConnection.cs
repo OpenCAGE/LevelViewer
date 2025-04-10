@@ -62,6 +62,10 @@ public class CommandsEditorConnection : MonoBehaviour
         if (_entitySelectionChanged)
         {
             _currentEntityGO = ResolvePath();
+        }
+
+        if (Selection.activeGameObject != _currentEntityGO)
+        {
             Selection.activeGameObject = _currentEntityGO;
         }
 

@@ -6,6 +6,7 @@ using UnityEditor;
 using System.Linq;
 using UnityEditor.SceneManagement;
 using System.IO;
+using System.Reflection;
 
 public class OpenCAGEWindow : EditorWindow
 {
@@ -89,19 +90,38 @@ public class Startup
 
         if (EditorApplication.isPlayingOrWillChangePlaymode) return;
 
-        try
-        {
+        var scene = EditorSceneManager.GetActiveScene();
+        if (scene == null || scene.name != "Assets/Scene.unity")
             EditorSceneManager.OpenScene("Assets/Scene.unity");
-            SceneView.lastActiveSceneView.drawGizmos = false;
-            EditorUtility.LoadWindowLayout(Directory.GetCurrentDirectory() + "/../OpenCAGE.wlt"); //todo: this should just be "scene" view
-        }
-        catch { }
     }
 
     static void ForceNoTools()
     {
-        if (Tools.current != Tool.Custom)
-            Tools.current = Tool.Custom;
+        if (Tools.current != Tool.None)
+            Tools.current = Tool.None;
+    }
+}
+
+[InitializeOnLoad]
+public static class CloseAllExceptSceneView
+{
+    static CloseAllExceptSceneView()
+    {
+        EditorApplication.delayCall += () =>
+        {
+            foreach (var window in Resources.FindObjectsOfTypeAll<EditorWindow>())
+            {
+                if (!(window is SceneView))
+                    window.Close();
+            }
+
+            var sceneView = SceneView.lastActiveSceneView;
+            if (sceneView != null)
+            {
+                var maximizeMethod = typeof(EditorWindow).GetMethod("Maximize", BindingFlags.NonPublic | BindingFlags.Instance);
+                maximizeMethod?.Invoke(sceneView, new object[] { true });
+            }
+        };
     }
 }
 #endif

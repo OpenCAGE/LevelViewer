@@ -71,6 +71,8 @@ public class CommandsEditorConnection : MonoBehaviour
             SceneView.FrameLastActiveSceneView();
         }
 
+        //TODO: move/renderable update should apply to other composites of the same type...
+
         if (_entityMoved)
         {
             if (_currentEntityGO != null)

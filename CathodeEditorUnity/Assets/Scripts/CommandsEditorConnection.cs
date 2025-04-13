@@ -41,6 +41,9 @@ public class CommandsEditorConnection : MonoBehaviour
     List<Tuple<int, int>> _renderable;
     private bool _renderableUpdated = false;
 
+    //NOTE: This is a hacky way of reloading the active composite when an entity is added/deleted. Need to decouple the loading logic to make this nicer.
+    private bool _forceCompReload = false;
+
     void Start()
     {
         _loader = GetComponent<AlienLevelLoader>();
@@ -56,9 +59,10 @@ public class CommandsEditorConnection : MonoBehaviour
 
         if (_compositeLoaded) 
         {
-            if (_loader.CompositeID != _pathComposites[0])
+            if (_forceCompReload || _loader.CompositeID != _pathComposites[0])
                 _loader.LoadComposite(new ShortGuid(_pathComposites[0]));
             //if (_loader.highlighted) <- todo: add highlighting for actual active composite. the modification should apply to ALL instances of the composite too, unless we apply as aliases in the editor... hmm...
+            _forceCompReload = false;
         }
 
         if (_currentEntityGOID != _currentEntity)
@@ -70,10 +74,8 @@ public class CommandsEditorConnection : MonoBehaviour
         if (Selection.activeGameObject != _currentEntityGO)
         {
             Selection.activeGameObject = _currentEntityGO;
-            SceneView.FrameLastActiveSceneView();
+            //SceneView.FrameLastActiveSceneView(); <- enable this to focus selected, takes control of cam
         }
-
-        //TODO: move/renderable update should apply to other composites of the same type...
 
         if (_entityMoved)
         {
@@ -231,7 +233,6 @@ public class CommandsEditorConnection : MonoBehaviour
                                 LevelContent.RemappedResources.Add(entity, packet.renderable);
                             }
                         }
-                        //todo: warn if missing
                     }
 
                     _renderable = packet.renderable;
@@ -248,7 +249,7 @@ public class CommandsEditorConnection : MonoBehaviour
                             switch (packet.entity_variant)
                             {
                                 case EntityVariant.FUNCTION:
-                                    composite.functions.Add(new FunctionEntity() { shortGUID = new ShortGuid(packet.entity) });
+                                    composite.functions.Add(new FunctionEntity() { shortGUID = new ShortGuid(packet.entity), function = new ShortGuid(packet.entity_function) });
                                     break;
                                 case EntityVariant.ALIAS:
                                     composite.aliases.Add(new AliasEntity() { shortGUID = new ShortGuid(packet.entity) });
@@ -261,8 +262,8 @@ public class CommandsEditorConnection : MonoBehaviour
                                     break;
                             }
                         }
-                        //todo: resync comp if active - warn if missing
                     }
+                    _forceCompReload = true;
                     break;
                 }
             case PacketEvent.ENTITY_DELETED:
@@ -288,8 +289,8 @@ public class CommandsEditorConnection : MonoBehaviour
                                     break;
                             }
                         }
-                        //todo: resync comp if active - warn if missing
                     }
+                    _forceCompReload = true;
                     break;
                 }
             case PacketEvent.COMPOSITE_ADDED:
@@ -415,6 +416,7 @@ public class CommandsEditorConnection : MonoBehaviour
 
         //Modified entity info
         public EntityVariant entity_variant;
+        public uint entity_function; //For function entities
 
         //Track if things have changed
         public bool dirty = false;

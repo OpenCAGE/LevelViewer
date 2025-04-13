@@ -19,8 +19,8 @@ public class CommandsEditorConnection : MonoBehaviour
 
     private string _levelName = "";
 
-    private string _pathToAI = "";
-    public string PathToAI => _pathToAI;
+    private static string _pathToAI = "";
+    public static string PathToAI => _pathToAI;
 
     private List<uint> _pathComposites;
     private List<uint> _pathEntities;
@@ -41,6 +41,7 @@ public class CommandsEditorConnection : MonoBehaviour
 
     void Start()
     {
+        return;
         _loader = GetComponent<AlienLevelLoader>();
         StartCoroutine(ReconnectLoop());
     }
@@ -49,7 +50,7 @@ public class CommandsEditorConnection : MonoBehaviour
     {
         if (_levelName != "" && _loader.LevelName != _levelName)
         {
-            _loader.LoadLevel(_levelName);
+            UnityLevelContent.instance.LoadLevel(_levelName);
         }
 
         if (_compositeLoaded) 
@@ -95,7 +96,7 @@ public class CommandsEditorConnection : MonoBehaviour
                 }
                 for (int i = 0; i < _renderable.Count; i++)
                 {
-                    _loader.SpawnRenderable(_currentEntityGO, _renderable[i].Item1, _renderable[i].Item2);
+                    //_loader.SpawnRenderable(_currentEntityGO, _renderable[i].Item1, _renderable[i].Item2);
                 }
             }
             _renderableUpdated = false;

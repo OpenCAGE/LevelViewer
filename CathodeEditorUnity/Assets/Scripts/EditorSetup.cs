@@ -1,6 +1,5 @@
 #define LOCAL_DEV
 
-#if UNITY_EDITOR
 using System.Collections;
 using System.Collections.Generic;
 using UnityEngine;
@@ -71,5 +70,4 @@ public static class CloseAllExceptSceneView
         };
     }
 }
-#endif
 #endif

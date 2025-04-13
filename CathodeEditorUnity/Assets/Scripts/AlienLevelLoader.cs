@@ -12,6 +12,7 @@ using CATHODE.Scripting.Internal;
 using System;
 using UnityEditor;
 using System.Collections;
+using System.Resources;
 
 public class AlienLevelLoader : MonoBehaviour
 {
@@ -27,8 +28,6 @@ public class AlienLevelLoader : MonoBehaviour
     public uint CompositeID => _loadedComposite == null ? 0 : _loadedComposite.shortGUID.ToUInt32();
     public string CompositeIDString => _loadedComposite == null || _loadedComposite.shortGUID == ShortGuid.Invalid ? "" : _loadedComposite.shortGUID.ToByteString();
     public string CompositeName => _loadedComposite == null ? "" : _loadedComposite.name;
-
-    private LevelContent _levelContent = null;
 
     private Dictionary<int, Material> _materials = new Dictionary<int, Material>();
     private Dictionary<Material, bool> _materialSupport = new Dictionary<Material, bool>();
@@ -61,7 +60,7 @@ public class AlienLevelLoader : MonoBehaviour
         _materialSupport.Clear();
         _modelGOs.Clear();
 
-        _levelContent = null;
+        LevelContent.Reset();
     }
 
     public void LoadLevel(string level)
@@ -74,11 +73,11 @@ public class AlienLevelLoader : MonoBehaviour
         ResetLevel();
 
         _levelName = level;
-        _levelContent = new LevelContent(_client.PathToAI, level);
+        LevelContent.Load(_client.PathToAI, level);
     }
     public void LoadComposite(ShortGuid guid)
     {
-        if (_levelContent == null) return;
+        if (!LevelContent.Loaded) return;
 
         if (_parentGameObject != null)
             Destroy(_parentGameObject);
@@ -88,7 +87,7 @@ public class AlienLevelLoader : MonoBehaviour
         _parentGameObject.hideFlags |= HideFlags.NotEditable;
 #endif
 
-        Composite comp = _levelContent.CommandsPAK.GetComposite(guid);
+        Composite comp = LevelContent.CommandsPAK.GetComposite(guid);
         Debug.Log("Loading composite " + comp?.name + "...");
         LoadComposite(comp);
 
@@ -129,7 +128,7 @@ public class AlienLevelLoader : MonoBehaviour
             //Jump through to the next composite
             if (!CommandsUtils.FunctionTypeExists(function.function))
             {
-                Composite compositeNext = _levelContent.CommandsPAK.GetComposite(function.function);
+                Composite compositeNext = LevelContent.CommandsPAK.GetComposite(function.function);
                 if (compositeNext != null)
                 {
                     //Find all overrides that are appropriate to take through to the next composite
@@ -162,29 +161,29 @@ public class AlienLevelLoader : MonoBehaviour
                 nodeModel.hideFlags |= HideFlags.NotEditable;
 #endif
 
-                Parameter resourceParam = function.GetParameter("resource");
-                if (resourceParam != null && resourceParam.content != null)
+                if (LevelContent.RemappedResources.ContainsKey(function))
                 {
-                    switch (resourceParam.content.dataType)
+                    List<Tuple<int, int>> renderableElement = LevelContent.RemappedResources[function];
+                    for (int i = 0; i < renderableElement.Count; i++)
                     {
-                        case DataType.RESOURCE:
-                            cResource resource = (cResource)resourceParam.content;
-                            foreach (ResourceReference resourceRef in resource.value)
+                        SpawnRenderable(nodeModel, renderableElement[i].Item1, renderableElement[i].Item2);
+                    }
+                }
+                else
+                {
+                    Parameter resourceParam = function.GetParameter("resource");
+                    if (resourceParam != null && resourceParam.content != null && resourceParam.content.dataType == DataType.RESOURCE)
+                    {
+                        cResource resource = (cResource)resourceParam.content;
+                        ResourceReference renderable = resource.GetResource(ResourceType.RENDERABLE_INSTANCE);
+                        if (renderable != null)
+                        {
+                            for (int i = 0; i < renderable.count; i++)
                             {
-                                for (int i = 0; i < resourceRef.count; i++)
-                                {
-                                    RenderableElements.Element renderable = _levelContent.RenderableREDS.Entries[resourceRef.index + i];
-                                    switch (resourceRef.resource_type)
-                                    {
-                                        case ResourceType.RENDERABLE_INSTANCE:
-                                            SpawnRenderable(nodeModel, renderable.ModelIndex, renderable.MaterialIndex);
-                                            break;
-                                        case ResourceType.COLLISION_MAPPING:
-                                            break;
-                                    }
-                                }
+                                RenderableElements.Element renderableElement = LevelContent.RenderableREDS.Entries[renderable.index + i];
+                                SpawnRenderable(nodeModel, renderableElement.ModelIndex, renderableElement.MaterialIndex);
                             }
-                            break;
+                        }
                     }
                 }
             }
@@ -249,10 +248,10 @@ public class AlienLevelLoader : MonoBehaviour
     {
         if (!_modelGOs.ContainsKey(EntryIndex))
         {
-            Models.CS2.Component.LOD.Submesh submesh = _levelContent.ModelsPAK.GetAtWriteIndex(EntryIndex);
+            Models.CS2.Component.LOD.Submesh submesh = LevelContent.ModelsPAK.GetAtWriteIndex(EntryIndex);
             if (submesh == null) return null;
-            Models.CS2.Component.LOD lod = _levelContent.ModelsPAK.FindModelLODForSubmesh(submesh);
-            Models.CS2 mesh = _levelContent.ModelsPAK.FindModelForSubmesh(submesh);
+            Models.CS2.Component.LOD lod = LevelContent.ModelsPAK.FindModelLODForSubmesh(submesh);
+            Models.CS2 mesh = LevelContent.ModelsPAK.FindModelForSubmesh(submesh);
             Mesh thisMesh = submesh.ToMesh();
 
             GameObjectHolder ThisModelPart = new GameObjectHolder();
@@ -268,14 +267,14 @@ public class AlienLevelLoader : MonoBehaviour
     {
         if (!_materials.ContainsKey(MTLIndex))
         {
-            Materials.Material InMaterial = _levelContent.ModelsMTL.GetAtWriteIndex(MTLIndex);
-            int RemappedIndex = _levelContent.ShadersIDXRemap.Datas[InMaterial.ShaderIndex].Index;
-            ShadersPAK.ShaderEntry Shader = _levelContent.ShadersPAK.Shaders[RemappedIndex];
+            Materials.Material InMaterial = LevelContent.ModelsMTL.GetAtWriteIndex(MTLIndex);
+            int RemappedIndex = LevelContent.ShadersIDXRemap.Datas[InMaterial.ShaderIndex].Index;
+            ShadersPAK.ShaderEntry Shader = LevelContent.ShadersPAK.Shaders[RemappedIndex];
 
             Material toReturn = new Material(UnityEngine.Shader.Find("Standard"));
             toReturn.name = InMaterial.Name;
 
-            ShaderMaterialMetadata metadata = _levelContent.ShadersPAK.GetMaterialMetadataFromShader(InMaterial);
+            ShaderMaterialMetadata metadata = LevelContent.ShadersPAK.GetMaterialMetadataFromShader(InMaterial);
 
             switch (metadata.shaderCategory)
             {
@@ -298,7 +297,7 @@ public class AlienLevelLoader : MonoBehaviour
 
             for (int i = 0; i < Shader.Header.CSTCounts.Length; i++)
             {
-                using (BinaryReader cstReader = new BinaryReader(new MemoryStream(_levelContent.ModelsMTL.CSTData[i])))
+                using (BinaryReader cstReader = new BinaryReader(new MemoryStream(LevelContent.ModelsMTL.CSTData[i])))
                 {
                     int baseOffset = (InMaterial.ConstantBuffers[i].Offset * 4);
 
@@ -335,9 +334,14 @@ public class GameObjectHolder
     public int DefaultMaterial; 
 }
 
-public class LevelContent
+public static class LevelContent
 {
-    public LevelContent(string aiPath, string levelName)
+    static LevelContent()
+    {
+
+    }
+
+    public static void Load(string aiPath, string levelName)
     {
         string levelPath = aiPath + "/DATA/ENV/PRODUCTION/" + levelName + "/";
         string worldPath = levelPath + "WORLD/";
@@ -384,12 +388,30 @@ public class LevelContent
         });
     }
 
-    public Commands CommandsPAK;
-    public RenderableElements RenderableREDS;
-    public CATHODE.Resources ResourcesBIN;
-    public byte[] ModelsCST;
-    public Materials ModelsMTL;
-    public Models ModelsPAK;
-    public ShadersPAK ShadersPAK;
-    public IDXRemap ShadersIDXRemap;
+    public static void Reset()
+    {
+        CommandsPAK = null;
+        RenderableREDS = null;
+        ResourcesBIN = null;
+        ModelsCST = null;
+        ModelsMTL = null;
+        ModelsPAK = null;
+        ShadersPAK = null;
+        ShadersIDXRemap = null;
+        RemappedResources.Clear();
+    }
+
+    public static bool Loaded => CommandsPAK != null && CommandsPAK.Loaded;
+
+    public static Commands CommandsPAK;
+    public static RenderableElements RenderableREDS;
+    public static CATHODE.Resources ResourcesBIN;
+    public static byte[] ModelsCST;
+    public static Materials ModelsMTL;
+    public static Models ModelsPAK;
+    public static ShadersPAK ShadersPAK;
+    public static IDXRemap ShadersIDXRemap;
+
+    //This acts as a temporary override for REDS.BIN mapping runtime changes from Commands Editor
+    public static Dictionary<Entity, List<Tuple<int, int>>> RemappedResources = new Dictionary<Entity, List<Tuple<int, int>>>(); //Model Index, Material Index
 };

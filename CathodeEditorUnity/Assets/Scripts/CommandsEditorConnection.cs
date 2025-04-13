@@ -9,6 +9,8 @@ using WebSocketSharp;
 using CATHODE.Scripting;
 using System.IO;
 using UnityEngine.UIElements;
+using System.Linq;
+using CATHODE.Scripting.Internal;
 
 public class CommandsEditorConnection : MonoBehaviour
 {
@@ -156,6 +158,45 @@ public class CommandsEditorConnection : MonoBehaviour
         {
             case PacketEvent.ENTITY_MOVED:
                 {
+                    lock (_lock)
+                    {
+                        Composite composite = LevelContent.CommandsPAK.Entries.FirstOrDefault(o => o.shortGUID.ToUInt32() == packet.composite);
+                        if (composite != null)
+                        {
+                            Entity entity = null;
+                            switch (packet.entity_variant)
+                            {
+                                case EntityVariant.FUNCTION:
+                                    entity = composite.functions.FirstOrDefault(o => o.shortGUID == new ShortGuid(packet.entity));
+                                    break;
+                                case EntityVariant.ALIAS:
+                                    entity = composite.aliases.FirstOrDefault(o => o.shortGUID == new ShortGuid(packet.entity));
+                                    break;
+                                case EntityVariant.VARIABLE:
+                                    entity = composite.variables.FirstOrDefault(o => o.shortGUID == new ShortGuid(packet.entity));
+                                    break;
+                                case EntityVariant.PROXY:
+                                    entity = composite.proxies.FirstOrDefault(o => o.shortGUID == new ShortGuid(packet.entity));
+                                    break;
+                            }
+                            if (entity != null)
+                            {
+                                Parameter position = entity.GetParameter("position");
+                                if (position == null)
+                                {
+                                    position = entity.AddParameter("position", new cTransform());
+                                }
+                                if (position?.content?.dataType == DataType.TRANSFORM)
+                                {
+                                    cTransform transform = (cTransform)position.content;
+                                    transform.position = new Vector3(packet.position.X, packet.position.Y, packet.position.Z);
+                                    transform.rotation = new Vector3(packet.rotation.X, packet.rotation.Y, packet.rotation.Z);
+                                }
+                            }
+                        }
+                        //todo: warn if missing
+                    }
+
                     _position = new Vector3(packet.position.X, packet.position.Y, packet.position.Z);
                     _rotation = new Vector3(packet.rotation.X, packet.rotation.Y, packet.rotation.Z);
                     _entityMoved = true;
@@ -163,8 +204,108 @@ public class CommandsEditorConnection : MonoBehaviour
                 }
             case PacketEvent.ENTITY_RESOURCE_MODIFIED:
                 {
+                    lock (_lock)
+                    {
+                        Composite composite = LevelContent.CommandsPAK.Entries.FirstOrDefault(o => o.shortGUID.ToUInt32() == packet.composite);
+                        if (composite != null)
+                        {
+                            Entity entity = null;
+                            switch (packet.entity_variant)
+                            {
+                                case EntityVariant.FUNCTION:
+                                    entity = composite.functions.FirstOrDefault(o => o.shortGUID == new ShortGuid(packet.entity));
+                                    break;
+                                case EntityVariant.ALIAS:
+                                    entity = composite.aliases.FirstOrDefault(o => o.shortGUID == new ShortGuid(packet.entity));
+                                    break;
+                                case EntityVariant.VARIABLE:
+                                    entity = composite.variables.FirstOrDefault(o => o.shortGUID == new ShortGuid(packet.entity));
+                                    break;
+                                case EntityVariant.PROXY:
+                                    entity = composite.proxies.FirstOrDefault(o => o.shortGUID == new ShortGuid(packet.entity));
+                                    break;
+                            }
+                            if (entity != null)
+                            {
+                                LevelContent.RemappedResources.Remove(entity);
+                                LevelContent.RemappedResources.Add(entity, packet.renderable);
+                            }
+                        }
+                        //todo: warn if missing
+                    }
+
                     _renderable = packet.renderable;
                     _renderableUpdated = true;
+                    break;
+                }
+            case PacketEvent.ENTITY_ADDED:
+                {
+                    lock (_lock)
+                    {
+                        Composite composite = LevelContent.CommandsPAK.Entries.FirstOrDefault(o => o.shortGUID.ToUInt32() == packet.composite);
+                        if (composite != null)
+                        {
+                            switch (packet.entity_variant)
+                            {
+                                case EntityVariant.FUNCTION:
+                                    composite.functions.Add(new FunctionEntity() { shortGUID = new ShortGuid(packet.entity) });
+                                    break;
+                                case EntityVariant.ALIAS:
+                                    composite.aliases.Add(new AliasEntity() { shortGUID = new ShortGuid(packet.entity) });
+                                    break;
+                                case EntityVariant.VARIABLE:
+                                    composite.variables.Add(new VariableEntity() { shortGUID = new ShortGuid(packet.entity) });
+                                    break;
+                                case EntityVariant.PROXY:
+                                    composite.proxies.Add(new ProxyEntity() { shortGUID = new ShortGuid(packet.entity) });
+                                    break;
+                            }
+                        }
+                        //todo: resync comp if active - warn if missing
+                    }
+                    break;
+                }
+            case PacketEvent.ENTITY_DELETED:
+                {
+                    lock (_lock)
+                    {
+                        Composite composite = LevelContent.CommandsPAK.Entries.FirstOrDefault(o => o.shortGUID.ToUInt32() == packet.composite);
+                        if (composite != null)
+                        {
+                            switch (packet.entity_variant)
+                            {
+                                case EntityVariant.FUNCTION:
+                                    composite.functions.RemoveAll(o => o.shortGUID == new ShortGuid(packet.entity));
+                                    break;
+                                case EntityVariant.ALIAS:
+                                    composite.aliases.RemoveAll(o => o.shortGUID == new ShortGuid(packet.entity));
+                                    break;
+                                case EntityVariant.VARIABLE:
+                                    composite.variables.RemoveAll(o => o.shortGUID == new ShortGuid(packet.entity));
+                                    break;
+                                case EntityVariant.PROXY:
+                                    composite.proxies.RemoveAll(o => o.shortGUID == new ShortGuid(packet.entity));
+                                    break;
+                            }
+                        }
+                        //todo: resync comp if active - warn if missing
+                    }
+                    break;
+                }
+            case PacketEvent.COMPOSITE_ADDED:
+                {
+                    lock (_lock)
+                    {
+                        LevelContent.CommandsPAK.Entries.Add(new Composite() { shortGUID = new ShortGuid(packet.composite) });
+                    }
+                    break;
+                }
+            case PacketEvent.COMPOSITE_DELETED:
+                {
+                    lock (_lock)
+                    {
+                        LevelContent.CommandsPAK.Entries.RemoveAll(o => o.shortGUID == new ShortGuid(packet.composite));
+                    }
                     break;
                 }
         }
@@ -233,6 +374,7 @@ public class CommandsEditorConnection : MonoBehaviour
         COMPOSITE_SELECTED,
         COMPOSITE_RELOADED,
         COMPOSITE_DELETED,
+        COMPOSITE_ADDED,
 
         ENTITY_SELECTED,
         ENTITY_MOVED,
@@ -261,6 +403,8 @@ public class CommandsEditorConnection : MonoBehaviour
         //Selection metadata
         public List<uint> path_entities = new List<uint>();
         public List<uint> path_composites = new List<uint>();
+        public uint entity;
+        public uint composite;
 
         //Transform
         public System.Numerics.Vector3 position = new System.Numerics.Vector3();
@@ -268,6 +412,9 @@ public class CommandsEditorConnection : MonoBehaviour
 
         //Renderable resource
         public List<Tuple<int, int>> renderable = new List<Tuple<int, int>>(); //Model Index, Material Index
+
+        //Modified entity info
+        public EntityVariant entity_variant;
 
         //Track if things have changed
         public bool dirty = false;

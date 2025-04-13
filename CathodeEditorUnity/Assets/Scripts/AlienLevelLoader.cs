@@ -9,13 +9,9 @@ using System.Threading.Tasks;
 using CATHODE.Scripting;
 using System.Linq;
 using CATHODE.Scripting.Internal;
-using UnityEngine.UIElements;
 using System;
-using Newtonsoft.Json;
-using System.Reflection;
 using UnityEditor;
 using System.Collections;
-using static CATHODE.Textures.TEX4;
 
 public class AlienLevelLoader : MonoBehaviour
 {

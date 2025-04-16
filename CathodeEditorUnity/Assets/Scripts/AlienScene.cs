@@ -13,8 +13,9 @@ using System;
 using UnityEditor;
 using System.Collections;
 using System.Resources;
+using System.Security.Principal;
 
-public class AlienLevelLoader : MonoBehaviour
+public class AlienScene : MonoBehaviour
 {
     public Action OnLoaded;
 
@@ -32,6 +33,10 @@ public class AlienLevelLoader : MonoBehaviour
     private Dictionary<int, Material> _materials = new Dictionary<int, Material>();
     private Dictionary<Material, bool> _materialSupport = new Dictionary<Material, bool>();
     private Dictionary<int, GameObjectHolder> _modelGOs = new Dictionary<int, GameObjectHolder>();
+
+    //private Dictionary<ShortGuid, Dictionary<ShortGuid, GameObject>> _pointedEntities = new Dictionary<ShortGuid, Dictionary<ShortGuid, GameObject>>(); //mapping ProxyEntity/AliasEntity to their pointed GameObjects in scene
+    
+    private Dictionary<ShortGuid, List<GameObject>> _compositeGameObjects = new Dictionary<ShortGuid, List<GameObject>>();
 
     private CommandsEditorConnection _client;
 
@@ -60,6 +65,8 @@ public class AlienLevelLoader : MonoBehaviour
         _materialSupport.Clear();
         _modelGOs.Clear();
 
+        _compositeGameObjects.Clear();
+
         LevelContent.Reset();
     }
 
@@ -75,7 +82,7 @@ public class AlienLevelLoader : MonoBehaviour
         _levelName = level;
         LevelContent.Load(_client.PathToAI, level);
     }
-    public void LoadComposite(ShortGuid guid)
+    public void PopulateComposite(ShortGuid guid)
     {
         if (!LevelContent.Loaded) return;
 
@@ -83,105 +90,202 @@ public class AlienLevelLoader : MonoBehaviour
             Destroy(_parentGameObject);
         _parentGameObject = new GameObject(_levelName);
 #if UNITY_EDITOR
-        _parentGameObject.hideFlags |= HideFlags.HideInHierarchy;
-        _parentGameObject.hideFlags |= HideFlags.NotEditable;
+        //_parentGameObject.hideFlags |= HideFlags.HideInHierarchy;
+        //_parentGameObject.hideFlags |= HideFlags.NotEditable;
 #endif
 
         Composite comp = LevelContent.CommandsPAK.GetComposite(guid);
         Debug.Log("Loading composite " + comp?.name + "...");
-        LoadComposite(comp);
+        _loadedComposite = comp;
+        AddCompositeInstance(comp, _parentGameObject, null, Vector3.zero, Quaternion.identity);
 
         OnLoaded?.Invoke();
     }
 
-    /* Load Commands data */
-    private void LoadComposite(Composite composite)
-    {
-        _loadedComposite = composite;
-        ParseComposite(composite, _parentGameObject, null, Vector3.zero, Quaternion.identity, new List<AliasEntity>());
-    }
-    void ParseComposite(Composite composite, GameObject parentGO, Entity parentEntity, Vector3 parentPos, Quaternion parentRot, List<AliasEntity> aliases)
+    void AddCompositeInstance(Composite composite, GameObject parentGO, Entity parentEntity, Vector3 parentPos, Quaternion parentRot)
     {
         if (composite == null) return;
         GameObject compositeGO = parentEntity == null ? _parentGameObject : new GameObject(parentEntity.shortGUID.ToUInt32().ToString());
         compositeGO.transform.parent = parentGO.transform;
         compositeGO.transform.SetLocalPositionAndRotation(parentPos, parentRot);
 #if UNITY_EDITOR
-        compositeGO.hideFlags |= HideFlags.NotEditable;
+        //compositeGO.hideFlags |= HideFlags.NotEditable;
 #endif
-
-        //Compile all appropriate overrides, and keep the hierarchies trimmed so that index zero is accurate to this composite
-        List<AliasEntity> trimmedAliases = new List<AliasEntity>();
-        for (int i = 0; i < aliases.Count; i++)
+        if (_compositeGameObjects.ContainsKey(composite.shortGUID))
         {
-            List<ShortGuid> path = aliases[i].alias.path.ToList();
-            path.RemoveAt(0);
-            if (path.Count != 0)
-                trimmedAliases.Add(aliases[i]);
+            _compositeGameObjects[composite.shortGUID].Add(compositeGO);
         }
-        trimmedAliases.AddRange(composite.aliases);
-        aliases = trimmedAliases;
-
-        //Parse all functions in this composite & handle them appropriately
-        foreach (FunctionEntity function in composite.functions)
+        else
         {
-            //Jump through to the next composite
-            if (!CommandsUtils.FunctionTypeExists(function.function))
+            List<GameObject> compositeGOs = new List<GameObject>();
+            compositeGOs.Add(compositeGO);
+            _compositeGameObjects.Add(composite.shortGUID, compositeGOs);
+        }
+
+        foreach (Entity entity in composite.GetEntities())
+        {
+            AddEntity(composite, entity, compositeGO);
+        }
+    }
+
+    public void RemoveComposite(ShortGuid composite)
+    {
+        if (_compositeGameObjects.ContainsKey(composite))
+        {
+            foreach (GameObject compositeInstance in _compositeGameObjects[composite])
             {
-                Composite compositeNext = LevelContent.CommandsPAK.GetComposite(function.function);
-                if (compositeNext != null)
+                if (compositeInstance != null)
                 {
-                    //Find all overrides that are appropriate to take through to the next composite
-                    List<AliasEntity> overridesNext = trimmedAliases.FindAll(o => o.alias.path[0] == function.shortGUID);
-
-                    //Work out our position, accounting for overrides
-                    Vector3 position, rotation;
-                    AliasEntity ovrride = trimmedAliases.FirstOrDefault(o => o.alias.path.Length == (o.alias.path[o.alias.path.Length - 1] == ShortGuid.Invalid ? 2 : 1) && o.alias.path[0] == function.shortGUID);
-                    if (!GetEntityTransform(ovrride, out position, out rotation))
-                        GetEntityTransform(function, out position, out rotation);
-
-                    //Continue
-                    ParseComposite(compositeNext, compositeGO, function, position, Quaternion.Euler(rotation), overridesNext);
+                    Destroy(compositeInstance);
                 }
             }
+            _compositeGameObjects.Remove(composite);
+        }
+    }
 
-            //Parse model data
-            else if (CommandsUtils.GetFunctionType(function.function) == FunctionType.ModelReference)
+    public void AddEntity(ShortGuid composite, ShortGuid entity)
+    {
+        string entityGameObjectName = entity.ToUInt32().ToString();
+        if (_compositeGameObjects.ContainsKey(composite))
+        {
+            foreach (GameObject compositeInstance in _compositeGameObjects[composite])
             {
-                //Work out our position, accounting for overrides
-                Vector3 position, rotation;
-                AliasEntity ovrride = trimmedAliases.FirstOrDefault(o => o.alias.path.Length == 1 && o.alias.path[0] == function.shortGUID);
-                if (!GetEntityTransform(ovrride, out position, out rotation))
-                    GetEntityTransform(function, out position, out rotation);
-
-                GameObject nodeModel = new GameObject(function.shortGUID.ToUInt32().ToString());
-                nodeModel.transform.parent = compositeGO.transform;
-                nodeModel.transform.SetLocalPositionAndRotation(position, Quaternion.Euler(rotation));
-#if UNITY_EDITOR
-                nodeModel.hideFlags |= HideFlags.NotEditable;
-#endif
-
-                if (LevelContent.RemappedResources.ContainsKey(function))
+                if (compositeInstance != null)
                 {
-                    List<Tuple<int, int>> renderableElement = LevelContent.RemappedResources[function];
-                    for (int i = 0; i < renderableElement.Count; i++)
+                    Composite c = LevelContent.CommandsPAK.Entries.FirstOrDefault(o => o.shortGUID == composite);
+                    Entity e = c.GetEntityByID(entity);
+                    if (c != null && e != null)
                     {
-                        SpawnRenderable(nodeModel, renderableElement[i].Item1, renderableElement[i].Item2);
+                        Debug.Log("Adding GameObject!");
+                        AddEntity(c, e, compositeInstance);
                     }
                 }
-                else
+            }
+        }
+    }
+
+    private void AddEntity(Composite composite, Entity entity, GameObject parentGO)
+    {
+        GetEntityTransform(entity, out Vector3 position, out Vector3 rotation);
+
+        switch (entity.variant)
+        {
+            //Create mapped entity which can override original data
+            case EntityVariant.ALIAS:
+
+                break;
+            case EntityVariant.PROXY:
+
+                break;
+
+            //Create base entity which provides its own data
+            case EntityVariant.FUNCTION:
                 {
-                    Parameter resourceParam = function.GetParameter("resource");
-                    if (resourceParam != null && resourceParam.content != null && resourceParam.content.dataType == DataType.RESOURCE)
+                    FunctionEntity function = (FunctionEntity)entity;
+
+                    if (!CommandsUtils.FunctionTypeExists(function.function))
                     {
-                        cResource resource = (cResource)resourceParam.content;
-                        ResourceReference renderable = resource.GetResource(ResourceType.RENDERABLE_INSTANCE);
-                        if (renderable != null)
+                        Composite compositeNext = LevelContent.CommandsPAK.GetComposite(function.function);
+                        if (compositeNext != null)
                         {
-                            for (int i = 0; i < renderable.count; i++)
+                            AddCompositeInstance(compositeNext, parentGO, function, position, Quaternion.Euler(rotation));
+                        }
+                    }
+                    else
+                    {
+                        switch ((FunctionType)function.function.ToUInt32())
+                        {
+                            case FunctionType.ModelReference:
+                                GameObject nodeModel = new GameObject(function.shortGUID.ToUInt32().ToString());
+                                nodeModel.transform.parent = parentGO.transform;
+                                nodeModel.transform.SetLocalPositionAndRotation(position, Quaternion.Euler(rotation));
+#if UNITY_EDITOR
+                                //nodeModel.hideFlags |= HideFlags.NotEditable;
+#endif
+
+                                if (LevelContent.RemappedResources.ContainsKey(function))
+                                {
+                                    List<Tuple<int, int>> renderableElement = LevelContent.RemappedResources[function];
+                                    for (int i = 0; i < renderableElement.Count; i++)
+                                    {
+                                        SpawnRenderable(nodeModel, renderableElement[i].Item1, renderableElement[i].Item2);
+                                    }
+                                }
+                                else
+                                {
+                                    Parameter resourceParam = function.GetParameter("resource");
+                                    if (resourceParam != null && resourceParam.content != null && resourceParam.content.dataType == DataType.RESOURCE)
+                                    {
+                                        cResource resource = (cResource)resourceParam.content;
+                                        ResourceReference renderable = resource.GetResource(ResourceType.RENDERABLE_INSTANCE);
+                                        if (renderable != null)
+                                        {
+                                            for (int i = 0; i < renderable.count; i++)
+                                            {
+                                                RenderableElements.Element renderableElement = LevelContent.RenderableREDS.Entries[renderable.index + i];
+                                                SpawnRenderable(nodeModel, renderableElement.ModelIndex, renderableElement.MaterialIndex);
+                                            }
+                                        }
+                                    }
+                                }
+                                break;
+                        }
+                    }
+                }
+                break;
+        }
+    }
+
+    public void RemoveEntity(ShortGuid composite, ShortGuid entity)
+    {
+        string entityGameObjectName = entity.ToUInt32().ToString();
+        if (_compositeGameObjects.ContainsKey(composite))
+        {
+            foreach (GameObject compositeInstance in _compositeGameObjects[composite])
+            {
+                if (compositeInstance != null)
+                {
+                    Transform compositeInstanceTransform = compositeInstance.transform;
+                    for (int i = 0; i < compositeInstanceTransform.childCount; i++)
+                    {
+                        Debug.Log("Removing GameObject!");
+
+                        Transform child = compositeInstanceTransform.GetChild(i);
+                        if (child.name == entityGameObjectName)
+                        {
+                            Destroy(child.gameObject);
+                        }
+                    }
+                }
+            }
+            _compositeGameObjects.Remove(composite);
+        }
+    }
+
+    public void UpdateRenderable(ShortGuid composite, ShortGuid entity, List<Tuple<int, int>> renderables)
+    {
+        string entityGameObjectName = entity.ToUInt32().ToString();
+        if (_compositeGameObjects.ContainsKey(composite))
+        {
+            foreach (GameObject compositeInstance in _compositeGameObjects[composite])
+            {
+                if (compositeInstance != null)
+                {
+                    Transform compositeInstanceTransform = compositeInstance.transform;
+                    for (int i = 0; i < compositeInstanceTransform.childCount; i++)
+                    {
+                        Debug.Log("Updating renderable GameObject!");
+
+                        Transform child = compositeInstanceTransform.GetChild(i);
+                        if (child.name == entityGameObjectName)
+                        {
+                            for (int x = 0; x < child.childCount; x++)
                             {
-                                RenderableElements.Element renderableElement = LevelContent.RenderableREDS.Entries[renderable.index + i];
-                                SpawnRenderable(nodeModel, renderableElement.ModelIndex, renderableElement.MaterialIndex);
+                                Destroy(child.GetChild(x).gameObject);
+                            }
+                            for (int x = 0; x < renderables.Count; x++)
+                            {
+                                SpawnRenderable(child.gameObject, renderables[x].Item1, renderables[x].Item2);
                             }
                         }
                     }
@@ -207,10 +311,10 @@ public class AlienLevelLoader : MonoBehaviour
         newModelSpawn.transform.parent = parent.transform;
         newModelSpawn.transform.localPosition = Vector3.zero;
         newModelSpawn.transform.localRotation = Quaternion.identity;
-        newModelSpawn.name = parent.name;
+        newModelSpawn.name = holder.MainMesh.name;
         newModelSpawn.AddComponent<MeshFilter>().sharedMesh = holder.MainMesh;
 #if UNITY_EDITOR
-        newModelSpawn.hideFlags |= HideFlags.NotEditable;
+        //newModelSpawn.hideFlags |= HideFlags.NotEditable;
 #endif
 
         MeshRenderer renderer = newModelSpawn.AddComponent<MeshRenderer>();

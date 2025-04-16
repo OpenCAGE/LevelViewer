@@ -12,10 +12,11 @@ using UnityEngine.UIElements;
 using System.Linq;
 using CATHODE.Scripting.Internal;
 
+[RequireComponent(typeof(AlienScene))]
 public class CommandsEditorConnection : MonoBehaviour
 {
     private WebSocket _client;
-    private AlienLevelLoader _loader;
+    private AlienScene _scene;
 
     private readonly object _lock = new object();
 
@@ -39,93 +40,22 @@ public class CommandsEditorConnection : MonoBehaviour
     private bool _entityMoved = false;
 
     List<Tuple<int, int>> _renderable;
-    private bool _renderableUpdated = false;
+    private Tuple<ShortGuid, ShortGuid> _renderableEntity = null;
 
-    //NOTE: This is a hacky way of reloading the active composite when an entity is added/deleted. Need to decouple the loading logic to make this nicer.
-    private bool _forceCompReload = false;
+    private Tuple<ShortGuid, ShortGuid> _addedEntity = null;
+    private Tuple<ShortGuid, ShortGuid> _removedEntity = null;
+    private ShortGuid _removedComposite = ShortGuid.Invalid;
 
     void Start()
     {
-        _loader = GetComponent<AlienLevelLoader>();
+        _scene = GetComponent<AlienScene>();
         StartCoroutine(ReconnectLoop());
     }
 
-    private void FixedUpdate()
-    {
-        if (_levelName != "" && _loader.LevelName != _levelName)
-        {
-            _loader.LoadLevel(_levelName);
-        }
-
-        if (_compositeLoaded) 
-        {
-            if (_forceCompReload || _loader.CompositeID != _pathComposites[0])
-                _loader.LoadComposite(new ShortGuid(_pathComposites[0]));
-            //if (_loader.highlighted) <- todo: add highlighting for actual active composite. the modification should apply to ALL instances of the composite too, unless we apply as aliases in the editor... hmm...
-            _forceCompReload = false;
-        }
-
-        if (_currentEntityGOID != _currentEntity)
-        {
-            _currentEntityGO = ResolvePath();
-            _currentEntityGOID = _currentEntity;
-        }
-
-        if (Selection.activeGameObject != _currentEntityGO)
-        {
-            Selection.activeGameObject = _currentEntityGO;
-            //SceneView.FrameLastActiveSceneView(); <- enable this to focus selected, takes control of cam
-        }
-
-        if (_entityMoved)
-        {
-            if (_currentEntityGO != null)
-            {
-                _currentEntityGO.transform.position = _position;
-                _currentEntityGO.transform.rotation = Quaternion.Euler(_rotation);
-            }
-            _entityMoved = false;
-        }
-
-        //TODO: we should show a fake gizmo with the current position
-
-        if (_renderableUpdated)
-        {
-            if (_currentEntityGO != null)
-            {
-                for (int i = 0; i < _currentEntityGO.transform.childCount; i++)
-                {
-                    Destroy(_currentEntityGO.transform.GetChild(i).gameObject);
-                }
-                for (int i = 0; i < _renderable.Count; i++)
-                {
-                    _loader.SpawnRenderable(_currentEntityGO, _renderable[i].Item1, _renderable[i].Item2);
-                }
-            }
-            _renderableUpdated = false;
-        }
-    }
-
-    private GameObject ResolvePath()
-    {
-        try
-        {
-            Transform t = _loader.ParentGameObject.transform;
-            for (int i = 0; i < _pathEntities.Count; i++)
-                t = t.Find(_pathEntities[i].ToString());
-            return t.gameObject;
-        }
-        catch
-        {
-            //This can fail if we're selecting an entity which isn't a function.
-            //We should populate placeholders for these so we can still show the transforms probably.
-            return null;
-        }
-    }
-
+    /* Recieve data from Commands Editor and sync it to our local Commands object */
     private void OnMessage(object sender, MessageEventArgs e)
     {
-        Debug.Log(e.Data);
+        //Debug.Log(e.Data);
 
         Packet packet = JsonConvert.DeserializeObject<Packet>(e.Data);
 
@@ -171,11 +101,11 @@ public class CommandsEditorConnection : MonoBehaviour
                                 case EntityVariant.FUNCTION:
                                     entity = composite.functions.FirstOrDefault(o => o.shortGUID == new ShortGuid(packet.entity));
                                     break;
-                                case EntityVariant.ALIAS:
-                                    entity = composite.aliases.FirstOrDefault(o => o.shortGUID == new ShortGuid(packet.entity));
-                                    break;
                                 case EntityVariant.VARIABLE:
                                     entity = composite.variables.FirstOrDefault(o => o.shortGUID == new ShortGuid(packet.entity));
+                                    break;
+                                case EntityVariant.ALIAS:
+                                    entity = composite.aliases.FirstOrDefault(o => o.shortGUID == new ShortGuid(packet.entity));
                                     break;
                                 case EntityVariant.PROXY:
                                     entity = composite.proxies.FirstOrDefault(o => o.shortGUID == new ShortGuid(packet.entity));
@@ -196,35 +126,36 @@ public class CommandsEditorConnection : MonoBehaviour
                                 }
                             }
                         }
-                        //todo: warn if missing
-                    }
 
-                    _position = new Vector3(packet.position.X, packet.position.Y, packet.position.Z);
-                    _rotation = new Vector3(packet.rotation.X, packet.rotation.Y, packet.rotation.Z);
-                    _entityMoved = true;
+                        _position = new Vector3(packet.position.X, packet.position.Y, packet.position.Z);
+                        _rotation = new Vector3(packet.rotation.X, packet.rotation.Y, packet.rotation.Z);
+                        _entityMoved = true;
+                    }
                     break;
                 }
             case PacketEvent.ENTITY_RESOURCE_MODIFIED:
                 {
                     lock (_lock)
                     {
-                        Composite composite = LevelContent.CommandsPAK.Entries.FirstOrDefault(o => o.shortGUID.ToUInt32() == packet.composite);
+                        ShortGuid entityID = new ShortGuid(packet.entity);
+                        ShortGuid compositeID = new ShortGuid(packet.composite);
+                        Composite composite = LevelContent.CommandsPAK.Entries.FirstOrDefault(o => o.shortGUID == compositeID);
                         if (composite != null)
                         {
                             Entity entity = null;
                             switch (packet.entity_variant)
                             {
                                 case EntityVariant.FUNCTION:
-                                    entity = composite.functions.FirstOrDefault(o => o.shortGUID == new ShortGuid(packet.entity));
-                                    break;
-                                case EntityVariant.ALIAS:
-                                    entity = composite.aliases.FirstOrDefault(o => o.shortGUID == new ShortGuid(packet.entity));
+                                    entity = composite.functions.FirstOrDefault(o => o.shortGUID == entityID);
                                     break;
                                 case EntityVariant.VARIABLE:
-                                    entity = composite.variables.FirstOrDefault(o => o.shortGUID == new ShortGuid(packet.entity));
+                                    entity = composite.variables.FirstOrDefault(o => o.shortGUID == entityID);
+                                    break;
+                                case EntityVariant.ALIAS:
+                                    entity = composite.aliases.FirstOrDefault(o => o.shortGUID == entityID);
                                     break;
                                 case EntityVariant.PROXY:
-                                    entity = composite.proxies.FirstOrDefault(o => o.shortGUID == new ShortGuid(packet.entity));
+                                    entity = composite.proxies.FirstOrDefault(o => o.shortGUID == entityID);
                                     break;
                             }
                             if (entity != null)
@@ -233,10 +164,10 @@ public class CommandsEditorConnection : MonoBehaviour
                                 LevelContent.RemappedResources.Add(entity, packet.renderable);
                             }
                         }
-                    }
 
-                    _renderable = packet.renderable;
-                    _renderableUpdated = true;
+                        _renderable = packet.renderable;
+                        _renderableEntity = new Tuple<ShortGuid, ShortGuid>(compositeID, entityID);
+                    }
                     break;
                 }
             case PacketEvent.ENTITY_ADDED:
@@ -251,19 +182,26 @@ public class CommandsEditorConnection : MonoBehaviour
                                 case EntityVariant.FUNCTION:
                                     composite.functions.Add(new FunctionEntity() { shortGUID = new ShortGuid(packet.entity), function = new ShortGuid(packet.entity_function) });
                                     break;
-                                case EntityVariant.ALIAS:
-                                    composite.aliases.Add(new AliasEntity() { shortGUID = new ShortGuid(packet.entity) });
-                                    break;
                                 case EntityVariant.VARIABLE:
                                     composite.variables.Add(new VariableEntity() { shortGUID = new ShortGuid(packet.entity) });
                                     break;
+                                case EntityVariant.ALIAS:
+                                    EntityPath alias = new EntityPath() { path = new ShortGuid[packet.entity_pointed.Count] };
+                                    for (int i = 0; i < packet.entity_pointed.Count; i++)
+                                        alias.path[i] = new ShortGuid(packet.entity_pointed[i]);
+                                    composite.aliases.Add(new AliasEntity() { shortGUID = new ShortGuid(packet.entity), alias = alias });
+                                    break;
                                 case EntityVariant.PROXY:
-                                    composite.proxies.Add(new ProxyEntity() { shortGUID = new ShortGuid(packet.entity) });
+                                    EntityPath proxy = new EntityPath() { path = new ShortGuid[packet.entity_pointed.Count] };
+                                    for (int i = 0; i < packet.entity_pointed.Count; i++)
+                                        proxy.path[i] = new ShortGuid(packet.entity_pointed[i]);
+                                    composite.proxies.Add(new ProxyEntity() { shortGUID = new ShortGuid(packet.entity), proxy = proxy });
                                     break;
                             }
                         }
+
+                        _addedEntity = new Tuple<ShortGuid, ShortGuid>(new ShortGuid(packet.composite), new ShortGuid(packet.entity));
                     }
-                    _forceCompReload = true;
                     break;
                 }
             case PacketEvent.ENTITY_DELETED:
@@ -289,8 +227,9 @@ public class CommandsEditorConnection : MonoBehaviour
                                     break;
                             }
                         }
+
+                        _removedEntity = new Tuple<ShortGuid, ShortGuid>(new ShortGuid(packet.composite), new ShortGuid(packet.entity));
                     }
-                    _forceCompReload = true;
                     break;
                 }
             case PacketEvent.COMPOSITE_ADDED:
@@ -306,15 +245,98 @@ public class CommandsEditorConnection : MonoBehaviour
                     lock (_lock)
                     {
                         LevelContent.CommandsPAK.Entries.RemoveAll(o => o.shortGUID == new ShortGuid(packet.composite));
+
+                        _removedComposite = new ShortGuid(packet.composite);
                     }
                     break;
                 }
         }
     }
 
-    private void OnClose(object sender, CloseEventArgs e)
+    /* Sync any changes that happened with our Unity scene */
+    private void FixedUpdate()
     {
+        if (_levelName != "" && _scene.LevelName != _levelName)
+        {
+            _scene.LoadLevel(_levelName);
+        }
 
+        if (_compositeLoaded)
+        {
+            if (_scene.CompositeID != _pathComposites[0])
+                _scene.PopulateComposite(new ShortGuid(_pathComposites[0]));
+            //if (_loader.highlighted) <- todo: add highlighting for actual active composite. the modification should apply to ALL instances of the composite too, unless we apply as aliases in the editor... hmm...
+        }
+
+        if (_addedEntity != null)
+        {
+            Debug.Log("Adding entity: " + _addedEntity.Item2);
+            _scene.AddEntity(_addedEntity.Item1, _addedEntity.Item2);
+            _addedEntity = null;
+        }
+
+        if (_removedEntity != null)
+        {
+            Debug.Log("Removing entity: " + _removedEntity.Item2);
+            _scene.RemoveEntity(_removedEntity.Item1, _removedEntity.Item2);
+            _removedEntity = null;
+        }
+
+        if (_removedComposite != ShortGuid.Invalid)
+        {
+            Debug.Log("Removing composite: " + _removedComposite);
+            _scene.RemoveComposite(_removedComposite);
+            _removedComposite = ShortGuid.Invalid;
+        }
+
+        if (_renderableEntity != null)
+        {
+            Debug.Log("Updating renderables for entity: " + _renderableEntity.Item2 + " [" + _renderable.Count + "]");
+            _scene.UpdateRenderable(_renderableEntity.Item1, _renderableEntity.Item2, _renderable);
+            _renderableEntity = null;
+        }
+
+        if (_currentEntityGOID != _currentEntity)
+        {
+            _currentEntityGO = ResolvePath();
+            _currentEntityGOID = _currentEntity;
+        }
+
+        if (Selection.activeGameObject != _currentEntityGO)
+        {
+            Selection.activeGameObject = _currentEntityGO;
+            //SceneView.FrameLastActiveSceneView(); <- enable this to focus selected, takes control of cam
+        }
+
+        if (_entityMoved)
+        {
+            if (_currentEntityGO != null)
+            {
+                _currentEntityGO.transform.position = _position;
+                _currentEntityGO.transform.rotation = Quaternion.Euler(_rotation);
+            }
+            _entityMoved = false;
+        }
+
+        //TODO: we should show a fake gizmo with the current position
+
+    }
+
+    private GameObject ResolvePath()
+    {
+        try
+        {
+            Transform t = _scene.ParentGameObject.transform;
+            for (int i = 0; i < _pathEntities.Count; i++)
+                t = t.Find(_pathEntities[i].ToString());
+            return t.gameObject;
+        }
+        catch
+        {
+            //This can fail if we're selecting an entity which isn't a function.
+            //We should populate placeholders for these so we can still show the transforms probably.
+            return null;
+        }
     }
 
     private IEnumerator ReconnectLoop()
@@ -326,14 +348,10 @@ public class CommandsEditorConnection : MonoBehaviour
             if (_client != null)
             {
                 _client.OnMessage -= OnMessage;
-                _client.OnOpen -= Client_OnOpen;
-                _client.OnClose -= OnClose;
             }
 
             _client = new WebSocket("ws://localhost:1702/commands_editor");
             _client.OnMessage += OnMessage;
-            _client.OnOpen += Client_OnOpen;
-            _client.OnClose += OnClose;
 
             Debug.Log("Trying to connect to Commands Editor...");
 
@@ -354,11 +372,6 @@ public class CommandsEditorConnection : MonoBehaviour
         }
     }
 
-    private void Client_OnOpen(object sender, EventArgs e)
-    {
-
-    }
-
     public void SendMessage(Packet content)
     {
         _client.Send(JsonConvert.SerializeObject(content));
@@ -366,7 +379,7 @@ public class CommandsEditorConnection : MonoBehaviour
 
 
 
-
+    #region PACKET
     //TODO: Keep this in sync with clients
     public enum PacketEvent
     {
@@ -417,8 +430,10 @@ public class CommandsEditorConnection : MonoBehaviour
         //Modified entity info
         public EntityVariant entity_variant;
         public uint entity_function; //For function entities
+        public List<uint> entity_pointed; //For alias/proxy entities
 
         //Track if things have changed
         public bool dirty = false;
     }
+    #endregion
 }

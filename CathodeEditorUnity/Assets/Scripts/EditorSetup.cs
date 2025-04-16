@@ -40,8 +40,10 @@ public class SetSceneAndDisableTools
 
     static void ForceNoTools()
     {
+#if !LOCAL_DEV
         if (Tools.current != Tool.None)
             Tools.current = Tool.None;
+#endif
     }
 }
 

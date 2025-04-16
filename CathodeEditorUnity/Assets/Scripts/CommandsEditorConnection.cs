@@ -37,7 +37,7 @@ public class CommandsEditorConnection : MonoBehaviour
 
     private Vector3 _position;
     private Vector3 _rotation;
-    private bool _entityMoved = false;
+    private Tuple<ShortGuid, ShortGuid> _movedEntity = null;
 
     List<Tuple<int, int>> _renderable;
     private Tuple<ShortGuid, ShortGuid> _renderableEntity = null;
@@ -92,23 +92,25 @@ public class CommandsEditorConnection : MonoBehaviour
                 {
                     lock (_lock)
                     {
-                        Composite composite = LevelContent.CommandsPAK.Entries.FirstOrDefault(o => o.shortGUID.ToUInt32() == packet.composite);
+                        ShortGuid entityID = new ShortGuid(packet.entity);
+                        ShortGuid compositeID = new ShortGuid(packet.composite);
+                        Composite composite = LevelContent.CommandsPAK.Entries.FirstOrDefault(o => o.shortGUID == compositeID);
                         if (composite != null)
                         {
                             Entity entity = null;
                             switch (packet.entity_variant)
                             {
                                 case EntityVariant.FUNCTION:
-                                    entity = composite.functions.FirstOrDefault(o => o.shortGUID == new ShortGuid(packet.entity));
+                                    entity = composite.functions.FirstOrDefault(o => o.shortGUID == entityID);
                                     break;
                                 case EntityVariant.VARIABLE:
-                                    entity = composite.variables.FirstOrDefault(o => o.shortGUID == new ShortGuid(packet.entity));
+                                    entity = composite.variables.FirstOrDefault(o => o.shortGUID == entityID);
                                     break;
                                 case EntityVariant.ALIAS:
-                                    entity = composite.aliases.FirstOrDefault(o => o.shortGUID == new ShortGuid(packet.entity));
+                                    entity = composite.aliases.FirstOrDefault(o => o.shortGUID == entityID);
                                     break;
                                 case EntityVariant.PROXY:
-                                    entity = composite.proxies.FirstOrDefault(o => o.shortGUID == new ShortGuid(packet.entity));
+                                    entity = composite.proxies.FirstOrDefault(o => o.shortGUID == entityID);
                                     break;
                             }
                             if (entity != null)
@@ -129,7 +131,7 @@ public class CommandsEditorConnection : MonoBehaviour
 
                         _position = new Vector3(packet.position.X, packet.position.Y, packet.position.Z);
                         _rotation = new Vector3(packet.rotation.X, packet.rotation.Y, packet.rotation.Z);
-                        _entityMoved = true;
+                        _movedEntity = new Tuple<ShortGuid, ShortGuid>(compositeID, entityID);
                     }
                     break;
                 }
@@ -296,46 +298,18 @@ public class CommandsEditorConnection : MonoBehaviour
             _renderableEntity = null;
         }
 
+        if (_movedEntity != null)
+        {
+            Debug.Log("Updating transform for entity: " + _movedEntity.Item2 + " [" + _position + ", " + _rotation + "]");
+            _scene.RepositionEntity(_movedEntity.Item1, _movedEntity.Item2, _position, Quaternion.Euler(_rotation));
+            _movedEntity = null;
+        }
+
         if (_currentEntityGOID != _currentEntity)
         {
-            _currentEntityGO = ResolvePath();
+            Debug.Log("Selecting entity: " + new ShortGuid(_currentEntity));
+            _scene.SelectEntity(_pathEntities);
             _currentEntityGOID = _currentEntity;
-        }
-
-        if (Selection.activeGameObject != _currentEntityGO)
-        {
-            Selection.activeGameObject = _currentEntityGO;
-            //SceneView.FrameLastActiveSceneView(); <- enable this to focus selected, takes control of cam
-        }
-
-        if (_entityMoved)
-        {
-            if (_currentEntityGO != null)
-            {
-                _currentEntityGO.transform.position = _position;
-                _currentEntityGO.transform.rotation = Quaternion.Euler(_rotation);
-            }
-            _entityMoved = false;
-        }
-
-        //TODO: we should show a fake gizmo with the current position
-
-    }
-
-    private GameObject ResolvePath()
-    {
-        try
-        {
-            Transform t = _scene.ParentGameObject.transform;
-            for (int i = 0; i < _pathEntities.Count; i++)
-                t = t.Find(_pathEntities[i].ToString());
-            return t.gameObject;
-        }
-        catch
-        {
-            //This can fail if we're selecting an entity which isn't a function.
-            //We should populate placeholders for these so we can still show the transforms probably.
-            return null;
         }
     }
 

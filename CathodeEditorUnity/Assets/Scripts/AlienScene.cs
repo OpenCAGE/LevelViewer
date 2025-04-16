@@ -136,6 +136,7 @@ public class AlienScene : MonoBehaviour
             {
                 if (compositeInstance != null)
                 {
+                    Debug.Log("Removing Composite GameObject!");
                     Destroy(compositeInstance);
                 }
             }
@@ -156,7 +157,7 @@ public class AlienScene : MonoBehaviour
                     Entity e = c.GetEntityByID(entity);
                     if (c != null && e != null)
                     {
-                        Debug.Log("Adding GameObject!");
+                        Debug.Log("Adding Entity GameObject!");
                         AddEntity(c, e, compositeInstance);
                     }
                 }
@@ -236,6 +237,47 @@ public class AlienScene : MonoBehaviour
         }
     }
 
+    public void SelectEntity(List<uint> path)
+    {
+        try
+        {
+            Transform t = ParentGameObject.transform;
+            for (int i = 0; i < path.Count; i++)
+                t = t.Find(path[i].ToString());
+            Selection.activeGameObject = t.gameObject;
+        }
+        catch
+        {
+            //This can fail if we're selecting an entity which isn't a function.
+            //We should populate placeholders for these so we can still show the transforms probably.
+        }
+    }
+
+    public void RepositionEntity(ShortGuid composite, ShortGuid entity, Vector3 position, Quaternion rotation)
+    {
+        string entityGameObjectName = entity.ToUInt32().ToString();
+        if (_compositeGameObjects.ContainsKey(composite))
+        {
+            foreach (GameObject compositeInstance in _compositeGameObjects[composite])
+            {
+                if (compositeInstance != null)
+                {
+                    Transform compositeInstanceTransform = compositeInstance.transform;
+                    for (int i = 0; i < compositeInstanceTransform.childCount; i++)
+                    {
+                        Transform child = compositeInstanceTransform.GetChild(i);
+                        if (child.name == entityGameObjectName)
+                        {
+                            Debug.Log("Updating Entity GameObject position!");
+                            child.localPosition = position;
+                            child.localRotation = rotation;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     public void RemoveEntity(ShortGuid composite, ShortGuid entity)
     {
         string entityGameObjectName = entity.ToUInt32().ToString();
@@ -248,11 +290,10 @@ public class AlienScene : MonoBehaviour
                     Transform compositeInstanceTransform = compositeInstance.transform;
                     for (int i = 0; i < compositeInstanceTransform.childCount; i++)
                     {
-                        Debug.Log("Removing GameObject!");
-
                         Transform child = compositeInstanceTransform.GetChild(i);
                         if (child.name == entityGameObjectName)
                         {
+                            Debug.Log("Removing Entity GameObject!");
                             Destroy(child.gameObject);
                         }
                     }
@@ -274,8 +315,7 @@ public class AlienScene : MonoBehaviour
                     Transform compositeInstanceTransform = compositeInstance.transform;
                     for (int i = 0; i < compositeInstanceTransform.childCount; i++)
                     {
-                        Debug.Log("Updating renderable GameObject!");
-
+                        Debug.Log("Updating Entity GameObject Meshes!");
                         Transform child = compositeInstanceTransform.GetChild(i);
                         if (child.name == entityGameObjectName)
                         {

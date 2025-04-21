@@ -36,6 +36,7 @@ public class AlienScene : MonoBehaviour
     private Dictionary<int, GameObjectHolder> _modelGOs = new Dictionary<int, GameObjectHolder>();
     
     private Dictionary<ShortGuid, List<GameObject>> _compositeGameObjects = new Dictionary<ShortGuid, List<GameObject>>();
+    private Dictionary<GameObject, Entity> _gameObjectEntities = new Dictionary<GameObject, Entity>();
 
     private CommandsEditorConnection _client;
 
@@ -87,6 +88,7 @@ public class AlienScene : MonoBehaviour
         if (!LevelContent.Loaded) return;
 
         _compositeGameObjects.Clear();
+        _gameObjectEntities.Clear();
 
         if (_parentGameObject != null)
             Destroy(_parentGameObject);
@@ -100,20 +102,15 @@ public class AlienScene : MonoBehaviour
         Composite comp = LevelContent.CommandsPAK.GetComposite(guid);
         Debug.Log("Loading composite " + comp?.name + "...");
         _loadedComposite = comp;
-        AddCompositeInstance(comp, _parentGameObject, null, Vector3.zero, Quaternion.identity);
+        AddCompositeInstance(comp, _parentGameObject, null);
 
         OnLoaded?.Invoke();
     }
 
-    void AddCompositeInstance(Composite composite, GameObject parentGO, Entity parentEntity, Vector3 parentPos, Quaternion parentRot)
+    private void AddCompositeInstance(Composite composite, GameObject compositeGO, Entity parentEntity)
     {
         if (composite == null) return;
-        GameObject compositeGO = parentEntity == null ? _parentGameObject : new GameObject(parentEntity.shortGUID.ToUInt32().ToString());
-        compositeGO.transform.parent = parentGO.transform;
-        compositeGO.transform.SetLocalPositionAndRotation(parentPos, parentRot);
-#if UNITY_EDITOR
-        //compositeGO.hideFlags |= HideFlags.NotEditable;
-#endif
+
         if (_compositeGameObjects.ContainsKey(composite.shortGUID))
         {
             _compositeGameObjects[composite.shortGUID].Add(compositeGO);
@@ -154,6 +151,7 @@ public class AlienScene : MonoBehaviour
                 {
                     Debug.Log("Removing Composite GameObject!");
                     Destroy(compositeInstance);
+                    _gameObjectEntities.Remove(compositeInstance);
                 }
             }
             _compositeGameObjects.Remove(composite);
@@ -182,9 +180,17 @@ public class AlienScene : MonoBehaviour
         }
     }
 
-    private void AddEntity(Composite composite, Entity entity, GameObject compositeGO)
+    private void AddEntity(Composite composite, Entity entity, GameObject parentGO)
     {
         GetEntityTransform(entity, out Vector3 position, out Vector3 rotation);
+
+        GameObject entityGO = new GameObject(entity.shortGUID.ToUInt32().ToString());
+        entityGO.transform.parent = parentGO.transform;
+        entityGO.transform.SetLocalPositionAndRotation(position, Quaternion.Euler(rotation));
+#if UNITY_EDITOR
+        //nodeModel.hideFlags |= HideFlags.NotEditable;
+#endif
+        _gameObjectEntities.Add(entityGO, entity);
 
         switch (entity.variant)
         {
@@ -192,11 +198,12 @@ public class AlienScene : MonoBehaviour
             case EntityVariant.ALIAS:
                 {
                     AliasEntity alias = (AliasEntity)entity;
-                    GameObject aliasedGO = GetGameObject(EntityPathToGUIDList(alias.alias), compositeGO.transform);
+                    GameObject aliasedGO = GetGameObject(EntityPathToGUIDList(alias.alias), parentGO.transform);
                     if (aliasedGO != null)
                     {
                         entityGO.AddComponent<EntityOverride>().PointedEntity = aliasedGO;
-                        aliasedGO.transform.SetLocalPositionAndRotation(position, Quaternion.Euler(rotation));
+                        if (alias.GetParameter("position") != null)
+                            aliasedGO.transform.SetLocalPositionAndRotation(position, Quaternion.Euler(rotation));
                     }
                 }
                 break;
@@ -207,7 +214,8 @@ public class AlienScene : MonoBehaviour
                     if (proxiedGO != null)
                     {
                         entityGO.AddComponent<EntityOverride>().PointedEntity = proxiedGO;
-                        proxiedGO.transform.SetLocalPositionAndRotation(position, Quaternion.Euler(rotation));
+                        if (proxy.GetParameter("position") != null)
+                            proxiedGO.transform.SetLocalPositionAndRotation(position, Quaternion.Euler(rotation));
                     }
                 }
                 break;
@@ -221,7 +229,7 @@ public class AlienScene : MonoBehaviour
                         Composite compositeNext = LevelContent.CommandsPAK.GetComposite(function.function);
                         if (compositeNext != null)
                         {
-                            AddCompositeInstance(compositeNext, parentGO, function, position, Quaternion.Euler(rotation));
+                            AddCompositeInstance(compositeNext, entityGO, function);
                         }
                     }
                     else
@@ -229,12 +237,6 @@ public class AlienScene : MonoBehaviour
                         switch ((FunctionType)function.function.ToUInt32())
                         {
                             case FunctionType.ModelReference:
-                                GameObject nodeModel = new GameObject(function.shortGUID.ToUInt32().ToString());
-                                nodeModel.transform.parent = parentGO.transform;
-                                nodeModel.transform.SetLocalPositionAndRotation(position, Quaternion.Euler(rotation));
-#if UNITY_EDITOR
-                                //nodeModel.hideFlags |= HideFlags.NotEditable;
-#endif
 
                                 if (LevelContent.RemappedResources.ContainsKey(function))
                                 {
@@ -360,9 +362,12 @@ public class AlienScene : MonoBehaviour
                             EntityOverride o = child.GetComponent<EntityOverride>();
                             if (o != null)
                             {
-                                //todo: reset overridden to default
+                                //Reset aliased/proxied entity back to its un-overridden transform
+                                GetEntityTransform(_gameObjectEntities[o.PointedEntity], out Vector3 position, out Vector3 rotation);
+                                o.PointedEntity.transform.SetLocalPositionAndRotation(position, Quaternion.Euler(rotation));
                             }
                             Destroy(child.gameObject);
+                            _gameObjectEntities.Remove(child.gameObject);
                         }
                     }
                 }

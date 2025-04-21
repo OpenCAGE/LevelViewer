@@ -272,42 +272,42 @@ public class CommandsEditorConnection : MonoBehaviour
 
         if (_addedEntity != null)
         {
-            Debug.Log("Adding entity: " + _addedEntity.Item2);
+            Debug.Log("Adding entity: " + _addedEntity.Item2.ToUInt32());
             _scene.AddEntity(_addedEntity.Item1, _addedEntity.Item2);
             _addedEntity = null;
         }
 
         if (_removedEntity != null)
         {
-            Debug.Log("Removing entity: " + _removedEntity.Item2);
+            Debug.Log("Removing entity: " + _removedEntity.Item2.ToUInt32());
             _scene.RemoveEntity(_removedEntity.Item1, _removedEntity.Item2);
             _removedEntity = null;
         }
 
         if (_removedComposite != ShortGuid.Invalid)
         {
-            Debug.Log("Removing composite: " + _removedComposite);
+            Debug.Log("Removing composite: " + _removedComposite.ToUInt32());
             _scene.RemoveComposite(_removedComposite);
             _removedComposite = ShortGuid.Invalid;
         }
 
         if (_renderableEntity != null)
         {
-            Debug.Log("Updating renderables for entity: " + _renderableEntity.Item2 + " [" + _renderable.Count + "]");
+            Debug.Log("Updating renderables for entity: " + _renderableEntity.Item2.ToUInt32() + " [" + _renderable.Count + "]");
             _scene.UpdateRenderable(_renderableEntity.Item1, _renderableEntity.Item2, _renderable);
             _renderableEntity = null;
         }
 
         if (_movedEntity != null)
         {
-            Debug.Log("Updating transform for entity: " + _movedEntity.Item2 + " [" + _position + ", " + _rotation + "]");
+            Debug.Log("Updating transform for entity: " + _movedEntity.Item2.ToUInt32() + " [" + _position + ", " + _rotation + "]");
             _scene.RepositionEntity(_movedEntity.Item1, _movedEntity.Item2, _position, Quaternion.Euler(_rotation));
             _movedEntity = null;
         }
 
         if (_currentEntityGOID != _currentEntity)
         {
-            Debug.Log("Selecting entity: " + new ShortGuid(_currentEntity));
+            Debug.Log("Selecting entity: " + _currentEntity);
             _scene.SelectEntity(_pathEntities);
             _currentEntityGOID = _currentEntity;
         }

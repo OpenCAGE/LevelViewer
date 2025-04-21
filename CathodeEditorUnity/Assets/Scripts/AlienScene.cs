@@ -14,6 +14,7 @@ using UnityEditor;
 using System.Collections;
 using System.Resources;
 using System.Security.Principal;
+using UnityEngine.Animations;
 
 public class AlienScene : MonoBehaviour
 {
@@ -33,8 +34,6 @@ public class AlienScene : MonoBehaviour
     private Dictionary<int, Material> _materials = new Dictionary<int, Material>();
     private Dictionary<Material, bool> _materialSupport = new Dictionary<Material, bool>();
     private Dictionary<int, GameObjectHolder> _modelGOs = new Dictionary<int, GameObjectHolder>();
-
-    //private Dictionary<ShortGuid, Dictionary<ShortGuid, GameObject>> _pointedEntities = new Dictionary<ShortGuid, Dictionary<ShortGuid, GameObject>>(); //mapping ProxyEntity/AliasEntity to their pointed GameObjects in scene
     
     private Dictionary<ShortGuid, List<GameObject>> _compositeGameObjects = new Dictionary<ShortGuid, List<GameObject>>();
 
@@ -65,11 +64,10 @@ public class AlienScene : MonoBehaviour
         _materialSupport.Clear();
         _modelGOs.Clear();
 
-        _compositeGameObjects.Clear();
-
         LevelContent.Reset();
     }
 
+    /* Load the content for a level */
     public void LoadLevel(string level)
     {
         if (level == null || level == "" || _client.PathToAI == "")
@@ -82,12 +80,17 @@ public class AlienScene : MonoBehaviour
         _levelName = level;
         LevelContent.Load(_client.PathToAI, level);
     }
+    
+    /* Populate the scene with a given Composite */
     public void PopulateComposite(ShortGuid guid)
     {
         if (!LevelContent.Loaded) return;
 
+        _compositeGameObjects.Clear();
+
         if (_parentGameObject != null)
             Destroy(_parentGameObject);
+
         _parentGameObject = new GameObject(_levelName);
 #if UNITY_EDITOR
         //_parentGameObject.hideFlags |= HideFlags.HideInHierarchy;
@@ -122,12 +125,25 @@ public class AlienScene : MonoBehaviour
             _compositeGameObjects.Add(composite.shortGUID, compositeGOs);
         }
 
-        foreach (Entity entity in composite.GetEntities())
+        foreach (Entity entity in composite.functions)
+        {
+            AddEntity(composite, entity, compositeGO);
+        }
+        foreach (Entity entity in composite.variables)
+        {
+            AddEntity(composite, entity, compositeGO);
+        }
+        foreach (Entity entity in composite.aliases)
+        {
+            AddEntity(composite, entity, compositeGO);
+        }
+        foreach (Entity entity in composite.proxies)
         {
             AddEntity(composite, entity, compositeGO);
         }
     }
 
+    /* Remove all instances of a given Composite in the scene */
     public void RemoveComposite(ShortGuid composite)
     {
         if (_compositeGameObjects.ContainsKey(composite))
@@ -144,6 +160,7 @@ public class AlienScene : MonoBehaviour
         }
     }
 
+    /* Add an Entity to all instances of its contained Composite within the scene */
     public void AddEntity(ShortGuid composite, ShortGuid entity)
     {
         string entityGameObjectName = entity.ToUInt32().ToString();
@@ -165,7 +182,7 @@ public class AlienScene : MonoBehaviour
         }
     }
 
-    private void AddEntity(Composite composite, Entity entity, GameObject parentGO)
+    private void AddEntity(Composite composite, Entity entity, GameObject compositeGO)
     {
         GetEntityTransform(entity, out Vector3 position, out Vector3 rotation);
 
@@ -173,17 +190,32 @@ public class AlienScene : MonoBehaviour
         {
             //Create mapped entity which can override original data
             case EntityVariant.ALIAS:
-
+                {
+                    AliasEntity alias = (AliasEntity)entity;
+                    GameObject aliasedGO = GetGameObject(EntityPathToGUIDList(alias.alias), compositeGO.transform);
+                    if (aliasedGO != null)
+                    {
+                        entityGO.AddComponent<EntityOverride>().PointedEntity = aliasedGO;
+                        aliasedGO.transform.SetLocalPositionAndRotation(position, Quaternion.Euler(rotation));
+                    }
+                }
                 break;
             case EntityVariant.PROXY:
-
+                {
+                    ProxyEntity proxy = (ProxyEntity)entity;
+                    GameObject proxiedGO = GetGameObject(EntityPathToGUIDList(proxy.proxy), ParentGameObject.transform);
+                    if (proxiedGO != null)
+                    {
+                        entityGO.AddComponent<EntityOverride>().PointedEntity = proxiedGO;
+                        proxiedGO.transform.SetLocalPositionAndRotation(position, Quaternion.Euler(rotation));
+                    }
+                }
                 break;
 
             //Create base entity which provides its own data
             case EntityVariant.FUNCTION:
                 {
                     FunctionEntity function = (FunctionEntity)entity;
-
                     if (!CommandsUtils.FunctionTypeExists(function.function))
                     {
                         Composite compositeNext = LevelContent.CommandsPAK.GetComposite(function.function);
@@ -206,14 +238,16 @@ public class AlienScene : MonoBehaviour
 
                                 if (LevelContent.RemappedResources.ContainsKey(function))
                                 {
+                                    //Using a resource mapping which has changed at runtime
                                     List<Tuple<int, int>> renderableElement = LevelContent.RemappedResources[function];
                                     for (int i = 0; i < renderableElement.Count; i++)
                                     {
-                                        SpawnRenderable(nodeModel, renderableElement[i].Item1, renderableElement[i].Item2);
+                                        CreateRenderable(entityGO, renderableElement[i].Item1, renderableElement[i].Item2);
                                     }
                                 }
                                 else
                                 {
+                                    //Using a resource mapping which was written to disk
                                     Parameter resourceParam = function.GetParameter("resource");
                                     if (resourceParam != null && resourceParam.content != null && resourceParam.content.dataType == DataType.RESOURCE)
                                     {
@@ -224,7 +258,7 @@ public class AlienScene : MonoBehaviour
                                             for (int i = 0; i < renderable.count; i++)
                                             {
                                                 RenderableElements.Element renderableElement = LevelContent.RenderableREDS.Entries[renderable.index + i];
-                                                SpawnRenderable(nodeModel, renderableElement.ModelIndex, renderableElement.MaterialIndex);
+                                                CreateRenderable(entityGO, renderableElement.ModelIndex, renderableElement.MaterialIndex);
                                             }
                                         }
                                     }
@@ -237,22 +271,41 @@ public class AlienScene : MonoBehaviour
         }
     }
 
+    /* Select an Entity GameObject at a specific instance hierarchy */
     public void SelectEntity(List<uint> path)
+    {
+        Selection.activeGameObject = GetGameObject(path, ParentGameObject.transform);
+    }
+
+    private GameObject GetGameObject(List<uint> path, Transform parent)
     {
         try
         {
-            Transform t = ParentGameObject.transform;
+            Transform t = parent;
             for (int i = 0; i < path.Count; i++)
                 t = t.Find(path[i].ToString());
-            Selection.activeGameObject = t.gameObject;
+            return t.gameObject;
         }
         catch
         {
             //This can fail if we're selecting an entity which isn't a function.
             //We should populate placeholders for these so we can still show the transforms probably.
         }
+        return null;
     }
 
+    private List<uint> EntityPathToGUIDList(EntityPath path)
+    {
+        List<uint> list = new List<uint>();
+        foreach (ShortGuid guid in path.path)
+        {
+            if (guid == ShortGuid.Invalid) continue;
+            list.Add(guid.ToUInt32());
+        }
+        return list;
+    }
+
+    /* Reposition all Entities in the scene with a new local position and rotation */
     public void RepositionEntity(ShortGuid composite, ShortGuid entity, Vector3 position, Quaternion rotation)
     {
         string entityGameObjectName = entity.ToUInt32().ToString();
@@ -269,8 +322,17 @@ public class AlienScene : MonoBehaviour
                         if (child.name == entityGameObjectName)
                         {
                             Debug.Log("Updating Entity GameObject position!");
-                            child.localPosition = position;
-                            child.localRotation = rotation;
+                            EntityOverride o = child.gameObject.GetComponent<EntityOverride>();
+                            if (o != null)
+                            {
+                                o.PointedEntity.transform.localPosition = position;
+                                o.PointedEntity.transform.localRotation = rotation;
+                            }
+                            else
+                            {
+                                child.localPosition = position;
+                                child.localRotation = rotation;
+                            }
                         }
                     }
                 }
@@ -278,6 +340,7 @@ public class AlienScene : MonoBehaviour
         }
     }
 
+    /* Remove all instances of a given Entity in the scene */
     public void RemoveEntity(ShortGuid composite, ShortGuid entity)
     {
         string entityGameObjectName = entity.ToUInt32().ToString();
@@ -294,6 +357,11 @@ public class AlienScene : MonoBehaviour
                         if (child.name == entityGameObjectName)
                         {
                             Debug.Log("Removing Entity GameObject!");
+                            EntityOverride o = child.GetComponent<EntityOverride>();
+                            if (o != null)
+                            {
+                                //todo: reset overridden to default
+                            }
                             Destroy(child.gameObject);
                         }
                     }
@@ -303,8 +371,10 @@ public class AlienScene : MonoBehaviour
         }
     }
 
+    /* Update the MeshRenderers for all Entities in the scene */
     public void UpdateRenderable(ShortGuid composite, ShortGuid entity, List<Tuple<int, int>> renderables)
     {
+        //todo: this should handle overrides
         string entityGameObjectName = entity.ToUInt32().ToString();
         if (_compositeGameObjects.ContainsKey(composite))
         {
@@ -325,7 +395,7 @@ public class AlienScene : MonoBehaviour
                             }
                             for (int x = 0; x < renderables.Count; x++)
                             {
-                                SpawnRenderable(child.gameObject, renderables[x].Item1, renderables[x].Item2);
+                                CreateRenderable(child.gameObject, renderables[x].Item1, renderables[x].Item2);
                             }
                         }
                     }
@@ -334,7 +404,7 @@ public class AlienScene : MonoBehaviour
         }
     }
 
-    public void SpawnRenderable(GameObject parent, int modelIndex, int materialIndex)
+    private void CreateRenderable(GameObject parent, int modelIndex, int materialIndex)
     {
         GameObjectHolder holder = GetModel(modelIndex);
         if (holder == null)
@@ -366,7 +436,7 @@ public class AlienScene : MonoBehaviour
         newModelSpawn.SetActive(_materialSupport[material]);
     }
 
-    bool GetEntityTransform(Entity entity, out Vector3 position, out Vector3 rotation)
+    private bool GetEntityTransform(Entity entity, out Vector3 position, out Vector3 rotation)
     {
         position = Vector3.zero;
         rotation = Vector3.zero;
@@ -387,7 +457,6 @@ public class AlienScene : MonoBehaviour
         return false;
     }
 
-    #region Asset Handlers
     private GameObjectHolder GetModel(int EntryIndex)
     {
         if (!_modelGOs.ContainsKey(EntryIndex))
@@ -407,7 +476,7 @@ public class AlienScene : MonoBehaviour
         return _modelGOs[EntryIndex];
     }
 
-    public Material GetMaterial(int MTLIndex)
+    private Material GetMaterial(int MTLIndex)
     {
         if (!_materials.ContainsKey(MTLIndex))
         {
@@ -467,7 +536,6 @@ public class AlienScene : MonoBehaviour
     {
         return cstIndex >= 0 && cstIndex < Shader.Header.CSTCounts[i] && (int)Shader.CSTLinks[i][cstIndex] != -1 && Shader.CSTLinks[i][cstIndex] != 255;
     }
-    #endregion
 }
 
 //Temp wrapper for GameObject while we just want it in memory

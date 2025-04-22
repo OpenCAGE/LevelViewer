@@ -32,12 +32,16 @@ public class CommandsEditorConnection : MonoBehaviour
     private uint _currentComposite;
     private uint _currentEntity;
 
-    GameObject _currentEntityGO = null;
     private uint _currentEntityGOID = 0;
 
     private Vector3 _position;
     private Vector3 _rotation;
     private Tuple<ShortGuid, ShortGuid> _movedEntity = null;
+    private bool _movingPointed = false;
+
+    //This is a hacky way of telling if the entity is pointed to, but not having its position controlled. Needs tidying up ASAP.
+    private bool _pointerDisconnected = false;
+    private bool _pointerReconnected = false;
 
     List<Tuple<int, int>> _renderable;
     private Tuple<ShortGuid, ShortGuid> _renderableEntity = null;
@@ -92,6 +96,12 @@ public class CommandsEditorConnection : MonoBehaviour
                 {
                     lock (_lock)
                     {
+                        _position = new Vector3(packet.position.X, packet.position.Y, packet.position.Z);
+                        _rotation = new Vector3(packet.rotation.X, packet.rotation.Y, packet.rotation.Z);
+                        _movingPointed = false;
+                        _pointerDisconnected = false;
+                        _pointerReconnected = false;
+
                         ShortGuid entityID = new ShortGuid(packet.entity);
                         ShortGuid compositeID = new ShortGuid(packet.composite);
                         Composite composite = LevelContent.CommandsPAK.Entries.FirstOrDefault(o => o.shortGUID == compositeID);
@@ -115,22 +125,33 @@ public class CommandsEditorConnection : MonoBehaviour
                             }
                             if (entity != null)
                             {
-                                Parameter position = entity.GetParameter("position");
-                                if (position == null)
+                                if (packet.has_transform)
                                 {
-                                    position = entity.AddParameter("position", new cTransform());
-                                }
-                                if (position?.content?.dataType == DataType.TRANSFORM)
-                                {
+                                    Parameter position = entity.GetParameter("position");
+                                    if (position == null || position?.content?.dataType == DataType.TRANSFORM)
+                                        position = entity.AddParameter("position", new cTransform());
                                     cTransform transform = (cTransform)position.content;
                                     transform.position = new Vector3(packet.position.X, packet.position.Y, packet.position.Z);
                                     transform.rotation = new Vector3(packet.rotation.X, packet.rotation.Y, packet.rotation.Z);
                                 }
+                                else
+                                {
+                                    entity.RemoveParameter("position");
+                                }
+
+                                //If this entity points to another, resolve it to apply the transform correctly in scene
+                                switch (entity.variant)
+                                {
+                                    case EntityVariant.PROXY:
+                                        HandlePointedTransform(packet, out entityID, out compositeID, ((ProxyEntity)entity).proxy, LevelContent.CommandsPAK.EntryPoints[0]);
+                                        break;
+                                    case EntityVariant.ALIAS:
+                                        HandlePointedTransform(packet, out entityID, out compositeID, ((AliasEntity)entity).alias, composite);
+                                        break;
+                                }
                             }
                         }
 
-                        _position = new Vector3(packet.position.X, packet.position.Y, packet.position.Z);
-                        _rotation = new Vector3(packet.rotation.X, packet.rotation.Y, packet.rotation.Z);
                         _movedEntity = new Tuple<ShortGuid, ShortGuid>(compositeID, entityID);
                     }
                     break;
@@ -254,6 +275,33 @@ public class CommandsEditorConnection : MonoBehaviour
                 }
         }
     }
+    private void HandlePointedTransform(Packet packet, out ShortGuid entityID, out ShortGuid compositeID, EntityPath path, Composite startComposite)
+    {
+        Entity pEnt = path.GetPointedEntity(LevelContent.CommandsPAK, startComposite, out Composite pComp);
+        entityID = pEnt != null ? pEnt.shortGUID : ShortGuid.Invalid;
+        compositeID = pComp != null ? pComp.shortGUID : ShortGuid.Invalid;
+        if (!packet.has_transform)
+        {
+            _pointerDisconnected = true;
+            Parameter p = pEnt.GetParameter("position");
+            if (p != null && p?.content?.dataType == DataType.TRANSFORM)
+            {
+                cTransform pT = (cTransform)p.content;
+                _position = pT.position;
+                _rotation = pT.rotation;
+            }
+            else
+            {
+                _position = Vector3.zero;
+                _rotation = Vector3.zero;
+            }
+        }
+        else
+        {
+            _pointerReconnected = true;
+        }
+        _movingPointed = true;
+    }
 
     /* Sync any changes that happened with our Unity scene */
     private void FixedUpdate()
@@ -301,7 +349,7 @@ public class CommandsEditorConnection : MonoBehaviour
         if (_movedEntity != null)
         {
             Debug.Log("Updating transform for entity: " + _movedEntity.Item2.ToUInt32() + " [" + _position + ", " + _rotation + "]");
-            _scene.RepositionEntity(_movedEntity.Item1, _movedEntity.Item2, _position, Quaternion.Euler(_rotation));
+            _scene.RepositionEntity(_movedEntity.Item1, _movedEntity.Item2, _position, Quaternion.Euler(_rotation), _movingPointed, _pointerDisconnected, _pointerReconnected);
             _movedEntity = null;
         }
 
@@ -395,6 +443,7 @@ public class CommandsEditorConnection : MonoBehaviour
         public uint composite;
 
         //Transform
+        public bool has_transform = false;
         public System.Numerics.Vector3 position = new System.Numerics.Vector3();
         public System.Numerics.Vector3 rotation = new System.Numerics.Vector3();
 

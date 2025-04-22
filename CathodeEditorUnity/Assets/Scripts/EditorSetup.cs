@@ -26,16 +26,14 @@ public class SetSceneAndDisableTools
         if (!EditorApplication.isPlaying)
         {
 #if !LOCAL_DEV
+            var scene = EditorSceneManager.GetActiveScene();
+            if (scene == null || scene.name != "Assets/Scene.unity")
+                EditorSceneManager.OpenScene("Assets/Scene.unity");
+
             EditorApplication.EnterPlaymode();
 #endif
             return;
         }
-
-        if (EditorApplication.isPlayingOrWillChangePlaymode) return;
-
-        var scene = EditorSceneManager.GetActiveScene();
-        if (scene == null || scene.name != "Assets/Scene.unity")
-            EditorSceneManager.OpenScene("Assets/Scene.unity");
     }
 
     static void ForceNoTools()

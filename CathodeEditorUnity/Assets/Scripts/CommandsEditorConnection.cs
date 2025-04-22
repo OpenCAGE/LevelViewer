@@ -38,10 +38,7 @@ public class CommandsEditorConnection : MonoBehaviour
     private Vector3 _rotation;
     private Tuple<ShortGuid, ShortGuid> _movedEntity = null;
     private bool _movingPointed = false;
-
-    //This is a hacky way of telling if the entity is pointed to, but not having its position controlled. Needs tidying up ASAP.
-    private bool _pointerDisconnected = false;
-    private bool _pointerReconnected = false;
+    private bool _pointedPos = false;
 
     List<Tuple<int, int>> _renderable;
     private Tuple<ShortGuid, ShortGuid> _renderableEntity = null;
@@ -99,8 +96,7 @@ public class CommandsEditorConnection : MonoBehaviour
                         _position = new Vector3(packet.position.X, packet.position.Y, packet.position.Z);
                         _rotation = new Vector3(packet.rotation.X, packet.rotation.Y, packet.rotation.Z);
                         _movingPointed = false;
-                        _pointerDisconnected = false;
-                        _pointerReconnected = false;
+                        _pointedPos = false;
 
                         ShortGuid entityID = new ShortGuid(packet.entity);
                         ShortGuid compositeID = new ShortGuid(packet.composite);
@@ -282,7 +278,7 @@ public class CommandsEditorConnection : MonoBehaviour
         compositeID = pComp != null ? pComp.shortGUID : ShortGuid.Invalid;
         if (!packet.has_transform)
         {
-            _pointerDisconnected = true;
+            _pointedPos = false;
             Parameter p = pEnt.GetParameter("position");
             if (p != null && p?.content?.dataType == DataType.TRANSFORM)
             {
@@ -298,7 +294,7 @@ public class CommandsEditorConnection : MonoBehaviour
         }
         else
         {
-            _pointerReconnected = true;
+            _pointedPos = true;
         }
         _movingPointed = true;
     }
@@ -349,7 +345,7 @@ public class CommandsEditorConnection : MonoBehaviour
         if (_movedEntity != null)
         {
             Debug.Log("Updating transform for entity: " + _movedEntity.Item2.ToUInt32() + " [" + _position + ", " + _rotation + "]");
-            _scene.RepositionEntity(_movedEntity.Item1, _movedEntity.Item2, _position, Quaternion.Euler(_rotation), _movingPointed, _pointerDisconnected, _pointerReconnected);
+            _scene.RepositionEntity(_movedEntity.Item1, _movedEntity.Item2, _position, Quaternion.Euler(_rotation), _movingPointed, _pointedPos);
             _movedEntity = null;
         }
 

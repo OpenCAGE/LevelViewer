@@ -138,7 +138,6 @@ public class AlienScene : MonoBehaviour
             {
                 if (compositeInstance != null)
                 {
-                    Debug.Log("Removing Composite GameObject!");
                     Destroy(compositeInstance);
                     _gameObjectEntities.Remove(compositeInstance);
                 }
@@ -161,7 +160,6 @@ public class AlienScene : MonoBehaviour
                     Entity e = c.GetEntityByID(entity);
                     if (c != null && e != null)
                     {
-                        Debug.Log("Adding Entity GameObject!");
                         AddEntity(c, e, compositeInstance);
                     }
                 }
@@ -306,7 +304,7 @@ public class AlienScene : MonoBehaviour
     }
 
     /* Reposition all Entities in the scene with a new local position and rotation */
-    public void RepositionEntity(ShortGuid composite, ShortGuid entity, Vector3 position, Quaternion rotation, bool fromPointer, bool pointerDisconnected, bool pointerReconnected)
+    public void RepositionEntity(ShortGuid composite, ShortGuid entity, Vector3 position, Quaternion rotation, bool fromPointer, bool pointedPos)
     {
         string entityGameObjectName = entity.ToUInt32().ToString();
         if (_compositeGameObjects.ContainsKey(composite))
@@ -321,19 +319,7 @@ public class AlienScene : MonoBehaviour
                         Transform child = compositeInstanceTransform.GetChild(i);
                         if (child.name == entityGameObjectName)
                         {
-                            Debug.Log("Updating Entity GameObject position!");
-
-                            if (pointerDisconnected)
-                            {
-                                Debug.Log("Pointer Disconnected!");
-                                child.tag = "Untagged";
-                            }
-                            if (pointerReconnected)
-                            {
-                                Debug.Log("Pointer Reconnected!");
-                                child.tag = "pointed";
-                            }
-
+                            child.tag = pointedPos ? "pointed" : "Untagged";
                             if (!(child.tag == "pointed" && !fromPointer))
                             {
                                 child.localPosition = position;
@@ -362,7 +348,6 @@ public class AlienScene : MonoBehaviour
                         Transform child = compositeInstanceTransform.GetChild(i);
                         if (child.name == entityGameObjectName)
                         {
-                            Debug.Log("Removing Entity GameObject!");
                             EntityOverride o = child.GetComponent<EntityOverride>();
                             if (o != null)
                             {
@@ -395,7 +380,6 @@ public class AlienScene : MonoBehaviour
                     Transform compositeInstanceTransform = compositeInstance.transform;
                     for (int i = 0; i < compositeInstanceTransform.childCount; i++)
                     {
-                        Debug.Log("Updating Entity GameObject Meshes!");
                         Transform child = compositeInstanceTransform.GetChild(i);
                         if (child.name == entityGameObjectName)
                         {

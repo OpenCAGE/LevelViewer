@@ -9,39 +9,49 @@ using System.Linq;
 using UnityEditor.SceneManagement;
 using System.IO;
 using System.Reflection;
+using UnityEngine.SceneManagement;
 
 [InitializeOnLoad]
 public class SetSceneAndDisableTools
 {
-    private static bool _subbed = false;
+    static bool _sceneLoaded;
+    static bool _tryingToPlay;
 
     static SetSceneAndDisableTools()
     {
-        if (!_subbed)
+#if !LOCAL_DEV
+        EditorApplication.update += WaitForSceneAndPlay;
+        EditorApplication.update += ForceNoTools;
+#endif
+    }
+
+    static void WaitForSceneAndPlay()
+    {
+        if (EditorApplication.isPlayingOrWillChangePlaymode)
+            return;
+
+        if (!_sceneLoaded)
         {
-            EditorApplication.update += ForceNoTools;
-            _subbed = true;
+            var activeScene = SceneManager.GetActiveScene();
+            if (activeScene == null || activeScene.path != "Assets/Scene.unity")
+            {
+                EditorSceneManager.OpenScene("Assets/Scene.unity");
+                return; // wait for next update to continue
+            }
+            _sceneLoaded = true;
         }
 
-        if (!EditorApplication.isPlaying)
+        if (!_tryingToPlay)
         {
-#if !LOCAL_DEV
-            var scene = EditorSceneManager.GetActiveScene();
-            if (scene == null || scene.name != "Assets/Scene.unity")
-                EditorSceneManager.OpenScene("Assets/Scene.unity");
-
+            _tryingToPlay = true;
             EditorApplication.EnterPlaymode();
-#endif
-            return;
         }
     }
 
     static void ForceNoTools()
     {
-#if !LOCAL_DEV
         if (Tools.current != Tool.None)
             Tools.current = Tool.None;
-#endif
     }
 }
 

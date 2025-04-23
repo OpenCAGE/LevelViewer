@@ -275,6 +275,9 @@ public class AlienScene : MonoBehaviour
             }
         }
         Selection.activeGameObject = gameObject;
+
+        if (_client.FocusSelected)
+            SceneView.FrameLastActiveSceneView();
     }
 
     private GameObject GetGameObject(List<uint> path, Transform parent)

@@ -47,6 +47,10 @@ public class CommandsEditorConnection : MonoBehaviour
     private Tuple<ShortGuid, ShortGuid> _removedEntity = null;
     private ShortGuid _removedComposite = ShortGuid.Invalid;
 
+    //settings
+    public bool FocusSelected => _focusSelected;
+    private bool _focusSelected = false;
+
     void Start()
     {
         _scene = GetComponent<AlienScene>();
@@ -85,6 +89,8 @@ public class CommandsEditorConnection : MonoBehaviour
 
             _currentComposite = _compositeLoaded ? _pathComposites[_pathComposites.Count - 1] : 0;
             _currentEntity = _entitySelected ? _pathEntities[_pathEntities.Count - 1] : 0;
+
+            _focusSelected = packet.focus_object;
         }
 
         switch (packet.packet_event)
@@ -426,7 +432,7 @@ public class CommandsEditorConnection : MonoBehaviour
 
         //Packet metadata
         public PacketEvent packet_event;
-        public int version = 3;
+        public int version = 4;
 
         //Setup metadata
         public string level_name = "";
@@ -453,6 +459,9 @@ public class CommandsEditorConnection : MonoBehaviour
 
         //Track if things have changed
         public bool dirty = false;
+
+        //Settings
+        public bool focus_object = false;
     }
     #endregion
 }

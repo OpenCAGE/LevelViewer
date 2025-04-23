@@ -94,7 +94,8 @@ public class AlienScene : MonoBehaviour
             Destroy(_parentGameObject);
 
         _parentGameObject = new GameObject(_levelName);
-        _parentGameObject.hideFlags |= HideFlags.NotEditable;
+        _parentGameObject.hideFlags = HideFlags.HideInHierarchy | HideFlags.DontSave;
+        _parentGameObject.isStatic = true;
 
         Composite comp = LevelContent.CommandsPAK.GetComposite(guid);
         Debug.Log("Loading composite " + comp?.name + "...");
@@ -174,7 +175,8 @@ public class AlienScene : MonoBehaviour
         GameObject entityGO = new GameObject(entity.shortGUID.ToUInt32().ToString());
         entityGO.transform.parent = parentGO.transform;
         entityGO.transform.SetLocalPositionAndRotation(position, Quaternion.Euler(rotation));
-        entityGO.hideFlags |= HideFlags.NotEditable;
+        entityGO.hideFlags = HideFlags.HideInHierarchy | HideFlags.DontSave;
+        entityGO.isStatic = true;
         _gameObjectEntities.Add(entityGO, entity);
 
         switch (entity.variant)
@@ -223,8 +225,8 @@ public class AlienScene : MonoBehaviour
                     {
                         switch ((FunctionType)function.function.ToUInt32())
                         {
+                            //Renderables
                             case FunctionType.ModelReference:
-
                                 if (LevelContent.RemappedResources.ContainsKey(function))
                                 {
                                     //Using a resource mapping which has changed at runtime
@@ -417,8 +419,7 @@ public class AlienScene : MonoBehaviour
         newModelSpawn.transform.localRotation = Quaternion.identity;
         newModelSpawn.name = holder.MainMesh.name;
         newModelSpawn.AddComponent<MeshFilter>().sharedMesh = holder.MainMesh;
-        newModelSpawn.hideFlags |= HideFlags.NotEditable;
-        newModelSpawn.hideFlags |= HideFlags.HideInHierarchy;
+        newModelSpawn.hideFlags = HideFlags.NotEditable | HideFlags.HideInHierarchy;
 
         MeshRenderer renderer = newModelSpawn.AddComponent<MeshRenderer>();
         renderer.sharedMaterial = material;

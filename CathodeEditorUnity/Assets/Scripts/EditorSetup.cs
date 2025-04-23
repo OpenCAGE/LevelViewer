@@ -21,7 +21,7 @@ public class SetSceneAndDisableTools
     {
 #if !LOCAL_DEV
         EditorApplication.update += WaitForSceneAndPlay;
-        EditorApplication.update += ForceNoTools;
+        EditorApplication.update += ForceGizmo;
 #endif
     }
 
@@ -48,10 +48,10 @@ public class SetSceneAndDisableTools
         }
     }
 
-    static void ForceNoTools()
+    static void ForceGizmo()
     {
-        if (Tools.current != Tool.None)
-            Tools.current = Tool.None;
+        if (Tools.current != Tool.Move)
+            Tools.current = Tool.Move;
     }
 }
 

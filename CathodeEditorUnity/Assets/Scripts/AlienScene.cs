@@ -367,7 +367,6 @@ public class AlienScene : MonoBehaviour
                     }
                 }
             }
-            _compositeGameObjects.Remove(composite);
         }
     }
 

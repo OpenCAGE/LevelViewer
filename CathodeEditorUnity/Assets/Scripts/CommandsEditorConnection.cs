@@ -279,7 +279,7 @@ public class CommandsEditorConnection : MonoBehaviour
     }
     private void HandlePointedTransform(Packet packet, out ShortGuid entityID, out ShortGuid compositeID, EntityPath path, Composite startComposite)
     {
-        Entity pEnt = path.GetPointedEntity(LevelContent.CommandsPAK, startComposite, out Composite pComp);
+        (Composite pComp, Entity pEnt) = LevelContent.CommandsPAK.Utils.GetResolvedTarget(LevelContent.CommandsPAK.Utils.ResolveAliasOrProxy(path, startComposite));
         entityID = pEnt != null ? pEnt.shortGUID : ShortGuid.Invalid;
         compositeID = pComp != null ? pComp.shortGUID : ShortGuid.Invalid;
         if (!packet.has_transform)

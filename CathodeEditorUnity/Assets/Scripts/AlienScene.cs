@@ -213,7 +213,7 @@ public class AlienScene : MonoBehaviour
             case EntityVariant.FUNCTION:
                 {
                     FunctionEntity function = (FunctionEntity)entity;
-                    if (!CommandsUtils.FunctionTypeExists(function.function))
+                    if (!function.function.IsFunctionType)
                     {
                         Composite compositeNext = LevelContent.CommandsPAK.GetComposite(function.function);
                         if (compositeNext != null)
@@ -466,7 +466,7 @@ public class AlienScene : MonoBehaviour
             GameObjectHolder ThisModelPart = new GameObjectHolder();
             ThisModelPart.Name = ((mesh == null) ? "" : mesh.Name) + ": " + ((lod == null) ? "" : lod.Name);
             ThisModelPart.MainMesh = thisMesh;
-            ThisModelPart.DefaultMaterial = submesh.MaterialLibraryIndex;
+            ThisModelPart.DefaultMaterial = submesh.MaterialIndex;
             _modelGOs.Add(EntryIndex, ThisModelPart);
         }
         return _modelGOs[EntryIndex];
@@ -504,6 +504,7 @@ public class AlienScene : MonoBehaviour
             }
             toReturn.name += " " + metadata.shaderCategory.ToString();
 
+            /*
             for (int i = 0; i < Shader.Header.CSTCounts.Length; i++)
             {
                 using (BinaryReader cstReader = new BinaryReader(new MemoryStream(LevelContent.ModelsMTL.CSTData[i])))
@@ -517,6 +518,7 @@ public class AlienScene : MonoBehaviour
                     }
                 }
             }
+            */
 
             _materialSupport.Add(toReturn, true);
             _materials.Add(MTLIndex, toReturn);

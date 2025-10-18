@@ -26,17 +26,17 @@ public static class CathodeLibExtensions
         List<Vector4> boneIndex = new List<Vector4>(); //The indexes of 4 bones that affect each vertex
         List<Vector4> boneWeight = new List<Vector4>(); //The weights for each bone
 
-        if (submesh == null || submesh.content.Length == 0)
+        if (submesh == null || submesh.Data.Length == 0)
             return mesh;
 
-        using (BinaryReader reader = new BinaryReader(new MemoryStream(submesh.content)))
+        using (BinaryReader reader = new BinaryReader(new MemoryStream(submesh.Data)))
         {
-            for (int i = 0; i < submesh.VertexFormat.Elements.Count; ++i)
+            for (int i = 0; i < submesh.VertexFormatFull.Elements.Count; ++i)
             {
-                if (i == submesh.VertexFormat.Elements.Count - 1)
+                if (i == submesh.VertexFormatFull.Elements.Count - 1)
                 {
                     //TODO: should probably properly verify VariableType here 
-                    // if (submesh.VertexFormat.Elements[i].Count != 1 || submesh.VertexFormat.Elements[i][0].VariableType != VBFE_InputType.INDICIES_U16)
+                    // if (submesh.VertexFormatFull.Elements[i].Count != 1 || submesh.VertexFormatFull.Elements[i][0].VariableType != VBFE_InputType.INDICIES_U16)
                     //     throw new Exception("unexpected format");
 
                     for (int x = 0; x < submesh.IndexCount; x++)
@@ -47,9 +47,9 @@ public static class CathodeLibExtensions
 
                 for (int x = 0; x < submesh.VertexCount; ++x)
                 {
-                    for (int y = 0; y < submesh.VertexFormat.Elements[i].Count; ++y)
+                    for (int y = 0; y < submesh.VertexFormatFull.Elements[i].Count; ++y)
                     {
-                        AlienVBF.Element format = submesh.VertexFormat.Elements[i][y];
+                        AlienVBF.Element format = submesh.VertexFormatFull.Elements[i][y];
                         switch (format.VariableType)
                         {
                             case VBFE_InputType.VECTOR3:
@@ -132,7 +132,7 @@ public static class CathodeLibExtensions
                                     Vector4 v = new Vector4(reader.ReadInt16(), reader.ReadInt16(), reader.ReadInt16(), reader.ReadInt16());
                                     v /= (float)Int16.MaxValue;
                                     if (v.w != 0 && v.w != -1 && v.w != 1) throw new Exception("Unexpected vert W");
-                                    v *= submesh.ScaleFactor; //Account for scale
+                                    v *= submesh.VertexScale; //Account for scale
                                     switch (format.ShaderSlot)
                                     {
                                         case VBFE_InputSlot.VERTEX:

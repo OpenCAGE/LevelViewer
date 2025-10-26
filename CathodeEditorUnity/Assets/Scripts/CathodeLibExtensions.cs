@@ -63,10 +63,9 @@ public static class CathodeLibExtensions
                                 break;
                             case VertexFormatUsage.TEXCOORD:
                                 if (f.VariantIndex >= uvs.Length)
-                                {
                                     Array.Resize(ref uvs, f.VariantIndex + 1);
-                                    uvs[f.VariantIndex] ??= new List<Vector2>();
-                                }
+                                if (uvs[f.VariantIndex] == null)
+                                    uvs[f.VariantIndex] = new List<Vector2>();
                                 uvs[f.VariantIndex].Add(v);
                                 break;
                             case VertexFormatUsage.TANGENT:

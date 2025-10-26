@@ -1,20 +1,22 @@
-using System.Collections.Generic;
-using UnityEngine;
+//#define USE_MATERIAL_DATA
+
 using CATHODE;
-using System.IO;
-using CathodeLib;
 using CATHODE.LEGACY;
-using static CATHODE.LEGACY.ShadersPAK;
-using System.Threading.Tasks;
 using CATHODE.Scripting;
-using System.Linq;
 using CATHODE.Scripting.Internal;
+using CathodeLib;
 using System;
-using UnityEditor;
 using System.Collections;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
 using System.Resources;
 using System.Security.Principal;
+using System.Threading.Tasks;
+using UnityEditor;
+using UnityEngine;
 using UnityEngine.Animations;
+using CATHODE.ShaderTypes;
 
 public class AlienScene : MonoBehaviour
 {
@@ -27,16 +29,24 @@ public class AlienScene : MonoBehaviour
     public GameObject ParentGameObject => _parentGameObject;
 
     private Composite _loadedComposite = null;
-    public uint CompositeID => _loadedComposite == null ? 0 : _loadedComposite.shortGUID.ToUInt32();
+    public uint CompositeID => _loadedComposite == null ? 0 : _loadedComposite.shortGUID.AsUInt32;
     public string CompositeIDString => _loadedComposite == null || _loadedComposite.shortGUID == ShortGuid.Invalid ? "" : _loadedComposite.shortGUID.ToByteString();
     public string CompositeName => _loadedComposite == null ? "" : _loadedComposite.name;
 
+    private Dictionary<int, TexOrCube> _texturesGlobal = new Dictionary<int, TexOrCube>();
+    private Dictionary<int, TexOrCube> _texturesLevel = new Dictionary<int, TexOrCube>();
     private Dictionary<int, Material> _materials = new Dictionary<int, Material>();
     private Dictionary<Material, bool> _materialSupport = new Dictionary<Material, bool>();
     private Dictionary<int, GameObjectHolder> _modelGOs = new Dictionary<int, GameObjectHolder>();
     
     private Dictionary<ShortGuid, List<GameObject>> _compositeGameObjects = new Dictionary<ShortGuid, List<GameObject>>();
     private Dictionary<GameObject, Entity> _gameObjectEntities = new Dictionary<GameObject, Entity>();
+
+    public class TexOrCube
+    {
+        public Texture2D Texture = null;
+        public Cubemap Cubemap = null;
+    }
 
     private CommandsEditorConnection _client;
 
@@ -150,7 +160,7 @@ public class AlienScene : MonoBehaviour
     /* Add an Entity to all instances of its contained Composite within the scene */
     public void AddEntity(ShortGuid composite, ShortGuid entity)
     {
-        string entityGameObjectName = entity.ToUInt32().ToString();
+        string entityGameObjectName = entity.AsUInt32.ToString();
         if (_compositeGameObjects.ContainsKey(composite))
         {
             foreach (GameObject compositeInstance in _compositeGameObjects[composite])
@@ -172,7 +182,7 @@ public class AlienScene : MonoBehaviour
     {
         GetEntityTransform(entity, out Vector3 position, out Vector3 rotation);
 
-        GameObject entityGO = new GameObject(entity.shortGUID.ToUInt32().ToString());
+        GameObject entityGO = new GameObject(entity.shortGUID.AsUInt32.ToString());
         entityGO.transform.parent = parentGO.transform;
         entityGO.transform.SetLocalPositionAndRotation(position, Quaternion.Euler(rotation));
         entityGO.hideFlags = HideFlags.HideInHierarchy | HideFlags.DontSave;
@@ -223,7 +233,7 @@ public class AlienScene : MonoBehaviour
                     }
                     else
                     {
-                        switch ((FunctionType)function.function.ToUInt32())
+                        switch ((FunctionType)function.function.AsUInt32)
                         {
                             //Renderables
                             case FunctionType.ModelReference:
@@ -303,7 +313,7 @@ public class AlienScene : MonoBehaviour
         foreach (ShortGuid guid in path.path)
         {
             if (guid == ShortGuid.Invalid) continue;
-            list.Add(guid.ToUInt32());
+            list.Add(guid.AsUInt32);
         }
         return list;
     }
@@ -311,7 +321,7 @@ public class AlienScene : MonoBehaviour
     /* Reposition all Entities in the scene with a new local position and rotation */
     public void RepositionEntity(ShortGuid composite, ShortGuid entity, Vector3 position, Quaternion rotation, bool fromPointer, bool pointedPos)
     {
-        string entityGameObjectName = entity.ToUInt32().ToString();
+        string entityGameObjectName = entity.AsUInt32.ToString();
         if (_compositeGameObjects.ContainsKey(composite))
         {
             foreach (GameObject compositeInstance in _compositeGameObjects[composite])
@@ -340,7 +350,7 @@ public class AlienScene : MonoBehaviour
     /* Remove all instances of a given Entity in the scene */
     public void RemoveEntity(ShortGuid composite, ShortGuid entity)
     {
-        string entityGameObjectName = entity.ToUInt32().ToString();
+        string entityGameObjectName = entity.AsUInt32.ToString();
         if (_compositeGameObjects.ContainsKey(composite))
         {
             foreach (GameObject compositeInstance in _compositeGameObjects[composite])
@@ -374,7 +384,7 @@ public class AlienScene : MonoBehaviour
     public void UpdateRenderable(ShortGuid composite, ShortGuid entity, List<Tuple<int, int>> renderables)
     {
         //todo: this should handle overrides
-        string entityGameObjectName = entity.ToUInt32().ToString();
+        string entityGameObjectName = entity.AsUInt32.ToString();
         if (_compositeGameObjects.ContainsKey(composite))
         {
             foreach (GameObject compositeInstance in _compositeGameObjects[composite])
@@ -419,7 +429,7 @@ public class AlienScene : MonoBehaviour
         newModelSpawn.transform.parent = parent.transform;
         newModelSpawn.transform.localPosition = Vector3.zero;
         newModelSpawn.transform.localRotation = Quaternion.identity;
-        newModelSpawn.name = holder.MainMesh.name;
+        newModelSpawn.name = holder.MainMesh.name + " (" + material.name + ")";
         newModelSpawn.AddComponent<MeshFilter>().sharedMesh = holder.MainMesh;
         newModelSpawn.hideFlags = HideFlags.NotEditable | HideFlags.HideInHierarchy;
 
@@ -462,9 +472,9 @@ public class AlienScene : MonoBehaviour
             Models.CS2.Component.LOD lod = LevelContent.ModelsPAK.FindModelLODForSubmesh(submesh);
             Models.CS2 mesh = LevelContent.ModelsPAK.FindModelForSubmesh(submesh);
             Mesh thisMesh = submesh.ToMesh();
+            thisMesh.name = ((mesh == null) ? "" : mesh.Name) + ": " + ((lod == null) ? "" : lod.Name);
 
             GameObjectHolder ThisModelPart = new GameObjectHolder();
-            ThisModelPart.Name = ((mesh == null) ? "" : mesh.Name) + ": " + ((lod == null) ? "" : lod.Name);
             ThisModelPart.MainMesh = thisMesh;
             ThisModelPart.DefaultMaterial = submesh.MaterialIndex;
             _modelGOs.Add(EntryIndex, ThisModelPart);
@@ -476,70 +486,245 @@ public class AlienScene : MonoBehaviour
     {
         if (!_materials.ContainsKey(MTLIndex))
         {
-            Materials.Material InMaterial = LevelContent.ModelsMTL.GetAtWriteIndex(MTLIndex);
-            int RemappedIndex = LevelContent.ShadersIDXRemap.Datas[InMaterial.ShaderIndex].Index;
-            ShadersPAK.ShaderEntry Shader = LevelContent.ShadersPAK.Shaders[RemappedIndex];
+            Materials.Material material = LevelContent.ModelsMTL.GetAtWriteIndex(MTLIndex);
+            Shaders.Shader shader = LevelContent.ShadersPAK.Entries[material.ShaderIndex];
 
-            Material toReturn = new Material(UnityEngine.Shader.Find("Standard"));
-            toReturn.name = InMaterial.Name;
-
-            ShaderMaterialMetadata metadata = LevelContent.ShadersPAK.GetMaterialMetadataFromShader(InMaterial);
-
-            switch (metadata.shaderCategory)
+            Material unityMaterial = new Material(UnityEngine.Shader.Find("Standard"));
+            unityMaterial.name = material.Name;
+            switch (shader.Ubershader)
             {
                 //Unsupported shader slot types - draw transparent for now
-                case ShaderCategory.CA_SHADOWCASTER:
-                case ShaderCategory.CA_DEFERRED:
-                case ShaderCategory.CA_DEBUG:
-                case ShaderCategory.CA_OCCLUSION_CULLING:
-                case ShaderCategory.CA_FOGSPHERE:
-                case ShaderCategory.CA_FOGPLANE:
-                case ShaderCategory.CA_EFFECT_OVERLAY:
-                case ShaderCategory.CA_DECAL:
-                case ShaderCategory.CA_VOLUME_LIGHT:
-                case ShaderCategory.CA_REFRACTION:
-                    toReturn.name += " (NOT RENDERED: " + metadata.shaderCategory.ToString() + ")";
-                    _materialSupport.Add(toReturn, false);
-                    return toReturn;
+                case SHADER_LIST.CA_SHADOWCASTER:
+                case SHADER_LIST.CA_DEFERRED:
+                case SHADER_LIST.CA_DEBUG:
+                case SHADER_LIST.CA_OCCLUSION_CULLING:
+                case SHADER_LIST.CA_FOGSPHERE:
+                case SHADER_LIST.CA_FOGPLANE:
+                case SHADER_LIST.CA_EFFECT_OVERLAY:
+                case SHADER_LIST.CA_DECAL:
+                case SHADER_LIST.CA_VOLUME_LIGHT:
+                case SHADER_LIST.CA_REFRACTION:
+                    unityMaterial.name += " (NOT RENDERED: " + shader.Ubershader.ToString() + ")";
+                    _materialSupport.Add(unityMaterial, false);
+                    return unityMaterial;
             }
-            toReturn.name += " " + metadata.shaderCategory.ToString();
+            unityMaterial.name += " " + shader.Ubershader.ToString();
 
-            /*
-            for (int i = 0; i < Shader.Header.CSTCounts.Length; i++)
+#if USE_MATERIAL_DATA
+            float DIFFUSE_UV_MULT = 16; //why does this need to be 16?
+            switch (shader.Ubershader)
             {
-                using (BinaryReader cstReader = new BinaryReader(new MemoryStream(LevelContent.ModelsMTL.CSTData[i])))
-                {
-                    int baseOffset = (InMaterial.ConstantBuffers[i].Offset * 4);
-
-                    if (CSTIndexValid(metadata.cstIndexes.Diffuse0, ref Shader, i))
+                case SHADER_LIST.CA_ENVIRONMENT:
+                    ApplySampler(material, shader, unityMaterial, "_MainTex", (int)CA_ENVIRONMENT.SAMPLERS.DIFFUSE_MAP);
+                    ApplySampler(material, shader, unityMaterial, "_BumpMap", (int)CA_ENVIRONMENT.SAMPLERS.NORMAL_MAP, "_NORMALMAP");
+                    if (ApplySampler(material, shader, unityMaterial, "_MetallicGlossMap", (int)CA_ENVIRONMENT.SAMPLERS.SPECULAR_MAP, "_METALLICGLOSSMAP"))
                     {
-                        Vector4 colour = LoadFromCST<Vector4>(cstReader, baseOffset + (Shader.CSTLinks[i][metadata.cstIndexes.Diffuse0] * 4));
-                        toReturn.SetColor("_Color", colour);
+                        unityMaterial.SetFloat("_Glossiness", 0.0f);
+                        unityMaterial.SetFloat("_GlossMapScale", 0.0f);
                     }
-                }
-            }
-            */
+                    ApplySampler(material, shader, unityMaterial, "_DetailMask", (int)CA_ENVIRONMENT.SAMPLERS.DIRT_MAP, "_DETAIL_MULX2");
+                    ApplySampler(material, shader, unityMaterial, "_ParallaxMap", (int)CA_ENVIRONMENT.SAMPLERS.PARALLAX_MAP, "_PARALLAXMAP");
+                    ApplySampler(material, shader, unityMaterial, "_OcclusionMap", (int)CA_ENVIRONMENT.SAMPLERS.AMBIENT_OCCLUSION_MAP);
 
-            _materialSupport.Add(toReturn, true);
-            _materials.Add(MTLIndex, toReturn);
+                    DIFFUSE_UV_MULT *= GetShaderFloat(shader, material, (int)CA_ENVIRONMENT.PARAMETERS.DIFFUSE_UV_MULT, 1.0f);
+                    float emissiveMult = GetShaderFloat(shader, material, (int)CA_ENVIRONMENT.PARAMETERS.EMISSIVE_MULT, 1.0f);
+                    Vector3 emissiveTint = GetShaderVector3(shader, material, (int)CA_ENVIRONMENT.PARAMETERS.EMISSIVE_TINT, Vector3.one);
+                    Vector3 diffuseTint = GetShaderVector3(shader, material, (int)CA_ENVIRONMENT.PARAMETERS.DIFFUSE_TINT, Vector3.one);
+
+                    if (shader.PixelShaderParameterRemaps[7] != 255)
+                    {
+                        //todo: this is labelled as half4 - perhaps it's only two values?
+                        //Color DIFFUSE_TINT = new Color(material.PixelShaderConstants[shader.ParameterRemaps[2][7]], material.PixelShaderConstants[shader.ParameterRemaps[2][7] + 1], material.PixelShaderConstants[shader.ParameterRemaps[2][7] + 2]);
+                        //Debug.Log(material.Name + " -> " + DIFFUSE_TINT);
+                    }
+                    break;
+                case SHADER_LIST.CA_DECAL:
+                    ApplySampler(material, shader, unityMaterial, "_MainTex", (int)CA_DECAL.SAMPLERS.DIFFUSE_MAP);
+                    ApplySampler(material, shader, unityMaterial, "_ParallaxMap", (int)CA_DECAL.SAMPLERS.PARALLAX_MAP, "_PARALLAXMAP");
+                    if (ApplySampler(material, shader, unityMaterial, "_MetallicGlossMap", (int)CA_DECAL.SAMPLERS.SPECULAR_MAP, "_METALLICGLOSSMAP"))
+                    {
+                        unityMaterial.SetFloat("_Glossiness", 0.0f);
+                        unityMaterial.SetFloat("_GlossMapScale", 0.0f);
+                    }
+                    ApplySampler(material, shader, unityMaterial, "_BumpMap", (int)CA_DECAL.SAMPLERS.NORMAL_MAP, "_NORMALMAP");
+                    break;
+                case SHADER_LIST.CA_HAIR:
+                    ApplySampler(material, shader, unityMaterial, "_MainTex", (int)CA_HAIR.SAMPLERS.DIFFUSE_MAP);
+                    if (ApplySampler(material, shader, unityMaterial, "_MetallicGlossMap", (int)CA_HAIR.SAMPLERS.SPECULAR_MAP, "_METALLICGLOSSMAP"))
+                    {
+                        unityMaterial.SetFloat("_Glossiness", 0.0f);
+                        unityMaterial.SetFloat("_GlossMapScale", 0.0f);
+                    }
+                    ApplySampler(material, shader, unityMaterial, "_BumpMap", (int)CA_HAIR.SAMPLERS.NORMAL_MAP, "_NORMALMAP");
+                    if (shader.PixelShaderParameterRemaps[1] != 255)
+                        DIFFUSE_UV_MULT *= material.PixelShaderConstants[shader.PixelShaderParameterRemaps[1]]; //CA_HAIR_PARAMETERS::DIFFUSE_UV_MULT
+                    break;
+            }
+            unityMaterial.SetTextureScale("_MainTex", new Vector2(DIFFUSE_UV_MULT, DIFFUSE_UV_MULT));
+#endif
+
+            _materialSupport.Add(unityMaterial, true);
+            _materials.Add(MTLIndex, unityMaterial);
         }
         return _materials[MTLIndex];
     }
-    private T LoadFromCST<T>(BinaryReader cstReader, int offset)
+
+#if USE_MATERIAL_DATA
+    private float GetShaderFloat(Shaders.Shader shader, Materials.Material material, int index, float fallback = 0.0f)
     {
-        cstReader.BaseStream.Position = offset;
-        return Utilities.Consume<T>(cstReader);
+        if (shader.PixelShaderParameterRemaps.Count > index)
+        {
+            if (shader.PixelShaderParameterRemaps[index] != 255)
+            {
+                return material.PixelShaderConstants[shader.PixelShaderParameterRemaps[index]];
+            }
+        }
+        return fallback;
     }
-    private bool CSTIndexValid(int cstIndex, ref ShadersPAK.ShaderEntry Shader, int i)
+
+    private Vector3 GetShaderVector3(Shaders.Shader shader, Materials.Material material, int index, Vector3 fallback)
     {
-        return cstIndex >= 0 && cstIndex < Shader.Header.CSTCounts[i] && (int)Shader.CSTLinks[i][cstIndex] != -1 && Shader.CSTLinks[i][cstIndex] != 255;
+        if (shader.PixelShaderParameterRemaps.Count > index)
+        {
+            if (shader.PixelShaderParameterRemaps[index] != 255)
+            {
+                return new Vector3(
+                    material.PixelShaderConstants[shader.PixelShaderParameterRemaps[index]], 
+                    material.PixelShaderConstants[shader.PixelShaderParameterRemaps[index] + 1], 
+                    material.PixelShaderConstants[shader.PixelShaderParameterRemaps[index] + 2]
+                );
+            }
+        }
+        return fallback;
     }
+
+    private bool ApplySampler(Materials.Material material, Shaders.Shader shader, Material unityMaterial, string textureMap, int index, string keyword = "")
+    {
+        if (shader.SamplerRemaps.Count <= index) return false;
+        int diffuseMapIndex = shader.SamplerRemaps[index];
+        if (diffuseMapIndex == 255) return false;
+
+        TexOrCube texture = GetTexOrCube(material.TextureReferences[diffuseMapIndex]);
+        if (texture?.Texture == null) return false;
+        unityMaterial.SetTexture(textureMap, texture.Texture);
+        if (keyword != "")
+            unityMaterial.EnableKeyword(keyword);
+
+        Shaders.StateBlock state = shader.Samplers.FirstOrDefault(o => o.Index == diffuseMapIndex);
+        if (state != null)
+        {
+            for (int i = 0; i < state.Entries.Count; i++)
+            {
+                // Debug.Log("diffuseMapSampler: " + (Shaders.SamplerState)diffuseMapSampler.Entries[i].StateId + " = " + diffuseMapSampler.Entries[i].Value);
+            }
+        }
+        return true;
+    }
+
+    private TexOrCube GetTexOrCube(TexturePtr ptr)
+    {
+        if (!((ptr.Location == TexturePtr.Source.GLOBAL && !_texturesGlobal.ContainsKey(ptr.Index)) || 
+              (ptr.Location == TexturePtr.Source.LEVEL && !_texturesLevel.ContainsKey(ptr.Index))))
+        {
+            if (ptr.Location == TexturePtr.Source.GLOBAL)
+                return _texturesGlobal[ptr.Index];
+            else
+                return _texturesLevel[ptr.Index];
+        }
+
+        Textures.TEX4 InTexture = (ptr.Location == TexturePtr.Source.GLOBAL ? LevelContent.TexturesPAK_GLOBAL : LevelContent.TexturesPAK).GetAtWriteIndex(ptr.Index);
+        if (InTexture == null) return null;
+        Textures.TEX4.Texture TexPart = InTexture.TextureStreamed;
+
+        Vector2 textureDims = new Vector2(TexPart.Width, TexPart.Height);
+        if (TexPart.Content == null || TexPart.Content.Length == 0)
+            return null;
+        int textureLength = TexPart.Content.Length;
+        int mipLevels = TexPart.MipLevels;
+
+        UnityEngine.TextureFormat format = UnityEngine.TextureFormat.BC7;
+        switch (InTexture.Format)
+        {
+            case Textures.TextureFormat.A32R32G32B32F:
+                format = UnityEngine.TextureFormat.RGBAFloat; 
+                break;
+            case Textures.TextureFormat.A16R16G16B16:
+                format = UnityEngine.TextureFormat.RGBAHalf; 
+                break;
+            case Textures.TextureFormat.A8R8G8B8:
+                format = UnityEngine.TextureFormat.RGBA32;
+                break;
+            case Textures.TextureFormat.X8R8G8B8:
+                format = UnityEngine.TextureFormat.RGB24;
+                break;
+            case Textures.TextureFormat.A8:
+                format = UnityEngine.TextureFormat.Alpha8;
+                break;
+            case Textures.TextureFormat.L8:
+                format = UnityEngine.TextureFormat.R8;
+                break;
+            case Textures.TextureFormat.DXT1:
+                format = UnityEngine.TextureFormat.DXT1;
+                break;
+            case Textures.TextureFormat.DXT3:
+                //format = UnityEngine.TextureFormat.DXT3; 
+                break;
+            case Textures.TextureFormat.DXT5:
+                format = UnityEngine.TextureFormat.DXT5;
+                break;
+            case Textures.TextureFormat.DXN:
+                format = UnityEngine.TextureFormat.BC5; 
+                break;
+            case Textures.TextureFormat.A4R4G4B4:
+                format = UnityEngine.TextureFormat.ARGB4444;
+                break;
+            case Textures.TextureFormat.BC6H:
+                format = UnityEngine.TextureFormat.BC6H; 
+                break;
+            case Textures.TextureFormat.BC7:
+                format = UnityEngine.TextureFormat.BC7;
+                break;
+            case Textures.TextureFormat.R16F:
+                format = UnityEngine.TextureFormat.RHalf; 
+                break;
+        }
+
+        TexOrCube tex = new TexOrCube();
+        using (BinaryReader tempReader = new BinaryReader(new MemoryStream(TexPart.Content)))
+        {
+            if (InTexture.StateFlags.HasFlag(Textures.TextureStateFlag.CUBE))
+            {
+                tex.Cubemap = new Cubemap((int)textureDims.x, format, false);
+                tex.Cubemap.name = InTexture.Name;
+                tex.Cubemap.SetPixelData(tempReader.ReadBytes(textureLength / 6), 0, CubemapFace.PositiveX);
+                tex.Cubemap.SetPixelData(tempReader.ReadBytes(textureLength / 6), 0, CubemapFace.NegativeX);
+                tex.Cubemap.SetPixelData(tempReader.ReadBytes(textureLength / 6), 0, CubemapFace.PositiveY);
+                tex.Cubemap.SetPixelData(tempReader.ReadBytes(textureLength / 6), 0, CubemapFace.NegativeY);
+                tex.Cubemap.SetPixelData(tempReader.ReadBytes(textureLength / 6), 0, CubemapFace.PositiveZ);
+                tex.Cubemap.SetPixelData(tempReader.ReadBytes(textureLength / 6), 0, CubemapFace.NegativeZ);
+                tex.Cubemap.Apply(false, true);
+            }
+            else
+            {
+                tex.Texture = new Texture2D((int)textureDims[0], (int)textureDims[1], format, mipLevels, true);
+                tex.Texture.name = InTexture.Name;
+                tex.Texture.LoadRawTextureData(tempReader.ReadBytes(textureLength));
+                tex.Texture.Apply();
+            }
+        }
+        if (ptr.Location == TexturePtr.Source.GLOBAL)
+            _texturesGlobal.Add(ptr.Index, tex);
+        else
+            _texturesLevel.Add(ptr.Index, tex);
+
+        return tex;
+    }
+#endif
 }
 
 //Temp wrapper for GameObject while we just want it in memory
 public class GameObjectHolder
 {
-    public string Name;
     public Mesh MainMesh; //TODO: should this be contained in a globally referenced array?
     public int DefaultMaterial; 
 }
@@ -566,7 +751,7 @@ public static class LevelContent
                 break;
         }
 
-        Parallel.For(0, 8, (i) =>
+        Parallel.For(0, 9, (i) =>
         {
             switch (i)
             {
@@ -589,11 +774,16 @@ public static class LevelContent
                     ModelsPAK = new Models(renderablePath + "LEVEL_MODELS.PAK");
                     break;
                 case 6:
-                    ShadersPAK = new ShadersPAK(renderablePath + "LEVEL_SHADERS_DX11.PAK");
+                    ShadersPAK = new Shaders(renderablePath + "LEVEL_SHADERS_DX11.PAK");
                     break;
+#if USE_MATERIAL_DATA
                 case 7:
-                    ShadersIDXRemap = new IDXRemap(renderablePath + "LEVEL_SHADERS_DX11_IDX_REMAP.PAK");
+                    TexturesPAK = new Textures(renderablePath + "LEVEL_TEXTURES.ALL.PAK");
                     break;
+                case 8:
+                    TexturesPAK_GLOBAL = new Textures(aiPath + "/DATA/ENV/GLOBAL/WORLD/GLOBAL_TEXTURES.ALL.PAK");
+                    break;
+#endif
             }
         });
     }
@@ -607,7 +797,8 @@ public static class LevelContent
         ModelsMTL = null;
         ModelsPAK = null;
         ShadersPAK = null;
-        ShadersIDXRemap = null;
+        TexturesPAK = null;
+        TexturesPAK_GLOBAL = null;
         RemappedResources.Clear();
     }
 
@@ -619,8 +810,9 @@ public static class LevelContent
     public static byte[] ModelsCST;
     public static Materials ModelsMTL;
     public static Models ModelsPAK;
-    public static ShadersPAK ShadersPAK;
-    public static IDXRemap ShadersIDXRemap;
+    public static Shaders ShadersPAK;
+    public static Textures TexturesPAK;
+    public static Textures TexturesPAK_GLOBAL;
 
     //This acts as a temporary override for REDS.BIN mapping runtime changes from Commands Editor
     public static Dictionary<Entity, List<Tuple<int, int>>> RemappedResources = new Dictionary<Entity, List<Tuple<int, int>>>(); //Model Index, Material Index

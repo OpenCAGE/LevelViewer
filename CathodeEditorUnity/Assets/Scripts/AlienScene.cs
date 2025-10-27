@@ -587,7 +587,6 @@ public class AlienScene : MonoBehaviour
         return fallback;
     }
 
-#if USE_ADVANCED_MATERIALS
     private bool ApplySampler(Materials.Material material, Shaders.Shader shader, Material unityMaterial, string textureMap, int index, string keyword = "")
     {
         if (shader.SamplerRemaps.Count <= index) return false;
@@ -709,28 +708,9 @@ public class AlienScene : MonoBehaviour
 
         return tex;
     }
-#endif
 
     private void ApplyEnvironmentShader(Materials.Material material, Shaders.Shader shader, Material unityMaterial)
     {
-#if USE_ADVANCED_MATERIALS
-        bool transparent =
-            (shader.UbershaderFeatureFlags & (1L << (int)CA_ENVIRONMENT.FEATURES.ALPHA_TEST)) != 0 ||
-            (shader.UbershaderFeatureFlags & (1L << (int)CA_ENVIRONMENT.FEATURES.FORCE_TO_ALPHA)) != 0 ||
-            (shader.UbershaderFeatureFlags & (1L << (int)CA_ENVIRONMENT.FEATURES.GLASS)) != 0 ||
-            (shader.UbershaderFeatureFlags & (1L << (int)CA_ENVIRONMENT.FEATURES.ALPHABLEND_NOISE)) != 0 ||
-            (shader.UbershaderFeatureFlags & (1L << (int)CA_ENVIRONMENT.FEATURES.SEPARATE_ALPHA)) != 0;
-
-        unityMaterial.SetOverrideTag("RenderType", transparent ? "Transparent" : "Opaque");
-        unityMaterial.SetInt("_SrcBlend", transparent ? (int)UnityEngine.Rendering.BlendMode.SrcAlpha : (int)UnityEngine.Rendering.BlendMode.One);
-        unityMaterial.SetInt("_DstBlend", transparent ? (int)UnityEngine.Rendering.BlendMode.OneMinusSrcAlpha : (int)UnityEngine.Rendering.BlendMode.Zero);
-        unityMaterial.SetInt("_ZWrite", transparent ? 0 : 1);
-        unityMaterial.DisableKeyword("_ALPHATEST_ON");
-        if (transparent) unityMaterial.EnableKeyword("_ALPHABLEND_ON");
-        else unityMaterial.DisableKeyword("_ALPHATEST_ON");
-        unityMaterial.DisableKeyword("_ALPHAPREMULTIPLY_ON");
-        unityMaterial.renderQueue = transparent ? 3000 : 2000;
-        
         //Apply textures
         ApplySampler(material, shader, unityMaterial, "_DiffuseMap", (int)CA_ENVIRONMENT.SAMPLERS.DIFFUSE_MAP);
         ApplySampler(material, shader, unityMaterial, "_NormalMap", (int)CA_ENVIRONMENT.SAMPLERS.NORMAL_MAP, "NORMAL_MAPPING");
@@ -800,6 +780,24 @@ public class AlienScene : MonoBehaviour
         unityMaterial.SetFloat("_ShiftPriorityLevel", GetShaderFloat(shader, material, (int)CA_ENVIRONMENT.PARAMETERS.SHIFT_PRIORITY_LEVEL, 0.0f));
         unityMaterial.SetFloat("_FresnelIntensity", GetShaderFloat(shader, material, (int)CA_ENVIRONMENT.PARAMETERS.FRESNEL_INTENSITY, 1.0f));
         unityMaterial.SetFloat("_PlanarReflectiveOverbrightScalar", GetShaderFloat(shader, material, (int)CA_ENVIRONMENT.PARAMETERS.PLANAR_REFLECTIVE_OVERBRIGHT_SCALAR, 1.0f));
+
+#if USE_ADVANCED_MATERIALS
+        bool transparent =
+            (shader.UbershaderFeatureFlags & (1L << (int)CA_ENVIRONMENT.FEATURES.ALPHA_TEST)) != 0 ||
+            (shader.UbershaderFeatureFlags & (1L << (int)CA_ENVIRONMENT.FEATURES.FORCE_TO_ALPHA)) != 0 ||
+            (shader.UbershaderFeatureFlags & (1L << (int)CA_ENVIRONMENT.FEATURES.GLASS)) != 0 ||
+            (shader.UbershaderFeatureFlags & (1L << (int)CA_ENVIRONMENT.FEATURES.ALPHABLEND_NOISE)) != 0 ||
+            (shader.UbershaderFeatureFlags & (1L << (int)CA_ENVIRONMENT.FEATURES.SEPARATE_ALPHA)) != 0;
+
+        unityMaterial.SetOverrideTag("RenderType", transparent ? "Transparent" : "Opaque");
+        unityMaterial.SetInt("_SrcBlend", transparent ? (int)UnityEngine.Rendering.BlendMode.SrcAlpha : (int)UnityEngine.Rendering.BlendMode.One);
+        unityMaterial.SetInt("_DstBlend", transparent ? (int)UnityEngine.Rendering.BlendMode.OneMinusSrcAlpha : (int)UnityEngine.Rendering.BlendMode.Zero);
+        unityMaterial.SetInt("_ZWrite", transparent ? 0 : 1);
+        unityMaterial.DisableKeyword("_ALPHATEST_ON");
+        if (transparent) unityMaterial.EnableKeyword("_ALPHABLEND_ON");
+        else unityMaterial.DisableKeyword("_ALPHATEST_ON");
+        unityMaterial.DisableKeyword("_ALPHAPREMULTIPLY_ON");
+        unityMaterial.renderQueue = transparent ? 3000 : 2000;
         
         //Set feature flags
         unityMaterial.SetFloat("_VertexColour", (shader.UbershaderFeatureFlags & (1L << (int)CA_ENVIRONMENT.FEATURES.VERTEX_COLOUR)) != 0 ? 1.0f : 0.0f);
@@ -941,14 +939,12 @@ public static class LevelContent
                 case 6:
                     ShadersPAK = new Shaders(renderablePath + "LEVEL_SHADERS_DX11.PAK");
                     break;
-#if USE_ADVANCED_MATERIALS
                 case 7:
                     TexturesPAK = new Textures(renderablePath + "LEVEL_TEXTURES.ALL.PAK");
                     break;
                 case 8:
                     TexturesPAK_GLOBAL = new Textures(aiPath + "/DATA/ENV/GLOBAL/WORLD/GLOBAL_TEXTURES.ALL.PAK");
                     break;
-#endif
             }
         });
     }

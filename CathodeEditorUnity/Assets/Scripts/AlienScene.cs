@@ -1,4 +1,5 @@
 //#define USE_ADVANCED_MATERIALS
+#define SKIP_UNSUPPORTED_MATERIALS
 
 using CATHODE;
 using CATHODE.LEGACY;
@@ -503,10 +504,16 @@ public class AlienScene : MonoBehaviour
 
             if (shader.Ubershader != SHADER_LIST.CA_ENVIRONMENT)
             {
-                //Debug.Log("Skipping: " + shader.Ubershader.ToString());
                 Material mat = new Material(UnityEngine.Shader.Find("Standard"));
-                mat.name += " (NOT RENDERED: " + shader.Ubershader.ToString() + ")";
+                mat.name = material.Name + " " + shader.Ubershader.ToString();
+#if SKIP_UNSUPPORTED_MATERIALS
+                mat.name += " (NOT RENDERED)";
                 _materialSupport.Add(mat, false);
+                //Debug.Log("Skipping: " + shader.Ubershader.ToString());
+#else
+                _materialSupport.Add(mat, true);
+                _materials.Add(MTLIndex, mat);
+#endif
                 return mat;
             }
 

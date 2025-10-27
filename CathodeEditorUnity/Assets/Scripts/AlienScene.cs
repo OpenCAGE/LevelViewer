@@ -1,4 +1,4 @@
-//#define USE_MATERIAL_DATA
+//#define USE_ADVANCED_MATERIALS
 
 using CATHODE;
 using CATHODE.LEGACY;
@@ -522,14 +522,12 @@ public class AlienScene : MonoBehaviour
             Material unityMaterial = new Material(unityShader);
             unityMaterial.name = material.Name + " " + shader.Ubershader.ToString();
 
-#if USE_MATERIAL_DATA
             switch (shader.Ubershader)
             {
                 case SHADER_LIST.CA_ENVIRONMENT:
                     ApplyEnvironmentShader(material, shader, unityMaterial);
                     break;
             }
-#endif
 
             _materialSupport.Add(unityMaterial, true);
             _materials.Add(MTLIndex, unityMaterial);
@@ -537,7 +535,6 @@ public class AlienScene : MonoBehaviour
         return _materials[MTLIndex];
     }
 
-#if USE_MATERIAL_DATA
     private float GetShaderFloat(Shaders.Shader shader, Materials.Material material, int index, float fallback = 0.0f)
     {
         if (shader.PixelShaderParameterRemaps.Count > index)
@@ -583,6 +580,7 @@ public class AlienScene : MonoBehaviour
         return fallback;
     }
 
+#if USE_ADVANCED_MATERIALS
     private bool ApplySampler(Materials.Material material, Shaders.Shader shader, Material unityMaterial, string textureMap, int index, string keyword = "")
     {
         if (shader.SamplerRemaps.Count <= index) return false;
@@ -704,9 +702,11 @@ public class AlienScene : MonoBehaviour
 
         return tex;
     }
+#endif
 
     private void ApplyEnvironmentShader(Materials.Material material, Shaders.Shader shader, Material unityMaterial)
     {
+#if USE_ADVANCED_MATERIALS
         bool transparent =
             (shader.UbershaderFeatureFlags & (1L << (int)CA_ENVIRONMENT.FEATURES.ALPHA_TEST)) != 0 ||
             (shader.UbershaderFeatureFlags & (1L << (int)CA_ENVIRONMENT.FEATURES.FORCE_TO_ALPHA)) != 0 ||
@@ -794,26 +794,6 @@ public class AlienScene : MonoBehaviour
         unityMaterial.SetFloat("_FresnelIntensity", GetShaderFloat(shader, material, (int)CA_ENVIRONMENT.PARAMETERS.FRESNEL_INTENSITY, 1.0f));
         unityMaterial.SetFloat("_PlanarReflectiveOverbrightScalar", GetShaderFloat(shader, material, (int)CA_ENVIRONMENT.PARAMETERS.PLANAR_REFLECTIVE_OVERBRIGHT_SCALAR, 1.0f));
         
-        //Apply colors
-        Vector4 diffuseTint = GetShaderVector4(shader, material, (int)CA_ENVIRONMENT.PARAMETERS.DIFFUSE_TINT, Vector4.one);
-        unityMaterial.SetColor("_DiffuseTint", new Color(diffuseTint.x, diffuseTint.y, diffuseTint.z, diffuseTint.w));
-        Vector4 secondaryDiffuseTint = GetShaderVector4(shader, material, (int)CA_ENVIRONMENT.PARAMETERS.SECONDARY_DIFFUSE_TINT, Vector4.one);
-        unityMaterial.SetColor("_SecondaryDiffuseTint", new Color(secondaryDiffuseTint.x, secondaryDiffuseTint.y, secondaryDiffuseTint.z, secondaryDiffuseTint.w));
-        Vector3 specularTint = GetShaderVector3(shader, material, (int)CA_ENVIRONMENT.PARAMETERS.SPECULAR_TINT, Vector3.one);
-        unityMaterial.SetColor("_SpecularTint", new Color(specularTint.x, specularTint.y, specularTint.z, 1.0f));
-        Vector3 secondarySpecularTint = GetShaderVector3(shader, material, (int)CA_ENVIRONMENT.PARAMETERS.SECONDARY_SPECULAR_TINT, Vector3.one);
-        unityMaterial.SetColor("_SecondarySpecularTint", new Color(secondarySpecularTint.x, secondarySpecularTint.y, secondarySpecularTint.z, 1.0f));
-        Vector3 emissiveTint = GetShaderVector3(shader, material, (int)CA_ENVIRONMENT.PARAMETERS.EMISSIVE_TINT, Vector3.one);
-        unityMaterial.SetColor("_EmissiveTint", new Color(emissiveTint.x, emissiveTint.y, emissiveTint.z, 1.0f));
-        Vector3 aoTint = GetShaderVector3(shader, material, (int)CA_ENVIRONMENT.PARAMETERS.AO_TINT, Vector3.one);
-        unityMaterial.SetColor("_AoTint", new Color(aoTint.x, aoTint.y, aoTint.z, 1.0f));
-        Vector3 vertAoTint = GetShaderVector3(shader, material, (int)CA_ENVIRONMENT.PARAMETERS.VERT_AO_TINT, Vector3.one);
-        unityMaterial.SetColor("_VertAoTint", new Color(vertAoTint.x, vertAoTint.y, vertAoTint.z, 1.0f));
-        Vector3 glassTint = GetShaderVector3(shader, material, (int)CA_ENVIRONMENT.PARAMETERS.GLASS_TINT, Vector3.one);
-        unityMaterial.SetColor("_GlassTint", new Color(glassTint.x, glassTint.y, glassTint.z, 1.0f));
-        Vector3 customTintColour = GetShaderVector3(shader, material, (int)CA_ENVIRONMENT.PARAMETERS.CUSTOM_TINT_COLOUR, Vector3.one);
-        unityMaterial.SetColor("_CustomTintColour", new Color(customTintColour.x, customTintColour.y, customTintColour.z, 1.0f));
-        
         //Set feature flags
         unityMaterial.SetFloat("_VertexColour", (shader.UbershaderFeatureFlags & (1L << (int)CA_ENVIRONMENT.FEATURES.VERTEX_COLOUR)) != 0 ? 1.0f : 0.0f);
         unityMaterial.SetFloat("_FogAlpha", (shader.UbershaderFeatureFlags & (1L << (int)CA_ENVIRONMENT.FEATURES.FOG_ALPHA)) != 0 ? 1.0f : 0.0f);
@@ -876,8 +856,28 @@ public class AlienScene : MonoBehaviour
         unityMaterial.SetFloat("_OrientationAdaptiveTessellation", (shader.UbershaderFeatureFlags & (1L << (int)CA_ENVIRONMENT.FEATURES.ORIENTATION_ADAPTIVE_TESSELLATION)) != 0 ? 1.0f : 0.0f);
         unityMaterial.SetFloat("_PhongTessellation", (shader.UbershaderFeatureFlags & (1L << (int)CA_ENVIRONMENT.FEATURES.PHONG_TESSELLATION)) != 0 ? 1.0f : 0.0f);
         unityMaterial.SetFloat("_DisplacementMapping", (shader.UbershaderFeatureFlags & (1L << (int)CA_ENVIRONMENT.FEATURES.DISPLACEMENT_MAPPING)) != 0 ? 1.0f : 0.0f);
-    }
 #endif
+
+        //Apply colors
+        Vector4 diffuseTint = GetShaderVector4(shader, material, (int)CA_ENVIRONMENT.PARAMETERS.DIFFUSE_TINT, Vector4.one);
+        unityMaterial.SetColor("_DiffuseTint", new Color(diffuseTint.x, diffuseTint.y, diffuseTint.z, diffuseTint.w));
+        Vector4 secondaryDiffuseTint = GetShaderVector4(shader, material, (int)CA_ENVIRONMENT.PARAMETERS.SECONDARY_DIFFUSE_TINT, Vector4.one);
+        unityMaterial.SetColor("_SecondaryDiffuseTint", new Color(secondaryDiffuseTint.x, secondaryDiffuseTint.y, secondaryDiffuseTint.z, secondaryDiffuseTint.w));
+        Vector3 specularTint = GetShaderVector3(shader, material, (int)CA_ENVIRONMENT.PARAMETERS.SPECULAR_TINT, Vector3.one);
+        unityMaterial.SetColor("_SpecularTint", new Color(specularTint.x, specularTint.y, specularTint.z, 1.0f));
+        Vector3 secondarySpecularTint = GetShaderVector3(shader, material, (int)CA_ENVIRONMENT.PARAMETERS.SECONDARY_SPECULAR_TINT, Vector3.one);
+        unityMaterial.SetColor("_SecondarySpecularTint", new Color(secondarySpecularTint.x, secondarySpecularTint.y, secondarySpecularTint.z, 1.0f));
+        Vector3 emissiveTint = GetShaderVector3(shader, material, (int)CA_ENVIRONMENT.PARAMETERS.EMISSIVE_TINT, Vector3.one);
+        unityMaterial.SetColor("_EmissiveTint", new Color(emissiveTint.x, emissiveTint.y, emissiveTint.z, 1.0f));
+        Vector3 aoTint = GetShaderVector3(shader, material, (int)CA_ENVIRONMENT.PARAMETERS.AO_TINT, Vector3.one);
+        unityMaterial.SetColor("_AoTint", new Color(aoTint.x, aoTint.y, aoTint.z, 1.0f));
+        Vector3 vertAoTint = GetShaderVector3(shader, material, (int)CA_ENVIRONMENT.PARAMETERS.VERT_AO_TINT, Vector3.one);
+        unityMaterial.SetColor("_VertAoTint", new Color(vertAoTint.x, vertAoTint.y, vertAoTint.z, 1.0f));
+        Vector3 glassTint = GetShaderVector3(shader, material, (int)CA_ENVIRONMENT.PARAMETERS.GLASS_TINT, Vector3.one);
+        unityMaterial.SetColor("_GlassTint", new Color(glassTint.x, glassTint.y, glassTint.z, 1.0f));
+        Vector3 customTintColour = GetShaderVector3(shader, material, (int)CA_ENVIRONMENT.PARAMETERS.CUSTOM_TINT_COLOUR, Vector3.one);
+        unityMaterial.SetColor("_CustomTintColour", new Color(customTintColour.x, customTintColour.y, customTintColour.z, 1.0f));
+    }
 }
 
 //Temp wrapper for GameObject while we just want it in memory
@@ -934,7 +934,7 @@ public static class LevelContent
                 case 6:
                     ShadersPAK = new Shaders(renderablePath + "LEVEL_SHADERS_DX11.PAK");
                     break;
-#if USE_MATERIAL_DATA
+#if USE_ADVANCED_MATERIALS
                 case 7:
                     TexturesPAK = new Textures(renderablePath + "LEVEL_TEXTURES.ALL.PAK");
                     break;

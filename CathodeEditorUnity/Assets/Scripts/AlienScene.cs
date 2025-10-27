@@ -74,6 +74,7 @@ public class AlienScene : MonoBehaviour
         _materials.Clear();
         _materialSupport.Clear();
         _modelGOs.Clear();
+        _texturesLevel.Clear();
 
         LevelContent.Reset();
     }
@@ -482,6 +483,17 @@ public class AlienScene : MonoBehaviour
         return _modelGOs[EntryIndex];
     }
 
+    private string GetShaderName(SHADER_LIST shaderType)
+    {
+        switch (shaderType)
+        {
+            case SHADER_LIST.CA_ENVIRONMENT:
+                return "Cathode/CA_Environment";
+            default:
+                return "Standard";
+        }
+    }
+
     private Material GetMaterial(int MTLIndex)
     {
         if (!_materials.ContainsKey(MTLIndex))
@@ -489,78 +501,34 @@ public class AlienScene : MonoBehaviour
             Materials.Material material = LevelContent.ModelsMTL.GetAtWriteIndex(MTLIndex);
             Shaders.Shader shader = LevelContent.ShadersPAK.Entries[material.ShaderIndex];
 
-            Material unityMaterial = new Material(UnityEngine.Shader.Find("Standard"));
-            unityMaterial.name = material.Name;
-            switch (shader.Ubershader)
+            if (shader.Ubershader != SHADER_LIST.CA_ENVIRONMENT)
             {
-                //Unsupported shader slot types - draw transparent for now
-                case SHADER_LIST.CA_SHADOWCASTER:
-                case SHADER_LIST.CA_DEFERRED:
-                case SHADER_LIST.CA_DEBUG:
-                case SHADER_LIST.CA_OCCLUSION_CULLING:
-                case SHADER_LIST.CA_FOGSPHERE:
-                case SHADER_LIST.CA_FOGPLANE:
-                case SHADER_LIST.CA_EFFECT_OVERLAY:
-                case SHADER_LIST.CA_DECAL:
-                case SHADER_LIST.CA_VOLUME_LIGHT:
-                case SHADER_LIST.CA_REFRACTION:
-                    unityMaterial.name += " (NOT RENDERED: " + shader.Ubershader.ToString() + ")";
-                    _materialSupport.Add(unityMaterial, false);
-                    return unityMaterial;
+                //Debug.Log("Skipping: " + shader.Ubershader.ToString());
+                Material mat = new Material(UnityEngine.Shader.Find("Standard"));
+                mat.name += " (NOT RENDERED: " + shader.Ubershader.ToString() + ")";
+                _materialSupport.Add(mat, false);
+                return mat;
             }
-            unityMaterial.name += " " + shader.Ubershader.ToString();
+
+            // Get the correct shader based on the shader type
+            string shaderName = GetShaderName(shader.Ubershader);
+            Shader unityShader = UnityEngine.Shader.Find(shaderName);
+            if (unityShader == null)
+            {
+                Debug.LogWarning($"Shader '{shaderName}' not found, falling back to Standard shader");
+                unityShader = UnityEngine.Shader.Find("Standard");
+            }
+            
+            Material unityMaterial = new Material(unityShader);
+            unityMaterial.name = material.Name + " " + shader.Ubershader.ToString();
 
 #if USE_MATERIAL_DATA
-            float DIFFUSE_UV_MULT = 16; //why does this need to be 16?
             switch (shader.Ubershader)
             {
                 case SHADER_LIST.CA_ENVIRONMENT:
-                    ApplySampler(material, shader, unityMaterial, "_MainTex", (int)CA_ENVIRONMENT.SAMPLERS.DIFFUSE_MAP);
-                    ApplySampler(material, shader, unityMaterial, "_BumpMap", (int)CA_ENVIRONMENT.SAMPLERS.NORMAL_MAP, "_NORMALMAP");
-                    if (ApplySampler(material, shader, unityMaterial, "_MetallicGlossMap", (int)CA_ENVIRONMENT.SAMPLERS.SPECULAR_MAP, "_METALLICGLOSSMAP"))
-                    {
-                        unityMaterial.SetFloat("_Glossiness", 0.0f);
-                        unityMaterial.SetFloat("_GlossMapScale", 0.0f);
-                    }
-                    ApplySampler(material, shader, unityMaterial, "_DetailMask", (int)CA_ENVIRONMENT.SAMPLERS.DIRT_MAP, "_DETAIL_MULX2");
-                    ApplySampler(material, shader, unityMaterial, "_ParallaxMap", (int)CA_ENVIRONMENT.SAMPLERS.PARALLAX_MAP, "_PARALLAXMAP");
-                    ApplySampler(material, shader, unityMaterial, "_OcclusionMap", (int)CA_ENVIRONMENT.SAMPLERS.AMBIENT_OCCLUSION_MAP);
-
-                    DIFFUSE_UV_MULT *= GetShaderFloat(shader, material, (int)CA_ENVIRONMENT.PARAMETERS.DIFFUSE_UV_MULT, 1.0f);
-                    float emissiveMult = GetShaderFloat(shader, material, (int)CA_ENVIRONMENT.PARAMETERS.EMISSIVE_MULT, 1.0f);
-                    Vector3 emissiveTint = GetShaderVector3(shader, material, (int)CA_ENVIRONMENT.PARAMETERS.EMISSIVE_TINT, Vector3.one);
-                    Vector3 diffuseTint = GetShaderVector3(shader, material, (int)CA_ENVIRONMENT.PARAMETERS.DIFFUSE_TINT, Vector3.one);
-
-                    if (shader.PixelShaderParameterRemaps[7] != 255)
-                    {
-                        //todo: this is labelled as half4 - perhaps it's only two values?
-                        //Color DIFFUSE_TINT = new Color(material.PixelShaderConstants[shader.ParameterRemaps[2][7]], material.PixelShaderConstants[shader.ParameterRemaps[2][7] + 1], material.PixelShaderConstants[shader.ParameterRemaps[2][7] + 2]);
-                        //Debug.Log(material.Name + " -> " + DIFFUSE_TINT);
-                    }
-                    break;
-                case SHADER_LIST.CA_DECAL:
-                    ApplySampler(material, shader, unityMaterial, "_MainTex", (int)CA_DECAL.SAMPLERS.DIFFUSE_MAP);
-                    ApplySampler(material, shader, unityMaterial, "_ParallaxMap", (int)CA_DECAL.SAMPLERS.PARALLAX_MAP, "_PARALLAXMAP");
-                    if (ApplySampler(material, shader, unityMaterial, "_MetallicGlossMap", (int)CA_DECAL.SAMPLERS.SPECULAR_MAP, "_METALLICGLOSSMAP"))
-                    {
-                        unityMaterial.SetFloat("_Glossiness", 0.0f);
-                        unityMaterial.SetFloat("_GlossMapScale", 0.0f);
-                    }
-                    ApplySampler(material, shader, unityMaterial, "_BumpMap", (int)CA_DECAL.SAMPLERS.NORMAL_MAP, "_NORMALMAP");
-                    break;
-                case SHADER_LIST.CA_HAIR:
-                    ApplySampler(material, shader, unityMaterial, "_MainTex", (int)CA_HAIR.SAMPLERS.DIFFUSE_MAP);
-                    if (ApplySampler(material, shader, unityMaterial, "_MetallicGlossMap", (int)CA_HAIR.SAMPLERS.SPECULAR_MAP, "_METALLICGLOSSMAP"))
-                    {
-                        unityMaterial.SetFloat("_Glossiness", 0.0f);
-                        unityMaterial.SetFloat("_GlossMapScale", 0.0f);
-                    }
-                    ApplySampler(material, shader, unityMaterial, "_BumpMap", (int)CA_HAIR.SAMPLERS.NORMAL_MAP, "_NORMALMAP");
-                    if (shader.PixelShaderParameterRemaps[1] != 255)
-                        DIFFUSE_UV_MULT *= material.PixelShaderConstants[shader.PixelShaderParameterRemaps[1]]; //CA_HAIR_PARAMETERS::DIFFUSE_UV_MULT
+                    ApplyEnvironmentShader(material, shader, unityMaterial);
                     break;
             }
-            unityMaterial.SetTextureScale("_MainTex", new Vector2(DIFFUSE_UV_MULT, DIFFUSE_UV_MULT));
 #endif
 
             _materialSupport.Add(unityMaterial, true);
@@ -598,10 +566,27 @@ public class AlienScene : MonoBehaviour
         return fallback;
     }
 
+    private Vector4 GetShaderVector4(Shaders.Shader shader, Materials.Material material, int index, Vector4 fallback)
+    {
+        if (shader.PixelShaderParameterRemaps.Count > index)
+        {
+            if (shader.PixelShaderParameterRemaps[index] != 255)
+            {
+                return new Vector4(
+                    material.PixelShaderConstants[shader.PixelShaderParameterRemaps[index]], 
+                    material.PixelShaderConstants[shader.PixelShaderParameterRemaps[index] + 1], 
+                    material.PixelShaderConstants[shader.PixelShaderParameterRemaps[index] + 2],
+                    material.PixelShaderConstants[shader.PixelShaderParameterRemaps[index] + 3]
+                );
+            }
+        }
+        return fallback;
+    }
+
     private bool ApplySampler(Materials.Material material, Shaders.Shader shader, Material unityMaterial, string textureMap, int index, string keyword = "")
     {
         if (shader.SamplerRemaps.Count <= index) return false;
-        int diffuseMapIndex = shader.SamplerRemaps[index];
+        int diffuseMapIndex = shader.SamplerRemaps[index]; 
         if (diffuseMapIndex == 255) return false;
 
         TexOrCube texture = GetTexOrCube(material.TextureReferences[diffuseMapIndex]);
@@ -666,9 +651,6 @@ public class AlienScene : MonoBehaviour
             case Textures.TextureFormat.DXT1:
                 format = UnityEngine.TextureFormat.DXT1;
                 break;
-            case Textures.TextureFormat.DXT3:
-                //format = UnityEngine.TextureFormat.DXT3; 
-                break;
             case Textures.TextureFormat.DXT5:
                 format = UnityEngine.TextureFormat.DXT5;
                 break;
@@ -686,6 +668,9 @@ public class AlienScene : MonoBehaviour
                 break;
             case Textures.TextureFormat.R16F:
                 format = UnityEngine.TextureFormat.RHalf; 
+                break;
+            default:
+                Debug.LogError("Unsupported texture format: " + InTexture.Format);
                 break;
         }
 
@@ -718,6 +703,179 @@ public class AlienScene : MonoBehaviour
             _texturesLevel.Add(ptr.Index, tex);
 
         return tex;
+    }
+
+    private void ApplyEnvironmentShader(Materials.Material material, Shaders.Shader shader, Material unityMaterial)
+    {
+        bool transparent =
+            (shader.UbershaderFeatureFlags & (1L << (int)CA_ENVIRONMENT.FEATURES.ALPHA_TEST)) != 0 ||
+            (shader.UbershaderFeatureFlags & (1L << (int)CA_ENVIRONMENT.FEATURES.FORCE_TO_ALPHA)) != 0 ||
+            (shader.UbershaderFeatureFlags & (1L << (int)CA_ENVIRONMENT.FEATURES.GLASS)) != 0 ||
+            (shader.UbershaderFeatureFlags & (1L << (int)CA_ENVIRONMENT.FEATURES.ALPHABLEND_NOISE)) != 0 ||
+            (shader.UbershaderFeatureFlags & (1L << (int)CA_ENVIRONMENT.FEATURES.SEPARATE_ALPHA)) != 0;
+
+        unityMaterial.SetOverrideTag("RenderType", transparent ? "Transparent" : "Opaque");
+        unityMaterial.SetInt("_SrcBlend", transparent ? (int)UnityEngine.Rendering.BlendMode.SrcAlpha : (int)UnityEngine.Rendering.BlendMode.One);
+        unityMaterial.SetInt("_DstBlend", transparent ? (int)UnityEngine.Rendering.BlendMode.OneMinusSrcAlpha : (int)UnityEngine.Rendering.BlendMode.Zero);
+        unityMaterial.SetInt("_ZWrite", transparent ? 0 : 1);
+        unityMaterial.DisableKeyword("_ALPHATEST_ON");
+        if (transparent) unityMaterial.EnableKeyword("_ALPHABLEND_ON");
+        else unityMaterial.DisableKeyword("_ALPHATEST_ON");
+        unityMaterial.DisableKeyword("_ALPHAPREMULTIPLY_ON");
+        unityMaterial.renderQueue = transparent ? 3000 : 2000;
+        
+        //Apply textures
+        ApplySampler(material, shader, unityMaterial, "_DiffuseMap", (int)CA_ENVIRONMENT.SAMPLERS.DIFFUSE_MAP);
+        ApplySampler(material, shader, unityMaterial, "_NormalMap", (int)CA_ENVIRONMENT.SAMPLERS.NORMAL_MAP, "NORMAL_MAPPING");
+        ApplySampler(material, shader, unityMaterial, "_SpecularMap", (int)CA_ENVIRONMENT.SAMPLERS.SPECULAR_MAP, "SPECULAR_MAPPING");
+        // ApplySampler(material, shader, unityMaterial, "_DirtMap", (int)CA_ENVIRONMENT.SAMPLERS.DIRT_MAP, "DIRT_MAPPING"); 
+        ApplySampler(material, shader, unityMaterial, "_ParallaxMap", (int)CA_ENVIRONMENT.SAMPLERS.PARALLAX_MAP, "PARALLAX_MAPPING");
+        ApplySampler(material, shader, unityMaterial, "_AmbientOcclusionMap", (int)CA_ENVIRONMENT.SAMPLERS.AMBIENT_OCCLUSION_MAP, "AMBIENT_OCCLUSION_MAPPING");
+        ApplySampler(material, shader, unityMaterial, "_EnvironmentMap", (int)CA_ENVIRONMENT.SAMPLERS.ENVIRONMENT_MAP, "ENVIRONMENT_MAPPING");
+        ApplySampler(material, shader, unityMaterial, "_SecondaryDiffuseMap", (int)CA_ENVIRONMENT.SAMPLERS.SECONDARY_DIFFUSE_MAP, "SECONDARY_DIFFUSE_MAPPING");
+        ApplySampler(material, shader, unityMaterial, "_SecondaryNormalMap", (int)CA_ENVIRONMENT.SAMPLERS.SECONDARY_NORMAL_MAP, "SECONDARY_NORMAL_MAPPING");
+        ApplySampler(material, shader, unityMaterial, "_SecondarySpecularMap", (int)CA_ENVIRONMENT.SAMPLERS.SECONDARY_SPECULAR_MAP, "SECONDARY_SPECULAR_MAPPING");
+        ApplySampler(material, shader, unityMaterial, "_SeparateAlphaMap", (int)CA_ENVIRONMENT.SAMPLERS.SEPARATE_ALPHA_MAP, "SEPARATE_ALPHA");
+        ApplySampler(material, shader, unityMaterial, "_DustMap", (int)CA_ENVIRONMENT.SAMPLERS.DUST_MAP, "DUST_MAPPING");
+        ApplySampler(material, shader, unityMaterial, "_IrradianceCubeMap", (int)CA_ENVIRONMENT.SAMPLERS.IRRADIANCE_CUBE_MAP, "IRRADIANCE_CUBE");
+        ApplySampler(material, shader, unityMaterial, "_SparkleMap", (int)CA_ENVIRONMENT.SAMPLERS.SPARKLE_MAP, "SPARKLE");
+        // ApplySampler(material, shader, unityMaterial, "_WetnessNoise", (int)CA_ENVIRONMENT.SAMPLERS.WETNESS_NOISE, "WETNESS");
+        // ApplySampler(material, shader, unityMaterial, "_AlphablendNoiseMap", (int)CA_ENVIRONMENT.SAMPLERS.ALPHABLEND_NOISE_MAP, "ALPHABLEND_NOISE");
+
+        //Apply parameters
+        unityMaterial.SetFloat("_DiffuseUvMult", GetShaderFloat(shader, material, (int)CA_ENVIRONMENT.PARAMETERS.DIFFUSE_UV_MULT, 1.0f));
+        unityMaterial.SetFloat("_NormalUvMult", GetShaderFloat(shader, material, (int)CA_ENVIRONMENT.PARAMETERS.NORMAL_UV_MULT, 1.0f));
+        unityMaterial.SetFloat("_SpecularUvMult", GetShaderFloat(shader, material, (int)CA_ENVIRONMENT.PARAMETERS.SPECULAR_UV_MULT, 1.0f));
+        unityMaterial.SetFloat("_ParallaxUvMult", GetShaderFloat(shader, material, (int)CA_ENVIRONMENT.PARAMETERS.PARALLAX_UV_MULT, 1.0f));
+        unityMaterial.SetFloat("_ParallaxScale", GetShaderFloat(shader, material, (int)CA_ENVIRONMENT.PARAMETERS.PARALLAX_SCALE, 0.1f));
+        unityMaterial.SetFloat("_NormalMapStrength", GetShaderFloat(shader, material, (int)CA_ENVIRONMENT.PARAMETERS.NORMAL_MAP_STRENGTH, 1.0f));
+        unityMaterial.SetFloat("_SpecularPower", GetShaderFloat(shader, material, (int)CA_ENVIRONMENT.PARAMETERS.SPECULAR_POWER, 32.0f));
+        unityMaterial.SetFloat("_AmbientOcclusionMapMult", GetShaderFloat(shader, material, (int)CA_ENVIRONMENT.PARAMETERS.AMBIENT_OCCLUSION_MAP_MULT, 1.0f));
+        unityMaterial.SetFloat("_EnvironmentMapMult", GetShaderFloat(shader, material, (int)CA_ENVIRONMENT.PARAMETERS.ENVIRONMENT_MAP_MULT, 1.0f));
+        unityMaterial.SetFloat("_EmissiveMult", GetShaderFloat(shader, material, (int)CA_ENVIRONMENT.PARAMETERS.EMISSIVE_MULT, 1.0f));
+        unityMaterial.SetFloat("_SecondaryDiffuseUvMult", GetShaderFloat(shader, material, (int)CA_ENVIRONMENT.PARAMETERS.SECONDARY_DIFFUSE_UV_MULT, 1.0f));
+        unityMaterial.SetFloat("_SecondaryNormalUvMult", GetShaderFloat(shader, material, (int)CA_ENVIRONMENT.PARAMETERS.SECONDARY_NORMAL_UV_MULT, 1.0f));
+        unityMaterial.SetFloat("_SecondaryNormalMapStrength", GetShaderFloat(shader, material, (int)CA_ENVIRONMENT.PARAMETERS.SECONDARY_NORMAL_MAP_STRENGTH, 1.0f));
+        unityMaterial.SetFloat("_SecondarySpecularUvMult", GetShaderFloat(shader, material, (int)CA_ENVIRONMENT.PARAMETERS.SECONDARY_SPECULAR_UV_MULT, 1.0f));
+        unityMaterial.SetFloat("_SecondarySpecularPower", GetShaderFloat(shader, material, (int)CA_ENVIRONMENT.PARAMETERS.SECONDARY_SPECULAR_POWER, 32.0f));
+        unityMaterial.SetFloat("_SeparateAlphaUvMult", GetShaderFloat(shader, material, (int)CA_ENVIRONMENT.PARAMETERS.SEPARATE_ALPHA_UV_MULT, 1.0f));
+        unityMaterial.SetFloat("_DustUvMult", GetShaderFloat(shader, material, (int)CA_ENVIRONMENT.PARAMETERS.DUST_UV_MULT, 1.0f));
+        unityMaterial.SetFloat("_SparkleUvScale", GetShaderFloat(shader, material, (int)CA_ENVIRONMENT.PARAMETERS.SPARKLE_UV_SCALE, 1.0f));
+        unityMaterial.SetFloat("_SparklePower", GetShaderFloat(shader, material, (int)CA_ENVIRONMENT.PARAMETERS.SPARKLE_POWER, 1.0f));
+        unityMaterial.SetFloat("_SparkleThreshold", GetShaderFloat(shader, material, (int)CA_ENVIRONMENT.PARAMETERS.SPARKLE_THRESHOLD, 0.5f));
+        unityMaterial.SetFloat("_SparkleMultiplier", GetShaderFloat(shader, material, (int)CA_ENVIRONMENT.PARAMETERS.SPARKLE_MULTIPLIER, 1.0f));
+        unityMaterial.SetFloat("_WetnessUvMult", GetShaderFloat(shader, material, (int)CA_ENVIRONMENT.PARAMETERS.WETNESS_UV_MULT, 1.0f));
+        unityMaterial.SetFloat("_WetLevel", GetShaderFloat(shader, material, (int)CA_ENVIRONMENT.PARAMETERS.WET_LEVEL, 0.0f));
+        unityMaterial.SetFloat("_AlphablendNoiseUvMult", GetShaderFloat(shader, material, (int)CA_ENVIRONMENT.PARAMETERS.ALPHABLEND_NOISE_UV_MULT, 1.0f));
+        unityMaterial.SetFloat("_AlphablendNoisePower", GetShaderFloat(shader, material, (int)CA_ENVIRONMENT.PARAMETERS.ALPHABLEND_NOISE_POWER, 1.0f));
+        unityMaterial.SetFloat("_DirtUvMult", GetShaderFloat(shader, material, (int)CA_ENVIRONMENT.PARAMETERS.DIRT_UV_MULT, 1.0f));
+        unityMaterial.SetFloat("_DirtBlendMultSpecPower", GetShaderFloat(shader, material, (int)CA_ENVIRONMENT.PARAMETERS.DIRT_BLEND_MULT_SPEC_POWER, 1.0f));
+        unityMaterial.SetFloat("_DirtAoAmount", GetShaderFloat(shader, material, (int)CA_ENVIRONMENT.PARAMETERS.DIRT_AO_AMOUNT, 1.0f));
+        unityMaterial.SetFloat("_FurRimLightingFactor", GetShaderFloat(shader, material, (int)CA_ENVIRONMENT.PARAMETERS.FUR_RIM_LIGHTING_FACTOR, 1.0f));
+        unityMaterial.SetFloat("_DiffuseRoughnessFactor", GetShaderFloat(shader, material, (int)CA_ENVIRONMENT.PARAMETERS.DIFFUSE_ROUGHNESS_FACTOR, 1.0f));
+        unityMaterial.SetFloat("_OpacityModifierValue", GetShaderFloat(shader, material, (int)CA_ENVIRONMENT.PARAMETERS.OPACITY_MODIFIER_VALUE, 1.0f));
+        unityMaterial.SetFloat("_GlassDensity", GetShaderFloat(shader, material, (int)CA_ENVIRONMENT.PARAMETERS.GLASS_DENSITY, 1.0f));
+        unityMaterial.SetFloat("_GlassLightness", GetShaderFloat(shader, material, (int)CA_ENVIRONMENT.PARAMETERS.GLASS_LIGHTNESS, 1.0f));
+        unityMaterial.SetFloat("_SsrAmount", GetShaderFloat(shader, material, (int)CA_ENVIRONMENT.PARAMETERS.SSR_AMOUNT, 1.0f));
+        unityMaterial.SetFloat("_EnvironmentEmissiveFactor", GetShaderFloat(shader, material, (int)CA_ENVIRONMENT.PARAMETERS.ENVIRONMENT_EMISSIVE_FACTOR, 1.0f));
+        unityMaterial.SetFloat("_DustFalloff", GetShaderFloat(shader, material, (int)CA_ENVIRONMENT.PARAMETERS.DUST_FALLOFF, 1.0f));
+        unityMaterial.SetFloat("_SparkleNormalBias", GetShaderFloat(shader, material, (int)CA_ENVIRONMENT.PARAMETERS.SPARKLE_NORMAL_BIAS, 0.0f));
+        unityMaterial.SetFloat("_SparkleFadeStart", GetShaderFloat(shader, material, (int)CA_ENVIRONMENT.PARAMETERS.SPARKLE_FADE_START, 0.0f));
+        unityMaterial.SetFloat("_ParallaxBias", GetShaderFloat(shader, material, (int)CA_ENVIRONMENT.PARAMETERS.PARALLAX_BIAS, 0.02f));
+        unityMaterial.SetFloat("_TessellationFactor", GetShaderFloat(shader, material, (int)CA_ENVIRONMENT.PARAMETERS.TESSELLATION_FACTOR, 1.0f));
+        unityMaterial.SetFloat("_MinTessellationDistance", GetShaderFloat(shader, material, (int)CA_ENVIRONMENT.PARAMETERS.MIN_TESSELLATION_DISTANCE, 1.0f));
+        unityMaterial.SetFloat("_TessellationRange", GetShaderFloat(shader, material, (int)CA_ENVIRONMENT.PARAMETERS.TESSELLATION_RANGE, 10.0f));
+        unityMaterial.SetFloat("_ShapeFactor", GetShaderFloat(shader, material, (int)CA_ENVIRONMENT.PARAMETERS.SHAPE_FACTOR, 1.0f));
+        unityMaterial.SetFloat("_DisplacementFactor", GetShaderFloat(shader, material, (int)CA_ENVIRONMENT.PARAMETERS.DISPLACEMENT_FACTOR, 1.0f));
+        unityMaterial.SetFloat("_DisplacementMapUvScale", GetShaderFloat(shader, material, (int)CA_ENVIRONMENT.PARAMETERS.DISPLACEMENT_MAP_UV_SCALE, 1.0f));
+        unityMaterial.SetFloat("_SizeCullingThreshold", GetShaderFloat(shader, material, (int)CA_ENVIRONMENT.PARAMETERS.SIZE_CULLING_THRESHOLD, 0.01f));
+        unityMaterial.SetFloat("_ForcePriorityLevel", GetShaderFloat(shader, material, (int)CA_ENVIRONMENT.PARAMETERS.FORCE_PRIORITY_LEVEL, 0.0f));
+        unityMaterial.SetFloat("_ShiftPriorityLevel", GetShaderFloat(shader, material, (int)CA_ENVIRONMENT.PARAMETERS.SHIFT_PRIORITY_LEVEL, 0.0f));
+        unityMaterial.SetFloat("_FresnelIntensity", GetShaderFloat(shader, material, (int)CA_ENVIRONMENT.PARAMETERS.FRESNEL_INTENSITY, 1.0f));
+        unityMaterial.SetFloat("_PlanarReflectiveOverbrightScalar", GetShaderFloat(shader, material, (int)CA_ENVIRONMENT.PARAMETERS.PLANAR_REFLECTIVE_OVERBRIGHT_SCALAR, 1.0f));
+        
+        //Apply colors
+        Vector4 diffuseTint = GetShaderVector4(shader, material, (int)CA_ENVIRONMENT.PARAMETERS.DIFFUSE_TINT, Vector4.one);
+        unityMaterial.SetColor("_DiffuseTint", new Color(diffuseTint.x, diffuseTint.y, diffuseTint.z, diffuseTint.w));
+        Vector4 secondaryDiffuseTint = GetShaderVector4(shader, material, (int)CA_ENVIRONMENT.PARAMETERS.SECONDARY_DIFFUSE_TINT, Vector4.one);
+        unityMaterial.SetColor("_SecondaryDiffuseTint", new Color(secondaryDiffuseTint.x, secondaryDiffuseTint.y, secondaryDiffuseTint.z, secondaryDiffuseTint.w));
+        Vector3 specularTint = GetShaderVector3(shader, material, (int)CA_ENVIRONMENT.PARAMETERS.SPECULAR_TINT, Vector3.one);
+        unityMaterial.SetColor("_SpecularTint", new Color(specularTint.x, specularTint.y, specularTint.z, 1.0f));
+        Vector3 secondarySpecularTint = GetShaderVector3(shader, material, (int)CA_ENVIRONMENT.PARAMETERS.SECONDARY_SPECULAR_TINT, Vector3.one);
+        unityMaterial.SetColor("_SecondarySpecularTint", new Color(secondarySpecularTint.x, secondarySpecularTint.y, secondarySpecularTint.z, 1.0f));
+        Vector3 emissiveTint = GetShaderVector3(shader, material, (int)CA_ENVIRONMENT.PARAMETERS.EMISSIVE_TINT, Vector3.one);
+        unityMaterial.SetColor("_EmissiveTint", new Color(emissiveTint.x, emissiveTint.y, emissiveTint.z, 1.0f));
+        Vector3 aoTint = GetShaderVector3(shader, material, (int)CA_ENVIRONMENT.PARAMETERS.AO_TINT, Vector3.one);
+        unityMaterial.SetColor("_AoTint", new Color(aoTint.x, aoTint.y, aoTint.z, 1.0f));
+        Vector3 vertAoTint = GetShaderVector3(shader, material, (int)CA_ENVIRONMENT.PARAMETERS.VERT_AO_TINT, Vector3.one);
+        unityMaterial.SetColor("_VertAoTint", new Color(vertAoTint.x, vertAoTint.y, vertAoTint.z, 1.0f));
+        Vector3 glassTint = GetShaderVector3(shader, material, (int)CA_ENVIRONMENT.PARAMETERS.GLASS_TINT, Vector3.one);
+        unityMaterial.SetColor("_GlassTint", new Color(glassTint.x, glassTint.y, glassTint.z, 1.0f));
+        Vector3 customTintColour = GetShaderVector3(shader, material, (int)CA_ENVIRONMENT.PARAMETERS.CUSTOM_TINT_COLOUR, Vector3.one);
+        unityMaterial.SetColor("_CustomTintColour", new Color(customTintColour.x, customTintColour.y, customTintColour.z, 1.0f));
+        
+        //Set feature flags
+        unityMaterial.SetFloat("_VertexColour", (shader.UbershaderFeatureFlags & (1L << (int)CA_ENVIRONMENT.FEATURES.VERTEX_COLOUR)) != 0 ? 1.0f : 0.0f);
+        unityMaterial.SetFloat("_FogAlpha", (shader.UbershaderFeatureFlags & (1L << (int)CA_ENVIRONMENT.FEATURES.FOG_ALPHA)) != 0 ? 1.0f : 0.0f);
+        unityMaterial.SetFloat("_ReflectivePlastic", (shader.UbershaderFeatureFlags & (1L << (int)CA_ENVIRONMENT.FEATURES.REFLECTIVE_PLASTIC)) != 0 ? 1.0f : 0.0f);
+        unityMaterial.SetFloat("_DoubleSided", (shader.UbershaderFeatureFlags & (1L << (int)CA_ENVIRONMENT.FEATURES.DOUBLE_SIDED)) != 0 ? 1.0f : 0.0f);
+        unityMaterial.SetFloat("_UseAlphaAsBlendFactor", (shader.UbershaderFeatureFlags & (1L << (int)CA_ENVIRONMENT.FEATURES.USE_ALPHA_AS_BLENDFACTOR)) != 0 ? 1.0f : 0.0f);
+        unityMaterial.SetFloat("_ForceToAlpha", (shader.UbershaderFeatureFlags & (1L << (int)CA_ENVIRONMENT.FEATURES.FORCE_TO_ALPHA)) != 0 ? 1.0f : 0.0f);
+        unityMaterial.SetFloat("_AlphaTest", (shader.UbershaderFeatureFlags & (1L << (int)CA_ENVIRONMENT.FEATURES.ALPHA_TEST)) != 0 ? 1.0f : 0.0f);
+        unityMaterial.SetFloat("_TextureLodBiasNone", (shader.UbershaderFeatureFlags & (1L << (int)CA_ENVIRONMENT.FEATURES.TEXTURE_LOD_BIAS_NONE)) != 0 ? 1.0f : 0.0f);
+        unityMaterial.SetFloat("_TextureLodBiasSlight", (shader.UbershaderFeatureFlags & (1L << (int)CA_ENVIRONMENT.FEATURES.TEXTURE_LOD_BIAS_SLIGHT)) != 0 ? 1.0f : 0.0f);
+        unityMaterial.SetFloat("_TextureLodBiasHigh", (shader.UbershaderFeatureFlags & (1L << (int)CA_ENVIRONMENT.FEATURES.TEXTURE_LOD_BIAS_HIGH)) != 0 ? 1.0f : 0.0f);
+        unityMaterial.SetFloat("_PlanarReflective", (shader.UbershaderFeatureFlags & (1L << (int)CA_ENVIRONMENT.FEATURES.PLANAR_REFLECTIVE)) != 0 ? 1.0f : 0.0f);
+        unityMaterial.SetFloat("_SeparateAlpha", (shader.UbershaderFeatureFlags & (1L << (int)CA_ENVIRONMENT.FEATURES.SEPARATE_ALPHA)) != 0 ? 1.0f : 0.0f);
+        unityMaterial.SetFloat("_SeparateAlphaMapUseGreenChannel", (shader.UbershaderFeatureFlags & (1L << (int)CA_ENVIRONMENT.FEATURES.SEPARATE_ALPHA_MAP_USE_GREEN_CHANNEL)) != 0 ? 1.0f : 0.0f);
+        unityMaterial.SetFloat("_SignedDistanceField", (shader.UbershaderFeatureFlags & (1L << (int)CA_ENVIRONMENT.FEATURES.SIGNED_DISTANCE_FIELD)) != 0 ? 1.0f : 0.0f);
+        unityMaterial.SetFloat("_DiffuseMappingParallax", (shader.UbershaderFeatureFlags & (1L << (int)CA_ENVIRONMENT.FEATURES.DIFFUSE_MAPPING_PARALLAX)) != 0 ? 1.0f : 0.0f);
+        unityMaterial.SetFloat("_SecondaryDiffuseMapping", (shader.UbershaderFeatureFlags & (1L << (int)CA_ENVIRONMENT.FEATURES.SECONDARY_DIFFUSE_MAPPING)) != 0 ? 1.0f : 0.0f);
+        unityMaterial.SetFloat("_SecondaryDiffuseBlendMultiply", (shader.UbershaderFeatureFlags & (1L << (int)CA_ENVIRONMENT.FEATURES.SECONDARY_DIFFUSE_BLEND_MULTIPLY)) != 0 ? 1.0f : 0.0f);
+        unityMaterial.SetFloat("_NormalMapping", (shader.UbershaderFeatureFlags & (1L << (int)CA_ENVIRONMENT.FEATURES.NORMAL_MAPPING)) != 0 ? 1.0f : 0.0f);
+        unityMaterial.SetFloat("_NormalMappingParallax", (shader.UbershaderFeatureFlags & (1L << (int)CA_ENVIRONMENT.FEATURES.NORMAL_MAPPING_PARALLAX)) != 0 ? 1.0f : 0.0f);
+        unityMaterial.SetFloat("_SecondaryNormalMapping", (shader.UbershaderFeatureFlags & (1L << (int)CA_ENVIRONMENT.FEATURES.SECONDARY_NORMAL_MAPPING)) != 0 ? 1.0f : 0.0f);
+        unityMaterial.SetFloat("_SecondaryNormalBlendAdd", (shader.UbershaderFeatureFlags & (1L << (int)CA_ENVIRONMENT.FEATURES.SECONDARY_NORMAL_BLEND_ADD)) != 0 ? 1.0f : 0.0f);
+        unityMaterial.SetFloat("_SpecularMapping", (shader.UbershaderFeatureFlags & (1L << (int)CA_ENVIRONMENT.FEATURES.SPECULAR_MAPPING)) != 0 ? 1.0f : 0.0f);
+        unityMaterial.SetFloat("_SpecularMappingParallax", (shader.UbershaderFeatureFlags & (1L << (int)CA_ENVIRONMENT.FEATURES.SPECULAR_MAPPING_PARALLAX)) != 0 ? 1.0f : 0.0f);
+        unityMaterial.SetFloat("_SecondarySpecularMapping", (shader.UbershaderFeatureFlags & (1L << (int)CA_ENVIRONMENT.FEATURES.SECONDARY_SPECULAR_MAPPING)) != 0 ? 1.0f : 0.0f);
+        unityMaterial.SetFloat("_SecondarySpecularMappingParallax", (shader.UbershaderFeatureFlags & (1L << (int)CA_ENVIRONMENT.FEATURES.SECONDARY_SPECULAR_MAPPING_PARALLAX)) != 0 ? 1.0f : 0.0f);
+        unityMaterial.SetFloat("_SecondarySpecularBlendMultiply", (shader.UbershaderFeatureFlags & (1L << (int)CA_ENVIRONMENT.FEATURES.SECONDARY_SPECULAR_BLEND_MULTIPLY)) != 0 ? 1.0f : 0.0f);
+        unityMaterial.SetFloat("_Glass", (shader.UbershaderFeatureFlags & (1L << (int)CA_ENVIRONMENT.FEATURES.GLASS)) != 0 ? 1.0f : 0.0f);
+        unityMaterial.SetFloat("_DiffuseRoughness", (shader.UbershaderFeatureFlags & (1L << (int)CA_ENVIRONMENT.FEATURES.DIFFUSE_ROUGHNESS)) != 0 ? 1.0f : 0.0f);
+        unityMaterial.SetFloat("_FrontRoughness", (shader.UbershaderFeatureFlags & (1L << (int)CA_ENVIRONMENT.FEATURES.FRONT_ROUGHNESS)) != 0 ? 1.0f : 0.0f);
+        unityMaterial.SetFloat("_AdditiveRoughness", (shader.UbershaderFeatureFlags & (1L << (int)CA_ENVIRONMENT.FEATURES.ADDITIVE_ROUGHNESS)) != 0 ? 1.0f : 0.0f);
+        unityMaterial.SetFloat("_EnvironmentMapping", (shader.UbershaderFeatureFlags & (1L << (int)CA_ENVIRONMENT.FEATURES.ENVIRONMENT_MAPPING)) != 0 ? 1.0f : 0.0f);
+        unityMaterial.SetFloat("_AmbientOcclusionMapping", (shader.UbershaderFeatureFlags & (1L << (int)CA_ENVIRONMENT.FEATURES.AMBIENT_OCCLUSION_MAPPING)) != 0 ? 1.0f : 0.0f);
+        unityMaterial.SetFloat("_AmbientOcclusionUV", (shader.UbershaderFeatureFlags & (1L << (int)CA_ENVIRONMENT.FEATURES.AMBIENT_OCCLUSION_UV)) != 0 ? 1.0f : 0.0f);
+        unityMaterial.SetFloat("_VertexAmbientOcclusion", (shader.UbershaderFeatureFlags & (1L << (int)CA_ENVIRONMENT.FEATURES.VERTEX_AMBIENT_OCCLUSION)) != 0 ? 1.0f : 0.0f);
+        unityMaterial.SetFloat("_Emissive", (shader.UbershaderFeatureFlags & (1L << (int)CA_ENVIRONMENT.FEATURES.EMISSIVE)) != 0 ? 1.0f : 0.0f);
+        unityMaterial.SetFloat("_DustMapping", (shader.UbershaderFeatureFlags & (1L << (int)CA_ENVIRONMENT.FEATURES.DUST_MAPPING)) != 0 ? 1.0f : 0.0f);
+        unityMaterial.SetFloat("_DustMappingParallax", (shader.UbershaderFeatureFlags & (1L << (int)CA_ENVIRONMENT.FEATURES.DUST_MAPPING_PARALLAX)) != 0 ? 1.0f : 0.0f);
+        unityMaterial.SetFloat("_SSR", (shader.UbershaderFeatureFlags & (1L << (int)CA_ENVIRONMENT.FEATURES.SSR)) != 0 ? 1.0f : 0.0f);
+        unityMaterial.SetFloat("_IrradianceCube", (shader.UbershaderFeatureFlags & (1L << (int)CA_ENVIRONMENT.FEATURES.IRRADIANCE_CUBE)) != 0 ? 1.0f : 0.0f);
+        unityMaterial.SetFloat("_RadiosityDynamic", (shader.UbershaderFeatureFlags & (1L << (int)CA_ENVIRONMENT.FEATURES.RADIOSITY_DYNAMIC)) != 0 ? 1.0f : 0.0f);
+        unityMaterial.SetFloat("_FurRimLighting", (shader.UbershaderFeatureFlags & (1L << (int)CA_ENVIRONMENT.FEATURES.FUR_RIM_LIGHTING)) != 0 ? 1.0f : 0.0f);
+        unityMaterial.SetFloat("_ParallaxMapping", (shader.UbershaderFeatureFlags & (1L << (int)CA_ENVIRONMENT.FEATURES.PARALLAX_MAPPING)) != 0 ? 1.0f : 0.0f);
+        unityMaterial.SetFloat("_Decal", (shader.UbershaderFeatureFlags & (1L << (int)CA_ENVIRONMENT.FEATURES.DECAL)) != 0 ? 1.0f : 0.0f);
+        unityMaterial.SetFloat("_DecalDiffuse", (shader.UbershaderFeatureFlags & (1L << (int)CA_ENVIRONMENT.FEATURES.DECAL_DIFFUSE)) != 0 ? 1.0f : 0.0f);
+        unityMaterial.SetFloat("_DecalNormal", (shader.UbershaderFeatureFlags & (1L << (int)CA_ENVIRONMENT.FEATURES.DECAL_NORMAL)) != 0 ? 1.0f : 0.0f);
+        unityMaterial.SetFloat("_DecalSpecularEmissive", (shader.UbershaderFeatureFlags & (1L << (int)CA_ENVIRONMENT.FEATURES.DECAL_SPECULAR_EMISSIVE)) != 0 ? 1.0f : 0.0f);
+        unityMaterial.SetFloat("_SpecularMappingMetalnessMasking", (shader.UbershaderFeatureFlags & (1L << (int)CA_ENVIRONMENT.FEATURES.SPECULAR_MAPPING_METALNESS_MASKING)) != 0 ? 1.0f : 0.0f);
+        unityMaterial.SetFloat("_AlphablendNoise", (shader.UbershaderFeatureFlags & (1L << (int)CA_ENVIRONMENT.FEATURES.ALPHABLEND_NOISE)) != 0 ? 1.0f : 0.0f);
+        unityMaterial.SetFloat("_AlphaLighting", (shader.UbershaderFeatureFlags & (1L << (int)CA_ENVIRONMENT.FEATURES.ALPHA_LIGHTING)) != 0 ? 1.0f : 0.0f);
+        unityMaterial.SetFloat("_Sparkle", (shader.UbershaderFeatureFlags & (1L << (int)CA_ENVIRONMENT.FEATURES.SPARKLE)) != 0 ? 1.0f : 0.0f);
+        unityMaterial.SetFloat("_RadiosityStatic", (shader.UbershaderFeatureFlags & (1L << (int)CA_ENVIRONMENT.FEATURES.RADIOSITY_STATIC)) != 0 ? 1.0f : 0.0f);
+        unityMaterial.SetFloat("_DirtMapping", (shader.UbershaderFeatureFlags & (1L << (int)CA_ENVIRONMENT.FEATURES.DIRT_MAPPING)) != 0 ? 1.0f : 0.0f);
+        unityMaterial.SetFloat("_DirtBlendMultiply", (shader.UbershaderFeatureFlags & (1L << (int)CA_ENVIRONMENT.FEATURES.DIRT_BLEND_MULTIPLY)) != 0 ? 1.0f : 0.0f);
+        unityMaterial.SetFloat("_DirtMappingParallax", (shader.UbershaderFeatureFlags & (1L << (int)CA_ENVIRONMENT.FEATURES.DIRT_MAPPING_PARALLAX)) != 0 ? 1.0f : 0.0f);
+        unityMaterial.SetFloat("_Wetness", (shader.UbershaderFeatureFlags & (1L << (int)CA_ENVIRONMENT.FEATURES.WETNESS)) != 0 ? 1.0f : 0.0f);
+        unityMaterial.SetFloat("_HiLodCustomCharacterCorpseConstants", (shader.UbershaderFeatureFlags & (1L << (int)CA_ENVIRONMENT.FEATURES.HI_LOD_CUSTOM_CHARACTER_CORPSE_CONSTANTS)) != 0 ? 1.0f : 0.0f);
+        unityMaterial.SetFloat("_NoClip", (shader.UbershaderFeatureFlags & (1L << (int)CA_ENVIRONMENT.FEATURES.NO_CLIP)) != 0 ? 1.0f : 0.0f);
+        unityMaterial.SetFloat("_Tessellation", (shader.UbershaderFeatureFlags & (1L << (int)CA_ENVIRONMENT.FEATURES.TESSELLATION)) != 0 ? 1.0f : 0.0f);
+        unityMaterial.SetFloat("_OrientationAdaptiveTessellation", (shader.UbershaderFeatureFlags & (1L << (int)CA_ENVIRONMENT.FEATURES.ORIENTATION_ADAPTIVE_TESSELLATION)) != 0 ? 1.0f : 0.0f);
+        unityMaterial.SetFloat("_PhongTessellation", (shader.UbershaderFeatureFlags & (1L << (int)CA_ENVIRONMENT.FEATURES.PHONG_TESSELLATION)) != 0 ? 1.0f : 0.0f);
+        unityMaterial.SetFloat("_DisplacementMapping", (shader.UbershaderFeatureFlags & (1L << (int)CA_ENVIRONMENT.FEATURES.DISPLACEMENT_MAPPING)) != 0 ? 1.0f : 0.0f);
     }
 #endif
 }

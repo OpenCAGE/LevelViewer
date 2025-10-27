@@ -66,7 +66,7 @@ public static class CathodeLibExtensions
                                     Array.Resize(ref uvs, f.VariantIndex + 1);
                                 if (uvs[f.VariantIndex] == null)
                                     uvs[f.VariantIndex] = new List<Vector2>();
-                                uvs[f.VariantIndex].Add(v);
+                                uvs[f.VariantIndex].Add(v * 16.0f);
                                 break;
                             case VertexFormatUsage.TANGENT:
                                 tangents.Add(v);

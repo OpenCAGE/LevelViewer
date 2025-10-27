@@ -1,5 +1,6 @@
 //#define USE_ADVANCED_MATERIALS
 #define SKIP_UNSUPPORTED_MATERIALS
+//#define USE_HIERARCHY
 
 using CATHODE;
 using CATHODE.LEGACY;
@@ -106,7 +107,9 @@ public class AlienScene : MonoBehaviour
             Destroy(_parentGameObject);
 
         _parentGameObject = new GameObject(_levelName);
+#if !USE_HIERARCHY
         _parentGameObject.hideFlags = HideFlags.HideInHierarchy | HideFlags.DontSave;
+#endif
         _parentGameObject.isStatic = true;
 
         Composite comp = LevelContent.CommandsPAK.GetComposite(guid);
@@ -187,7 +190,9 @@ public class AlienScene : MonoBehaviour
         GameObject entityGO = new GameObject(entity.shortGUID.AsUInt32.ToString());
         entityGO.transform.parent = parentGO.transform;
         entityGO.transform.SetLocalPositionAndRotation(position, Quaternion.Euler(rotation));
+#if !USE_HIERARCHY
         entityGO.hideFlags = HideFlags.HideInHierarchy | HideFlags.DontSave;
+#endif
         entityGO.isStatic = true;
         _gameObjectEntities.Add(entityGO, entity);
 
@@ -433,7 +438,9 @@ public class AlienScene : MonoBehaviour
         newModelSpawn.transform.localRotation = Quaternion.identity;
         newModelSpawn.name = holder.MainMesh.name + " (" + material.name + ")";
         newModelSpawn.AddComponent<MeshFilter>().sharedMesh = holder.MainMesh;
+#if !USE_HIERARCHY
         newModelSpawn.hideFlags = HideFlags.NotEditable | HideFlags.HideInHierarchy;
+#endif
 
         MeshRenderer renderer = newModelSpawn.AddComponent<MeshRenderer>();
         renderer.sharedMaterial = material;

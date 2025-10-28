@@ -1,4 +1,4 @@
-#define LOCAL_DEV
+//#define LOCAL_DEV
 
 using CATHODE;
 using CATHODE.LEGACY;
@@ -509,12 +509,8 @@ public class AlienScene : MonoBehaviour
                         secondaryDiffuseMap = (int)CA_ENVIRONMENT.SAMPLERS.SECONDARY_DIFFUSE_MAP,
                         normalMap = (int)CA_ENVIRONMENT.SAMPLERS.NORMAL_MAP,
                         secondaryNormalMap = (int)CA_ENVIRONMENT.SAMPLERS.SECONDARY_NORMAL_MAP,
-                        specularMap = (int)CA_ENVIRONMENT.SAMPLERS.SPECULAR_MAP,
-                        secondarySpecularMap = (int)CA_ENVIRONMENT.SAMPLERS.SECONDARY_SPECULAR_MAP,
-                        environmentMap = (int)CA_ENVIRONMENT.SAMPLERS.ENVIRONMENT_MAP,
                         ambientOcclusionMap = (int)CA_ENVIRONMENT.SAMPLERS.AMBIENT_OCCLUSION_MAP,
                         dustMap = (int)CA_ENVIRONMENT.SAMPLERS.DUST_MAP,
-                        irradianceCubeMap = (int)CA_ENVIRONMENT.SAMPLERS.IRRADIANCE_CUBE_MAP,
                         parallaxMap = (int)CA_ENVIRONMENT.SAMPLERS.PARALLAX_MAP,
                         alphablendNoiseMap = (int)CA_ENVIRONMENT.SAMPLERS.ALPHABLEND_NOISE_MAP,
                         sparkleMap = (int)CA_ENVIRONMENT.SAMPLERS.SPARKLE_MAP,
@@ -527,23 +523,14 @@ public class AlienScene : MonoBehaviour
                         normalMapStrength = (int)CA_ENVIRONMENT.PARAMETERS.NORMAL_MAP_STRENGTH,
                         emissiveMult = (int)CA_ENVIRONMENT.PARAMETERS.EMISSIVE_MULT,
                         diffuseTint = (int)CA_ENVIRONMENT.PARAMETERS.DIFFUSE_TINT,
-                        specularTint = (int)CA_ENVIRONMENT.PARAMETERS.SPECULAR_TINT,
                         emissiveTint = (int)CA_ENVIRONMENT.PARAMETERS.EMISSIVE_TINT,
                         secondaryDiffuseUvMult = (int)CA_ENVIRONMENT.PARAMETERS.SECONDARY_DIFFUSE_UV_MULT,
                         secondaryDiffuseTint = (int)CA_ENVIRONMENT.PARAMETERS.SECONDARY_DIFFUSE_TINT,
                         secondaryNormalUvMult = (int)CA_ENVIRONMENT.PARAMETERS.SECONDARY_NORMAL_UV_MULT,
                         secondaryNormalMapStrength = (int)CA_ENVIRONMENT.PARAMETERS.SECONDARY_NORMAL_MAP_STRENGTH,
-                        specularUvMult = (int)CA_ENVIRONMENT.PARAMETERS.SPECULAR_UV_MULT,
-                        specularPower = (int)CA_ENVIRONMENT.PARAMETERS.SPECULAR_POWER,
-                        secondarySpecularTint = (int)CA_ENVIRONMENT.PARAMETERS.SECONDARY_SPECULAR_TINT,
-                        secondarySpecularUvMult = (int)CA_ENVIRONMENT.PARAMETERS.SECONDARY_SPECULAR_UV_MULT,
-                        secondarySpecularPower = (int)CA_ENVIRONMENT.PARAMETERS.SECONDARY_SPECULAR_POWER,
                         glassDensity = (int)CA_ENVIRONMENT.PARAMETERS.GLASS_DENSITY,
                         glassLightness = (int)CA_ENVIRONMENT.PARAMETERS.GLASS_LIGHTNESS,
                         glassTint = (int)CA_ENVIRONMENT.PARAMETERS.GLASS_TINT,
-                        diffuseRoughnessFactor = (int)CA_ENVIRONMENT.PARAMETERS.DIFFUSE_ROUGHNESS_FACTOR,
-                        environmentEmissiveFactor = (int)CA_ENVIRONMENT.PARAMETERS.ENVIRONMENT_EMISSIVE_FACTOR,
-                        environmentMapMult = (int)CA_ENVIRONMENT.PARAMETERS.ENVIRONMENT_MAP_MULT,
                         aoTint = (int)CA_ENVIRONMENT.PARAMETERS.AO_TINT,
                         ambientOcclusionMapMult = (int)CA_ENVIRONMENT.PARAMETERS.AMBIENT_OCCLUSION_MAP_MULT,
                         vertAoTint = (int)CA_ENVIRONMENT.PARAMETERS.VERT_AO_TINT,
@@ -566,8 +553,6 @@ public class AlienScene : MonoBehaviour
                         dirtBlendMultSpecPower = (int)CA_ENVIRONMENT.PARAMETERS.DIRT_BLEND_MULT_SPEC_POWER,
                         dirtUvMult = (int)CA_ENVIRONMENT.PARAMETERS.DIRT_UV_MULT,
                         dirtAoAmount = (int)CA_ENVIRONMENT.PARAMETERS.DIRT_AO_AMOUNT,
-                        wetLevel = (int)CA_ENVIRONMENT.PARAMETERS.WET_LEVEL,
-                        wetnessUvMult = (int)CA_ENVIRONMENT.PARAMETERS.WETNESS_UV_MULT,
                         customTintColour = (int)CA_ENVIRONMENT.PARAMETERS.CUSTOM_TINT_COLOUR,
                         tessellationFactor = (int)CA_ENVIRONMENT.PARAMETERS.TESSELLATION_FACTOR,
                         minTessellationDistance = (int)CA_ENVIRONMENT.PARAMETERS.MIN_TESSELLATION_DISTANCE,
@@ -596,16 +581,7 @@ public class AlienScene : MonoBehaviour
                         normalMappingParallax = (int)CA_ENVIRONMENT.FEATURES.NORMAL_MAPPING_PARALLAX,
                         secondaryNormalMapping = (int)CA_ENVIRONMENT.FEATURES.SECONDARY_NORMAL_MAPPING,
                         secondaryNormalBlendAdd = (int)CA_ENVIRONMENT.FEATURES.SECONDARY_NORMAL_BLEND_ADD,
-                        specularMapping = (int)CA_ENVIRONMENT.FEATURES.SPECULAR_MAPPING,
-                        specularMappingParallax = (int)CA_ENVIRONMENT.FEATURES.SPECULAR_MAPPING_PARALLAX,
-                        secondarySpecularMapping = (int)CA_ENVIRONMENT.FEATURES.SECONDARY_SPECULAR_MAPPING,
-                        secondarySpecularMappingParallax = (int)CA_ENVIRONMENT.FEATURES.SECONDARY_SPECULAR_MAPPING_PARALLAX,
-                        secondarySpecularBlendMultiply = (int)CA_ENVIRONMENT.FEATURES.SECONDARY_SPECULAR_BLEND_MULTIPLY,
                         glass = (int)CA_ENVIRONMENT.FEATURES.GLASS,
-                        diffuseRoughness = (int)CA_ENVIRONMENT.FEATURES.DIFFUSE_ROUGHNESS,
-                        frontRoughness = (int)CA_ENVIRONMENT.FEATURES.FRONT_ROUGHNESS,
-                        additiveRoughness = (int)CA_ENVIRONMENT.FEATURES.ADDITIVE_ROUGHNESS,
-                        environmentMapping = (int)CA_ENVIRONMENT.FEATURES.ENVIRONMENT_MAPPING,
                         ambientOcclusionMapping = (int)CA_ENVIRONMENT.FEATURES.AMBIENT_OCCLUSION_MAPPING,
                         ambientOcclusionUV = (int)CA_ENVIRONMENT.FEATURES.AMBIENT_OCCLUSION_UV,
                         vertexAmbientOcclusion = (int)CA_ENVIRONMENT.FEATURES.VERTEX_AMBIENT_OCCLUSION,
@@ -613,7 +589,6 @@ public class AlienScene : MonoBehaviour
                         dustMapping = (int)CA_ENVIRONMENT.FEATURES.DUST_MAPPING,
                         dustMappingParallax = (int)CA_ENVIRONMENT.FEATURES.DUST_MAPPING_PARALLAX,
                         ssr = (int)CA_ENVIRONMENT.FEATURES.SSR,
-                        irradianceCube = (int)CA_ENVIRONMENT.FEATURES.IRRADIANCE_CUBE,
                         radiosityDynamic = (int)CA_ENVIRONMENT.FEATURES.RADIOSITY_DYNAMIC,
                         furRimLighting = (int)CA_ENVIRONMENT.FEATURES.FUR_RIM_LIGHTING,
                         parallaxMapping = (int)CA_ENVIRONMENT.FEATURES.PARALLAX_MAPPING,
@@ -621,14 +596,12 @@ public class AlienScene : MonoBehaviour
                         decalDiffuse = (int)CA_ENVIRONMENT.FEATURES.DECAL_DIFFUSE,
                         decalNormal = (int)CA_ENVIRONMENT.FEATURES.DECAL_NORMAL,
                         decalSpecularEmissive = (int)CA_ENVIRONMENT.FEATURES.DECAL_SPECULAR_EMISSIVE,
-                        specularMappingMetalnessMasking = (int)CA_ENVIRONMENT.FEATURES.SPECULAR_MAPPING_METALNESS_MASKING,
                         alphablendNoise = (int)CA_ENVIRONMENT.FEATURES.ALPHABLEND_NOISE,
                         alphaLighting = (int)CA_ENVIRONMENT.FEATURES.ALPHA_LIGHTING,
                         sparkle = (int)CA_ENVIRONMENT.FEATURES.SPARKLE,
                         radiosityStatic = (int)CA_ENVIRONMENT.FEATURES.RADIOSITY_STATIC,
                         dirtBlendMultiply = (int)CA_ENVIRONMENT.FEATURES.DIRT_BLEND_MULTIPLY,
                         dirtMappingParallax = (int)CA_ENVIRONMENT.FEATURES.DIRT_MAPPING_PARALLAX,
-                        wetness = (int)CA_ENVIRONMENT.FEATURES.WETNESS,
                         hiLodCustomCharacterCorpseConstants = (int)CA_ENVIRONMENT.FEATURES.HI_LOD_CUSTOM_CHARACTER_CORPSE_CONSTANTS,
                         noClip = (int)CA_ENVIRONMENT.FEATURES.NO_CLIP,
                         tessellation = (int)CA_ENVIRONMENT.FEATURES.TESSELLATION,
@@ -655,7 +628,6 @@ public class AlienScene : MonoBehaviour
                         normalMapStrength = (int)CA_DECAL_ENVIRONMENT.PARAMETERS.NORMAL_MAP_STRENGTH,
                         emissiveMult = (int)CA_DECAL_ENVIRONMENT.PARAMETERS.EMISSIVE_MULT,
                         diffuseTint = (int)CA_DECAL_ENVIRONMENT.PARAMETERS.DIFFUSE_TINT,
-                        specularTint = (int)CA_DECAL_ENVIRONMENT.PARAMETERS.SPECULAR_TINT,
                         emissiveTint = (int)CA_DECAL_ENVIRONMENT.PARAMETERS.EMISSIVE_TINT,
                         emissive = (int)CA_DECAL_ENVIRONMENT.FEATURES.EMISSIVE,
                         normalMapping = (int)CA_DECAL_ENVIRONMENT.FEATURES.NORMAL_MAPPING,
@@ -676,7 +648,6 @@ public class AlienScene : MonoBehaviour
                         normalMapStrength = (int)CA_CHARACTER.PARAMETERS.NORMAL_MAP_STRENGTH,
                         emissiveMult = (int)CA_CHARACTER.PARAMETERS.EMISSIVE_MULT,
                         diffuseTint = (int)CA_CHARACTER.PARAMETERS.DIFFUSE_TINT,
-                        specularTint = (int)CA_CHARACTER.PARAMETERS.SPECULAR_TINT,
                         emissiveTint = (int)CA_CHARACTER.PARAMETERS.EMISSIVE_TINT,
                         emissive = (int)CA_CHARACTER.FEATURES.EMISSIVE,
                         normalMapping = (int)CA_CHARACTER.FEATURES.NORMAL_MAPPING,
@@ -698,7 +669,6 @@ public class AlienScene : MonoBehaviour
                         normalUvMult = (int)CA_SKIN.PARAMETERS.NORMAL_UV_MULT,
                         normalMapStrength = (int)CA_SKIN.PARAMETERS.NORMAL_MAP_STRENGTH_DIFFUSE,
                         diffuseTint = (int)CA_SKIN.PARAMETERS.DIFFUSE_TINT,
-                        specularTint = (int)CA_SKIN.PARAMETERS.SPECULAR_TINT,
                         normalMapping = (int)CA_SKIN.FEATURES.NORMAL_MAPPING
                     });
                     break;
@@ -711,7 +681,6 @@ public class AlienScene : MonoBehaviour
                         normalUvMult = (int)CA_HAIR.PARAMETERS.NORMAL_UV_MULT,
                         normalMapStrength = (int)CA_HAIR.PARAMETERS.NORMAL_MAP_STRENGTH_DIFFUSE,
                         diffuseTint = (int)CA_HAIR.PARAMETERS.DIFFUSE_TINT,
-                        specularTint = (int)CA_HAIR.PARAMETERS.SPECULAR_TINT,
                         normalMapping = (int)CA_HAIR.FEATURES.NORMAL_MAPPING
                     });
                     break;
@@ -827,7 +796,6 @@ public class AlienScene : MonoBehaviour
                         normalMapStrength = (int)CA_SURFACE_EFFECTS.PARAMETERS.NORMAL_MAP_STRENGTH,
                         emissiveMult = (int)CA_SURFACE_EFFECTS.PARAMETERS.EMISSIVE_MULT,
                         diffuseTint = (int)CA_SURFACE_EFFECTS.PARAMETERS.DIFFUSE_TINT,
-                        specularTint = (int)CA_SURFACE_EFFECTS.PARAMETERS.SPECULAR_TINT,
                         emissiveTint = (int)CA_SURFACE_EFFECTS.PARAMETERS.EMISSIVE_TINT,
                         emissive = (int)CA_SURFACE_EFFECTS.FEATURES.EMISSIVE,
                         normalMapping = (int)CA_SURFACE_EFFECTS.FEATURES.NORMAL_MAPPING,
@@ -853,7 +821,6 @@ public class AlienScene : MonoBehaviour
                         diffuseUvMult = (int)CA_TERRAIN.PARAMETERS.DIFFUSE_UV_MULT,
                         normalUvMult = (int)CA_TERRAIN.PARAMETERS.NORMAL_UV_MULT,
                         diffuseTint = (int)CA_TERRAIN.PARAMETERS.DIFFUSE_TINT,
-                        specularTint = (int)CA_TERRAIN.PARAMETERS.SPECULAR_TINT,
                         normalMapping = (int)CA_TERRAIN.FEATURES.NORMAL_MAPPING
                     });
                     break;
@@ -894,7 +861,6 @@ public class AlienScene : MonoBehaviour
                         normalMapStrength = (int)CA_LIGHTMAP_ENVIRONMENT.PARAMETERS.NORMAL_MAP_STRENGTH,
                         emissiveMult = (int)CA_LIGHTMAP_ENVIRONMENT.PARAMETERS.EMISSIVE_MULT,
                         diffuseTint = (int)CA_LIGHTMAP_ENVIRONMENT.PARAMETERS.DIFFUSE_TINT,
-                        specularTint = (int)CA_LIGHTMAP_ENVIRONMENT.PARAMETERS.SPECULAR_TINT,
                         emissiveTint = (int)CA_LIGHTMAP_ENVIRONMENT.PARAMETERS.EMISSIVE_TINT,
                         emissive = (int)CA_LIGHTMAP_ENVIRONMENT.FEATURES.EMISSIVE,
                         normalMapping = (int)CA_LIGHTMAP_ENVIRONMENT.FEATURES.NORMAL_MAPPING,
@@ -919,7 +885,6 @@ public class AlienScene : MonoBehaviour
                         normalMapStrength = (int)CA_STREAMER.PARAMETERS.NORMAL_MAP_STRENGTH,
                         emissiveMult = (int)CA_STREAMER.PARAMETERS.EMISSIVE_MULT,
                         diffuseTint = (int)CA_STREAMER.PARAMETERS.DIFFUSE_TINT,
-                        specularTint = (int)CA_STREAMER.PARAMETERS.SPECULAR_TINT,
                         emissiveTint = (int)CA_STREAMER.PARAMETERS.EMISSIVE_TINT,
                         emissive = (int)CA_STREAMER.FEATURES.EMISSIVE,
                         normalMapping = (int)CA_STREAMER.FEATURES.NORMAL_MAPPING,
@@ -941,7 +906,6 @@ public class AlienScene : MonoBehaviour
                         normalUvMult = (int)CA_LOW_LOD_CHARACTER.PARAMETERS.NORMAL_UV_MULT,
                         normalMapStrength = (int)CA_LOW_LOD_CHARACTER.PARAMETERS.NORMAL_MAP_STRENGTH,
                         diffuseTint = (int)CA_LOW_LOD_CHARACTER.PARAMETERS.DIFFUSE_TINT,
-                        specularTint = (int)CA_LOW_LOD_CHARACTER.PARAMETERS.SPECULAR_TINT,
                         normalMapping = (int)CA_LOW_LOD_CHARACTER.FEATURES.NORMAL_MAPPING,
                         transparent =
                             (shader.UbershaderFeatureFlags & (1L << (int)CA_LOW_LOD_CHARACTER.FEATURES.ALPHA_TEST)) != 0 ||
@@ -1152,12 +1116,8 @@ public class AlienScene : MonoBehaviour
         public int normalMap = -1;
         public int secondaryDiffuseMap = -1;
         public int secondaryNormalMap = -1;
-        public int specularMap = -1;
-        public int secondarySpecularMap = -1;
-        public int environmentMap = -1;
         public int ambientOcclusionMap = -1;
         public int dustMap = -1;
-        public int irradianceCubeMap = -1;
         public int parallaxMap = -1;
         public int alphablendNoiseMap = -1;
         public int sparkleMap = -1;
@@ -1172,23 +1132,14 @@ public class AlienScene : MonoBehaviour
         public int normalMapStrength = -1;
         public int emissiveMult = -1;
         public int diffuseTint = -1;
-        public int specularTint = -1;
         public int emissiveTint = -1;
         public int secondaryDiffuseUvMult = -1;
         public int secondaryDiffuseTint = -1;
         public int secondaryNormalUvMult = -1;
         public int secondaryNormalMapStrength = -1;
-        public int specularUvMult = -1;
-        public int specularPower = -1;
-        public int secondarySpecularTint = -1;
-        public int secondarySpecularUvMult = -1;
-        public int secondarySpecularPower = -1;
         public int glassDensity = -1;
         public int glassLightness = -1;
         public int glassTint = -1;
-        public int diffuseRoughnessFactor = -1;
-        public int environmentEmissiveFactor = -1;
-        public int environmentMapMult = -1;
         public int aoTint = -1;
         public int ambientOcclusionMapMult = -1;
         public int vertAoTint = -1;
@@ -1211,8 +1162,6 @@ public class AlienScene : MonoBehaviour
         public int dirtBlendMultSpecPower = -1;
         public int dirtUvMult = -1;
         public int dirtAoAmount = -1;
-        public int wetLevel = -1;
-        public int wetnessUvMult = -1;
         public int customTintColour = -1;
         public int tessellationFactor = -1;
         public int minTessellationDistance = -1;
@@ -1244,23 +1193,13 @@ public class AlienScene : MonoBehaviour
         public int normalMappingParallax = -1;
         public int secondaryNormalMapping = -1;
         public int secondaryNormalBlendAdd = -1;
-        public int specularMapping = -1;
-        public int specularMappingParallax = -1;
-        public int secondarySpecularMapping = -1;
-        public int secondarySpecularMappingParallax = -1;
-        public int secondarySpecularBlendMultiply = -1;
         public int glass = -1;
-        public int diffuseRoughness = -1;
-        public int frontRoughness = -1;
-        public int additiveRoughness = -1;
-        public int environmentMapping = -1;
         public int ambientOcclusionMapping = -1;
         public int ambientOcclusionUV = -1;
         public int vertexAmbientOcclusion = -1;
         public int dustMapping = -1;
         public int dustMappingParallax = -1;
         public int ssr = -1;
-        public int irradianceCube = -1;
         public int radiosityDynamic = -1;
         public int furRimLighting = -1;
         public int parallaxMapping = -1;
@@ -1268,7 +1207,6 @@ public class AlienScene : MonoBehaviour
         public int decalDiffuse = -1;
         public int decalNormal = -1;
         public int decalSpecularEmissive = -1;
-        public int specularMappingMetalnessMasking = -1;
         public int alphablendNoise = -1;
         public int alphaLighting = -1;
         public int sparkle = -1;
@@ -1276,7 +1214,6 @@ public class AlienScene : MonoBehaviour
         public int dirtMapping = -1;
         public int dirtBlendMultiply = -1;
         public int dirtMappingParallax = -1;
-        public int wetness = -1;
         public int hiLodCustomCharacterCorpseConstants = -1;
         public int noClip = -1;
         public int tessellation = -1;
@@ -1308,18 +1245,10 @@ public class AlienScene : MonoBehaviour
             ApplySampler(material, shader, unityMaterial, "_SecondaryDiffuseMap", props.secondaryDiffuseMap);
         if (props.secondaryNormalMap != -1)
             ApplySampler(material, shader, unityMaterial, "_SecondaryNormalMap", props.secondaryNormalMap);
-        if (props.specularMap != -1)
-            ApplySampler(material, shader, unityMaterial, "_SpecularMap", props.specularMap);
-        if (props.secondarySpecularMap != -1)
-            ApplySampler(material, shader, unityMaterial, "_SecondarySpecularMap", props.secondarySpecularMap);
-        if (props.environmentMap != -1)
-            ApplySampler(material, shader, unityMaterial, "_EnvironmentMap", props.environmentMap);
         if (props.ambientOcclusionMap != -1)
             ApplySampler(material, shader, unityMaterial, "_AmbientOcclusionMap", props.ambientOcclusionMap);
         if (props.dustMap != -1)
             ApplySampler(material, shader, unityMaterial, "_DustMap", props.dustMap);
-        if (props.irradianceCubeMap != -1)
-            ApplySampler(material, shader, unityMaterial, "_IrradianceCubeMap", props.irradianceCubeMap);
         if (props.parallaxMap != -1)
             ApplySampler(material, shader, unityMaterial, "_ParallaxMap", props.parallaxMap);
         if (props.alphablendNoiseMap != -1)
@@ -1349,11 +1278,6 @@ public class AlienScene : MonoBehaviour
             Vector4 diffuseTint = GetShaderVector4(shader, material, props.diffuseTint, Vector4.one);
             unityMaterial.SetColor("_DiffuseTint", new Color(diffuseTint.x, diffuseTint.y, diffuseTint.z, diffuseTint.w));
         }
-        if (props.specularTint != -1)
-        {
-            Vector3 specularTint = GetShaderVector3(shader, material, props.specularTint, Vector3.one);
-            unityMaterial.SetColor("_SpecularTint", new Color(specularTint.x, specularTint.y, specularTint.z, 1.0f));
-        }
         if (props.emissiveTint != -1)
         {
             Vector3 emissiveTint = GetShaderVector3(shader, material, props.emissiveTint, Vector3.one);
@@ -1370,19 +1294,6 @@ public class AlienScene : MonoBehaviour
             unityMaterial.SetFloat("_SecondaryNormalUvMult", GetShaderFloat(shader, material, props.secondaryNormalUvMult, 1.0f));
         if (props.secondaryNormalMapStrength != -1)
             unityMaterial.SetFloat("_SecondaryNormalMapStrength", GetShaderFloat(shader, material, props.secondaryNormalMapStrength, 1.0f));
-        if (props.specularUvMult != -1)
-            unityMaterial.SetFloat("_SpecularUvMult", GetShaderFloat(shader, material, props.specularUvMult, 1.0f));
-        if (props.specularPower != -1)
-            unityMaterial.SetFloat("_SpecularPower", GetShaderFloat(shader, material, props.specularPower, 32.0f));
-        if (props.secondarySpecularTint != -1)
-        {
-            Vector3 secondarySpecularTint = GetShaderVector3(shader, material, props.secondarySpecularTint, Vector3.one);
-            unityMaterial.SetColor("_SecondarySpecularTint", new Color(secondarySpecularTint.x, secondarySpecularTint.y, secondarySpecularTint.z, 1.0f));
-        }
-        if (props.secondarySpecularUvMult != -1)
-            unityMaterial.SetFloat("_SecondarySpecularUvMult", GetShaderFloat(shader, material, props.secondarySpecularUvMult, 1.0f));
-        if (props.secondarySpecularPower != -1)
-            unityMaterial.SetFloat("_SecondarySpecularPower", GetShaderFloat(shader, material, props.secondarySpecularPower, 32.0f));
         if (props.glassDensity != -1)
             unityMaterial.SetFloat("_GlassDensity", GetShaderFloat(shader, material, props.glassDensity, 1.0f));
         if (props.glassLightness != -1)
@@ -1392,12 +1303,6 @@ public class AlienScene : MonoBehaviour
             Vector4 glassTint = GetShaderVector4(shader, material, props.glassTint, Vector4.one);
             unityMaterial.SetColor("_GlassTint", new Color(glassTint.x, glassTint.y, glassTint.z, glassTint.w));
         }
-        if (props.diffuseRoughnessFactor != -1)
-            unityMaterial.SetFloat("_DiffuseRoughnessFactor", GetShaderFloat(shader, material, props.diffuseRoughnessFactor, 1.0f));
-        if (props.environmentEmissiveFactor != -1)
-            unityMaterial.SetFloat("_EnvironmentEmissiveFactor", GetShaderFloat(shader, material, props.environmentEmissiveFactor, 1.0f));
-        if (props.environmentMapMult != -1)
-            unityMaterial.SetFloat("_EnvironmentMapMult", GetShaderFloat(shader, material, props.environmentMapMult, 1.0f));
         if (props.aoTint != -1)
         {
             Vector3 aoTint = GetShaderVector3(shader, material, props.aoTint, Vector3.one);
@@ -1448,10 +1353,6 @@ public class AlienScene : MonoBehaviour
             unityMaterial.SetFloat("_DirtUvMult", GetShaderFloat(shader, material, props.dirtUvMult, 1.0f));
         if (props.dirtAoAmount != -1)
             unityMaterial.SetFloat("_DirtAoAmount", GetShaderFloat(shader, material, props.dirtAoAmount, 1.0f));
-        if (props.wetLevel != -1)
-            unityMaterial.SetFloat("_WetLevel", GetShaderFloat(shader, material, props.wetLevel, 0.0f));
-        if (props.wetnessUvMult != -1)
-            unityMaterial.SetFloat("_WetnessUvMult", GetShaderFloat(shader, material, props.wetnessUvMult, 1.0f));
         if (props.customTintColour != -1)
         {
             Vector3 customTintColour = GetShaderVector3(shader, material, props.customTintColour, Vector3.one);
@@ -1514,26 +1415,8 @@ public class AlienScene : MonoBehaviour
             unityMaterial.SetFloat("_SecondaryNormalMapping", (shader.UbershaderFeatureFlags & (1L << props.secondaryNormalMapping)) != 0 ? 1.0f : 0.0f);
         if (props.secondaryNormalBlendAdd != -1)
             unityMaterial.SetFloat("_SecondaryNormalBlendAdd", (shader.UbershaderFeatureFlags & (1L << props.secondaryNormalBlendAdd)) != 0 ? 1.0f : 0.0f);
-        if (props.specularMapping != -1)
-            unityMaterial.SetFloat("_SpecularMapping", (shader.UbershaderFeatureFlags & (1L << props.specularMapping)) != 0 ? 1.0f : 0.0f);
-        if (props.specularMappingParallax != -1)
-            unityMaterial.SetFloat("_SpecularMappingParallax", (shader.UbershaderFeatureFlags & (1L << props.specularMappingParallax)) != 0 ? 1.0f : 0.0f);
-        if (props.secondarySpecularMapping != -1)
-            unityMaterial.SetFloat("_SecondarySpecularMapping", (shader.UbershaderFeatureFlags & (1L << props.secondarySpecularMapping)) != 0 ? 1.0f : 0.0f);
-        if (props.secondarySpecularMappingParallax != -1)
-            unityMaterial.SetFloat("_SecondarySpecularMappingParallax", (shader.UbershaderFeatureFlags & (1L << props.secondarySpecularMappingParallax)) != 0 ? 1.0f : 0.0f);
-        if (props.secondarySpecularBlendMultiply != -1)
-            unityMaterial.SetFloat("_SecondarySpecularBlendMultiply", (shader.UbershaderFeatureFlags & (1L << props.secondarySpecularBlendMultiply)) != 0 ? 1.0f : 0.0f);
         if (props.glass != -1)
             unityMaterial.SetFloat("_Glass", (shader.UbershaderFeatureFlags & (1L << props.glass)) != 0 ? 1.0f : 0.0f);
-        if (props.diffuseRoughness != -1)
-            unityMaterial.SetFloat("_DiffuseRoughness", (shader.UbershaderFeatureFlags & (1L << props.diffuseRoughness)) != 0 ? 1.0f : 0.0f);
-        if (props.frontRoughness != -1)
-            unityMaterial.SetFloat("_FrontRoughness", (shader.UbershaderFeatureFlags & (1L << props.frontRoughness)) != 0 ? 1.0f : 0.0f);
-        if (props.additiveRoughness != -1)
-            unityMaterial.SetFloat("_AdditiveRoughness", (shader.UbershaderFeatureFlags & (1L << props.additiveRoughness)) != 0 ? 1.0f : 0.0f);
-        if (props.environmentMapping != -1)
-            unityMaterial.SetFloat("_EnvironmentMapping", (shader.UbershaderFeatureFlags & (1L << props.environmentMapping)) != 0 ? 1.0f : 0.0f);
         if (props.ambientOcclusionMapping != -1)
             unityMaterial.SetFloat("_AmbientOcclusionMapping", (shader.UbershaderFeatureFlags & (1L << props.ambientOcclusionMapping)) != 0 ? 1.0f : 0.0f);
         if (props.ambientOcclusionUV != -1)
@@ -1546,8 +1429,6 @@ public class AlienScene : MonoBehaviour
             unityMaterial.SetFloat("_DustMappingParallax", (shader.UbershaderFeatureFlags & (1L << props.dustMappingParallax)) != 0 ? 1.0f : 0.0f);
         if (props.ssr != -1)
             unityMaterial.SetFloat("_SSR", (shader.UbershaderFeatureFlags & (1L << props.ssr)) != 0 ? 1.0f : 0.0f);
-        if (props.irradianceCube != -1)
-            unityMaterial.SetFloat("_IrradianceCube", (shader.UbershaderFeatureFlags & (1L << props.irradianceCube)) != 0 ? 1.0f : 0.0f);
         if (props.radiosityDynamic != -1)
             unityMaterial.SetFloat("_RadiosityDynamic", (shader.UbershaderFeatureFlags & (1L << props.radiosityDynamic)) != 0 ? 1.0f : 0.0f);
         if (props.furRimLighting != -1)
@@ -1562,8 +1443,6 @@ public class AlienScene : MonoBehaviour
             unityMaterial.SetFloat("_DecalNormal", (shader.UbershaderFeatureFlags & (1L << props.decalNormal)) != 0 ? 1.0f : 0.0f);
         if (props.decalSpecularEmissive != -1)
             unityMaterial.SetFloat("_DecalSpecularEmissive", (shader.UbershaderFeatureFlags & (1L << props.decalSpecularEmissive)) != 0 ? 1.0f : 0.0f);
-        if (props.specularMappingMetalnessMasking != -1)
-            unityMaterial.SetFloat("_SpecularMappingMetalnessMasking", (shader.UbershaderFeatureFlags & (1L << props.specularMappingMetalnessMasking)) != 0 ? 1.0f : 0.0f);
         if (props.alphablendNoise != -1)
             unityMaterial.SetFloat("_AlphablendNoise", (shader.UbershaderFeatureFlags & (1L << props.alphablendNoise)) != 0 ? 1.0f : 0.0f);
         if (props.alphaLighting != -1)
@@ -1576,8 +1455,6 @@ public class AlienScene : MonoBehaviour
             unityMaterial.SetFloat("_DirtBlendMultiply", (shader.UbershaderFeatureFlags & (1L << props.dirtBlendMultiply)) != 0 ? 1.0f : 0.0f);
         if (props.dirtMappingParallax != -1)
             unityMaterial.SetFloat("_DirtMappingParallax", (shader.UbershaderFeatureFlags & (1L << props.dirtMappingParallax)) != 0 ? 1.0f : 0.0f);
-        if (props.wetness != -1)
-            unityMaterial.SetFloat("_Wetness", (shader.UbershaderFeatureFlags & (1L << props.wetness)) != 0 ? 1.0f : 0.0f);
         if (props.hiLodCustomCharacterCorpseConstants != -1)
             unityMaterial.SetFloat("_HiLodCustomCharacterCorpseConstants", (shader.UbershaderFeatureFlags & (1L << props.hiLodCustomCharacterCorpseConstants)) != 0 ? 1.0f : 0.0f);
         if (props.noClip != -1)

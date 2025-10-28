@@ -160,7 +160,7 @@ struct Input
     INTERNAL_DATA
 };
 
-void CA_Environment_Surf (Input IN, inout SurfaceOutputStandard o)
+void OpenCAGE_Surf (Input IN, inout SurfaceOutputStandard o)
 {
     float2 parallaxOffset = 0;
     if (_ParallaxMapping > 0.5)

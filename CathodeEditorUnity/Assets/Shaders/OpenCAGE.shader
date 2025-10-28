@@ -1,4 +1,4 @@
-Shader "Cathode/CA_Environment"
+Shader "OpenCAGE"
 {
     Properties
     {
@@ -170,11 +170,11 @@ Shader "Cathode/CA_Environment"
         #pragma target 3.0
         
         #include "UnityCG.cginc"
-        #include "CA_Environment_Common.cginc"
+        #include "OpenCAGE_Common.cginc"
         
         void surf (Input IN, inout SurfaceOutputStandard o)
         {
-            CA_Environment_Surf(IN, o);
+            OpenCAGE_Surf(IN, o);
         }
         ENDCG
     }
@@ -194,11 +194,11 @@ Shader "Cathode/CA_Environment"
         #define TRANSPARENT_MODE
         
         #include "UnityCG.cginc"
-        #include "CA_Environment_Common.cginc"
+        #include "OpenCAGE_Common.cginc"
         
         void surf (Input IN, inout SurfaceOutputStandard o)
         {
-            CA_Environment_Surf(IN, o);
+            OpenCAGE_Surf(IN, o);
         }
         ENDCG
     }

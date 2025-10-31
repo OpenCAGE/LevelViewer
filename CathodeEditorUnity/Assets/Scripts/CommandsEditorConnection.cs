@@ -1,16 +1,15 @@
+using CATHODE.Scripting;
+using CATHODE.Scripting.Internal;
 using Newtonsoft.Json;
 using System;
 using System.Collections;
 using System.Collections.Generic;
-using System.Threading;
-using UnityEditor;
-using UnityEngine;
-using WebSocketSharp;
-using CATHODE.Scripting;
 using System.IO;
-using UnityEngine.UIElements;
 using System.Linq;
-using CATHODE.Scripting.Internal;
+using System.Threading;
+using UnityEngine;
+using UnityEngine.UIElements;
+using WebSocketSharp;
 
 [RequireComponent(typeof(AlienScene))]
 public class CommandsEditorConnection : MonoBehaviour
@@ -21,9 +20,7 @@ public class CommandsEditorConnection : MonoBehaviour
     private readonly object _lock = new object();
 
     private string _levelName = "";
-
     private string _pathToAI = "";
-    public string PathToAI => _pathToAI;
 
     private List<uint> _pathComposites;
     private List<uint> _pathEntities;
@@ -106,7 +103,7 @@ public class CommandsEditorConnection : MonoBehaviour
 
                         ShortGuid entityID = new ShortGuid(packet.entity);
                         ShortGuid compositeID = new ShortGuid(packet.composite);
-                        Composite composite = LevelContent.CommandsPAK.Entries.FirstOrDefault(o => o.shortGUID == compositeID);
+                        Composite composite = _scene.Content.CommandsPAK.Entries.FirstOrDefault(o => o.shortGUID == compositeID);
                         if (composite != null)
                         {
                             Entity entity = null;
@@ -145,7 +142,7 @@ public class CommandsEditorConnection : MonoBehaviour
                                 switch (entity.variant)
                                 {
                                     case EntityVariant.PROXY:
-                                        HandlePointedTransform(packet, out entityID, out compositeID, ((ProxyEntity)entity).proxy, LevelContent.CommandsPAK.EntryPoints[0]);
+                                        HandlePointedTransform(packet, out entityID, out compositeID, ((ProxyEntity)entity).proxy, _scene.Content.CommandsPAK.EntryPoints[0]);
                                         break;
                                     case EntityVariant.ALIAS:
                                         HandlePointedTransform(packet, out entityID, out compositeID, ((AliasEntity)entity).alias, composite);
@@ -164,7 +161,7 @@ public class CommandsEditorConnection : MonoBehaviour
                     {
                         ShortGuid entityID = new ShortGuid(packet.entity);
                         ShortGuid compositeID = new ShortGuid(packet.composite);
-                        Composite composite = LevelContent.CommandsPAK.Entries.FirstOrDefault(o => o.shortGUID == compositeID);
+                        Composite composite = _scene.Content.CommandsPAK.Entries.FirstOrDefault(o => o.shortGUID == compositeID);
                         if (composite != null)
                         {
                             Entity entity = null;
@@ -185,8 +182,8 @@ public class CommandsEditorConnection : MonoBehaviour
                             }
                             if (entity != null)
                             {
-                                LevelContent.RemappedResources.Remove(entity);
-                                LevelContent.RemappedResources.Add(entity, packet.renderable);
+                                _scene.Content.RemappedResources.Remove(entity);
+                                _scene.Content.RemappedResources.Add(entity, packet.renderable);
                             }
                         }
 
@@ -199,7 +196,7 @@ public class CommandsEditorConnection : MonoBehaviour
                 {
                     lock (_lock)
                     {
-                        Composite composite = LevelContent.CommandsPAK.Entries.FirstOrDefault(o => o.shortGUID.AsUInt32 == packet.composite);
+                        Composite composite = _scene.Content.CommandsPAK.Entries.FirstOrDefault(o => o.shortGUID.AsUInt32 == packet.composite);
                         if (composite != null)
                         {
                             switch (packet.entity_variant)
@@ -233,7 +230,7 @@ public class CommandsEditorConnection : MonoBehaviour
                 {
                     lock (_lock)
                     {
-                        Composite composite = LevelContent.CommandsPAK.Entries.FirstOrDefault(o => o.shortGUID.AsUInt32 == packet.composite);
+                        Composite composite = _scene.Content.CommandsPAK.Entries.FirstOrDefault(o => o.shortGUID.AsUInt32 == packet.composite);
                         if (composite != null)
                         {
                             switch (packet.entity_variant)
@@ -261,7 +258,7 @@ public class CommandsEditorConnection : MonoBehaviour
                 {
                     lock (_lock)
                     {
-                        LevelContent.CommandsPAK.Entries.Add(new Composite() { shortGUID = new ShortGuid(packet.composite) });
+                        _scene.Content.CommandsPAK.Entries.Add(new Composite() { shortGUID = new ShortGuid(packet.composite) });
                     }
                     break;
                 }
@@ -269,7 +266,7 @@ public class CommandsEditorConnection : MonoBehaviour
                 {
                     lock (_lock)
                     {
-                        LevelContent.CommandsPAK.Entries.RemoveAll(o => o.shortGUID == new ShortGuid(packet.composite));
+                        _scene.Content.CommandsPAK.Entries.RemoveAll(o => o.shortGUID == new ShortGuid(packet.composite));
 
                         _removedComposite = new ShortGuid(packet.composite);
                     }
@@ -279,7 +276,7 @@ public class CommandsEditorConnection : MonoBehaviour
     }
     private void HandlePointedTransform(Packet packet, out ShortGuid entityID, out ShortGuid compositeID, EntityPath path, Composite startComposite)
     {
-        (Composite pComp, Entity pEnt) = LevelContent.CommandsPAK.Utils.GetResolvedTarget(LevelContent.CommandsPAK.Utils.ResolveAliasOrProxy(path, startComposite));
+        (Composite pComp, Entity pEnt) = _scene.Content.CommandsPAK.Utils.GetResolvedTarget(_scene.Content.CommandsPAK.Utils.ResolveAliasOrProxy(path, startComposite));
         entityID = pEnt != null ? pEnt.shortGUID : ShortGuid.Invalid;
         compositeID = pComp != null ? pComp.shortGUID : ShortGuid.Invalid;
         if (!packet.has_transform)
@@ -310,7 +307,14 @@ public class CommandsEditorConnection : MonoBehaviour
     {
         if (_levelName != "" && _scene.LevelName != _levelName)
         {
-            _scene.LoadLevel(_levelName);
+            //NEW: Destroy everything and start again, rather than manually handling everything.
+            Destroy(_scene.ParentGameObject);
+            Destroy(_scene);
+
+            _scene = this.gameObject.AddComponent<AlienScene>();
+            _scene.LoadLevel(_levelName, _pathToAI);
+
+            Resources.UnloadUnusedAssets();
         }
 
         if (_compositeLoaded)
@@ -358,7 +362,7 @@ public class CommandsEditorConnection : MonoBehaviour
         if (_currentEntityGOID != _currentEntity)
         {
             Debug.Log("Selecting entity: " + _currentEntity);
-            _scene.SelectEntity(_pathEntities);
+            _scene.SelectEntity(_pathEntities, _focusSelected);
             _currentEntityGOID = _currentEntity;
         }
     }

@@ -42,17 +42,20 @@ public class AlienScene : MonoBehaviour
     private Dictionary<ShortGuid, List<GameObject>> _compositeGameObjects = new Dictionary<ShortGuid, List<GameObject>>();
     private Dictionary<GameObject, Entity> _gameObjectEntities = new Dictionary<GameObject, Entity>();
 
+    public LevelContent Content => _content;
+    private LevelContent _content = new LevelContent();
+
     public class TexOrCube
     {
         public Texture2D Texture = null;
         public Cubemap Cubemap = null;
     }
 
-    private CommandsEditorConnection _client;
-
     IEnumerator Start()
     {
-        _client = GetComponent<CommandsEditorConnection>();
+#if !LOCAL_DEV
+        this.hideFlags = HideFlags.HideInHierarchy | HideFlags.DontSave;
+#endif
 
         yield return new WaitForEndOfFrame();
 
@@ -73,16 +76,40 @@ public class AlienScene : MonoBehaviour
 
         _materials.Clear();
         _materialSupport.Clear();
-        _modelGOs.Clear();
+
+        foreach (KeyValuePair<int, TexOrCube> kvp in _texturesLevel)
+        {
+            if (kvp.Value.Texture != null)
+                Destroy(kvp.Value.Texture);
+            if (kvp.Value.Cubemap != null)
+                Destroy(kvp.Value.Cubemap);
+        }
         _texturesLevel.Clear();
 
-        LevelContent.Reset();
+        foreach (KeyValuePair<int, GameObjectHolder> kvp in _modelGOs)
+            kvp.Value.MainMesh.Clear();
+        _modelGOs.Clear();
+
+        //for (int i = 0; i < _compositeGameObjects.Count; i++)
+        //    foreach (KeyValuePair<ShortGuid, List<GameObject>> kvp in _compositeGameObjects)
+        //        foreach (GameObject compositeInstance in kvp.Value)
+        //            if (compositeInstance != null)
+        //                Destroy(compositeInstance);
+        _compositeGameObjects.Clear();
+
+        //for (int i = 0; i < _gameObjectEntities.Count; i++)
+        //    foreach (KeyValuePair<GameObject, Entity> kvp in _gameObjectEntities)
+        //        if (kvp.Key != null)
+        //            Destroy(kvp.Key);
+        _gameObjectEntities.Clear();
+
+        _content.Reset();
     }
 
     /* Load the content for a level */
-    public void LoadLevel(string level)
+    public void LoadLevel(string level, string pathToAI)
     {
-        if (level == null || level == "" || _client.PathToAI == "")
+        if (level == null || level == "" || pathToAI == "")
             return;
 
         Debug.Log("Loading level " + level + "...");
@@ -90,13 +117,13 @@ public class AlienScene : MonoBehaviour
         ResetLevel();
 
         _levelName = level;
-        LevelContent.Load(_client.PathToAI, level);
+        _content.Load(pathToAI, level);
     }
-    
+
     /* Populate the scene with a given Composite */
     public void PopulateComposite(ShortGuid guid)
     {
-        if (!LevelContent.Loaded) return;
+        if (!_content.Loaded) return;
 
         _compositeGameObjects.Clear();
         _gameObjectEntities.Clear();
@@ -110,7 +137,7 @@ public class AlienScene : MonoBehaviour
 #endif
         _parentGameObject.isStatic = true;
 
-        Composite comp = LevelContent.CommandsPAK.GetComposite(guid);
+        Composite comp = _content.CommandsPAK.GetComposite(guid);
         Debug.Log("Loading composite " + comp?.name + "...");
         _loadedComposite = comp;
         AddCompositeInstance(comp, _parentGameObject, null);
@@ -170,7 +197,7 @@ public class AlienScene : MonoBehaviour
             {
                 if (compositeInstance != null)
                 {
-                    Composite c = LevelContent.CommandsPAK.Entries.FirstOrDefault(o => o.shortGUID == composite);
+                    Composite c = _content.CommandsPAK.Entries.FirstOrDefault(o => o.shortGUID == composite);
                     Entity e = c.GetEntityByID(entity);
                     if (c != null && e != null)
                     {
@@ -230,7 +257,7 @@ public class AlienScene : MonoBehaviour
                     FunctionEntity function = (FunctionEntity)entity;
                     if (!function.function.IsFunctionType)
                     {
-                        Composite compositeNext = LevelContent.CommandsPAK.GetComposite(function.function);
+                        Composite compositeNext = _content.CommandsPAK.GetComposite(function.function);
                         if (compositeNext != null)
                         {
                             AddCompositeInstance(compositeNext, entityGO, function);
@@ -242,10 +269,10 @@ public class AlienScene : MonoBehaviour
                         {
                             //Renderables
                             case FunctionType.ModelReference:
-                                if (LevelContent.RemappedResources.ContainsKey(function))
+                                if (_content.RemappedResources.ContainsKey(function))
                                 {
                                     //Using a resource mapping which has changed at runtime
-                                    List<Tuple<int, int>> renderableElement = LevelContent.RemappedResources[function];
+                                    List<Tuple<int, int>> renderableElement = _content.RemappedResources[function];
                                     for (int i = 0; i < renderableElement.Count; i++)
                                     {
                                         CreateRenderable(entityGO, renderableElement[i].Item1, renderableElement[i].Item2);
@@ -263,7 +290,7 @@ public class AlienScene : MonoBehaviour
                                         {
                                             for (int i = 0; i < renderable.count; i++)
                                             {
-                                                RenderableElements.Element renderableElement = LevelContent.RenderableREDS.Entries[renderable.index + i];
+                                                RenderableElements.Element renderableElement = _content.RenderableREDS.Entries[renderable.index + i];
                                                 CreateRenderable(entityGO, renderableElement.ModelIndex, renderableElement.MaterialIndex);
                                             }
                                         }
@@ -278,7 +305,7 @@ public class AlienScene : MonoBehaviour
     }
 
     /* Select an Entity GameObject at a specific instance hierarchy */
-    public void SelectEntity(List<uint> path)
+    public void SelectEntity(List<uint> path, bool focusSelected)
     {
         GameObject gameObject = GetGameObject(path, ParentGameObject.transform);
         if (gameObject != null)
@@ -291,7 +318,7 @@ public class AlienScene : MonoBehaviour
         }
         Selection.activeGameObject = gameObject;
 
-        if (_client.FocusSelected)
+        if (focusSelected)
             SceneView.FrameLastActiveSceneView();
     }
 
@@ -474,10 +501,10 @@ public class AlienScene : MonoBehaviour
     {
         if (!_modelGOs.ContainsKey(EntryIndex))
         {
-            Models.CS2.Component.LOD.Submesh submesh = LevelContent.ModelsPAK.GetAtWriteIndex(EntryIndex);
+            Models.CS2.Component.LOD.Submesh submesh = _content.ModelsPAK.GetAtWriteIndex(EntryIndex);
             if (submesh == null) return null;
-            Models.CS2.Component.LOD lod = LevelContent.ModelsPAK.FindModelLODForSubmesh(submesh);
-            Models.CS2 mesh = LevelContent.ModelsPAK.FindModelForSubmesh(submesh);
+            Models.CS2.Component.LOD lod = _content.ModelsPAK.FindModelLODForSubmesh(submesh);
+            Models.CS2 mesh = _content.ModelsPAK.FindModelForSubmesh(submesh);
             Mesh thisMesh = submesh.ToMesh();
             thisMesh.name = ((mesh == null) ? "" : mesh.Name) + ": " + ((lod == null) ? "" : lod.Name);
 
@@ -485,6 +512,9 @@ public class AlienScene : MonoBehaviour
             ThisModelPart.MainMesh = thisMesh;
             ThisModelPart.DefaultMaterial = submesh.MaterialIndex;
             _modelGOs.Add(EntryIndex, ThisModelPart);
+
+            //Save some memory! Since we won't need the raw mesh data again, we can clear it out.
+            submesh.Data = null;
         }
         return _modelGOs[EntryIndex];
     }
@@ -493,8 +523,8 @@ public class AlienScene : MonoBehaviour
     {
         if (!_materials.ContainsKey(MTLIndex))
         {
-            Materials.Material material = LevelContent.ModelsMTL.GetAtWriteIndex(MTLIndex);
-            Shaders.Shader shader = LevelContent.ShadersPAK.Entries[material.ShaderIndex];
+            Materials.Material material = _content.ModelsMTL.GetAtWriteIndex(MTLIndex);
+            Shaders.Shader shader = _content.ShadersPAK.Entries[material.ShaderIndex];
 
             Material unityMaterial = new Material(UnityEngine.Shader.Find("OpenCAGE"));
             unityMaterial.name = material.Name + " " + shader.Ubershader.ToString();
@@ -1020,9 +1050,9 @@ public class AlienScene : MonoBehaviour
                 return _texturesLevel[ptr.Index];
         }
 
-        Textures.TEX4 InTexture = (ptr.Location == TexturePtr.Source.GLOBAL ? LevelContent.TexturesPAK_GLOBAL : LevelContent.TexturesPAK).GetAtWriteIndex(ptr.Index);
+        Textures.TEX4 InTexture = (ptr.Location == TexturePtr.Source.GLOBAL ? _content.TexturesPAK_GLOBAL : _content.TexturesPAK).GetAtWriteIndex(ptr.Index);
         if (InTexture == null) return null;
-        Textures.TEX4.Texture TexPart = InTexture.TextureStreamed;
+        Textures.TEX4.Texture TexPart = InTexture.TextureStreamed == null ? InTexture.TexturePersistent : InTexture.TextureStreamed;
 
         Vector2 textureDims = new Vector2(TexPart.Width, TexPart.Height);
         if (TexPart.Content == null || TexPart.Content.Length == 0)
@@ -1104,6 +1134,12 @@ public class AlienScene : MonoBehaviour
             _texturesGlobal.Add(ptr.Index, tex);
         else
             _texturesLevel.Add(ptr.Index, tex);
+
+        //Save some memory: since we won't need to access the raw data again, lets delete it
+        if (InTexture.TextureStreamed != null)
+            InTexture.TextureStreamed.Content = null;
+        if (InTexture.TexturePersistent != null)
+            InTexture.TexturePersistent.Content = null;
 
         return tex;
     }
@@ -1478,15 +1514,12 @@ public class GameObjectHolder
     public int DefaultMaterial; 
 }
 
-public static class LevelContent
+public class LevelContent
 {
-    static LevelContent()
+    public void Load(string aiPath, string levelName)
     {
+        Reset();
 
-    }
-
-    public static void Load(string aiPath, string levelName)
-    {
         string levelPath = aiPath + "/DATA/ENV/PRODUCTION/" + levelName + "/";
         string worldPath = levelPath + "WORLD/";
         string renderablePath = levelPath + "RENDERABLE/";
@@ -1513,9 +1546,6 @@ public static class LevelContent
                 case 2:
                     ResourcesBIN = new CATHODE.Resources(worldPath + "RESOURCES.BIN");
                     break;
-                case 3:
-                    ModelsCST = File.ReadAllBytes(renderablePath + "LEVEL_MODELS.CST");
-                    break;
                 case 4:
                     ModelsMTL = new Materials(renderablePath + "LEVEL_MODELS.MTL");
                     break;
@@ -1524,6 +1554,17 @@ public static class LevelContent
                     break;
                 case 6:
                     ShadersPAK = new Shaders(renderablePath + "LEVEL_SHADERS_DX11.PAK");
+
+                    //Lets save some memory: we're not gonna use these, so might as well unload them.
+                    foreach (Shaders.Shader shader in ShadersPAK.Entries)
+                    {
+                        shader.VertexShader = null;
+                        shader.PixelShader = null;
+                        shader.HullShader = null;
+                        shader.DomainShader = null;
+                        shader.GeometryShader = null;
+                        shader.ComputeShader = null;
+                    }
                     break;
                 case 7:
                     TexturesPAK = new Textures(renderablePath + "LEVEL_TEXTURES.ALL.PAK");
@@ -1535,32 +1576,38 @@ public static class LevelContent
         });
     }
 
-    public static void Reset()
+    public void Reset()
     {
+        CommandsPAK?.Entries.Clear();
         CommandsPAK = null;
+        RenderableREDS?.Entries.Clear();
         RenderableREDS = null;
+        ResourcesBIN?.Entries.Clear();
         ResourcesBIN = null;
-        ModelsCST = null;
+        ModelsMTL?.Entries.Clear();
         ModelsMTL = null;
+        ModelsPAK?.Entries.Clear();
         ModelsPAK = null;
+        ShadersPAK?.Entries.Clear();
         ShadersPAK = null;
+        TexturesPAK?.Entries.Clear();
         TexturesPAK = null;
+        TexturesPAK_GLOBAL?.Entries.Clear();
         TexturesPAK_GLOBAL = null;
         RemappedResources.Clear();
     }
 
-    public static bool Loaded => CommandsPAK != null && CommandsPAK.Loaded;
+    public bool Loaded => CommandsPAK != null && CommandsPAK.Loaded;
 
-    public static Commands CommandsPAK;
-    public static RenderableElements RenderableREDS;
-    public static CATHODE.Resources ResourcesBIN;
-    public static byte[] ModelsCST;
-    public static Materials ModelsMTL;
-    public static Models ModelsPAK;
-    public static Shaders ShadersPAK;
-    public static Textures TexturesPAK;
-    public static Textures TexturesPAK_GLOBAL;
+    public Commands CommandsPAK;
+    public RenderableElements RenderableREDS;
+    public CATHODE.Resources ResourcesBIN;
+    public Materials ModelsMTL;
+    public Models ModelsPAK;
+    public Shaders ShadersPAK;
+    public Textures TexturesPAK;
+    public Textures TexturesPAK_GLOBAL;
 
     //This acts as a temporary override for REDS.BIN mapping runtime changes from Commands Editor
-    public static Dictionary<Entity, List<Tuple<int, int>>> RemappedResources = new Dictionary<Entity, List<Tuple<int, int>>>(); //Model Index, Material Index
+    public Dictionary<Entity, List<Tuple<int, int>>> RemappedResources = new Dictionary<Entity, List<Tuple<int, int>>>(); //Model Index, Material Index
 };

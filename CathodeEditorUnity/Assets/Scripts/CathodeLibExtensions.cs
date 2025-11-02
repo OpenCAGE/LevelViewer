@@ -31,9 +31,9 @@ public static class CathodeLibExtensions
 
         using (BinaryReader reader = new BinaryReader(new MemoryStream(submesh.Data)))
         {
-            for (int i = 0; i < submesh.VertexFormatFull.Elements.Count; ++i)
+            for (int i = 0; i < submesh.VertexFormatFull.Attributes.Count; ++i)
             {
-                if (i == submesh.VertexFormatFull.Elements.Count - 1)
+                if (i == submesh.VertexFormatFull.Attributes.Count - 1)
                 {
                     for (int x = 0; x < submesh.IndexCount; x++)
                         indices.Add(reader.ReadUInt16());
@@ -42,39 +42,39 @@ public static class CathodeLibExtensions
 
                 for (int x = 0; x < submesh.VertexCount; ++x)
                 {
-                    for (int y = 0; y < submesh.VertexFormatFull.Elements[i].Count; ++y)
+                    for (int y = 0; y < submesh.VertexFormatFull.Attributes[i].Count; ++y)
                     {
-                        AlienVBF.Element f = submesh.VertexFormatFull.Elements[i][y];
-                        Vector4 v = ReadVertexData(reader, f.Type);
+                        VertexFormat.Attribute attr = submesh.VertexFormatFull.Attributes[i][y];
+                        Vector4 v = ReadVertexData(reader, attr.Type);
 
-                        switch (f.Usage)
+                        switch (attr.Usage)
                         {
-                            case VertexFormatUsage.POSITION:
+                            case VertexFormat.Usage.Position:
                                 vertices.Add(v * submesh.VertexScale);
                                 break;
-                            case VertexFormatUsage.BLENDWEIGHT:
+                            case VertexFormat.Usage.BlendWeight:
                                 boneWeights.Add(v);
                                 break;
-                            case VertexFormatUsage.BLENDINDICES:
+                            case VertexFormat.Usage.BlendIndices:
                                 boneIndexes.Add(v);
                                 break;
-                            case VertexFormatUsage.NORMAL:
+                            case VertexFormat.Usage.Normal:
                                 normals.Add(v);
                                 break;
-                            case VertexFormatUsage.TEXCOORD:
-                                if (f.VariantIndex >= uvs.Length)
-                                    Array.Resize(ref uvs, f.VariantIndex + 1);
-                                if (uvs[f.VariantIndex] == null)
-                                    uvs[f.VariantIndex] = new List<Vector2>();
-                                uvs[f.VariantIndex].Add(v * 16.0f);
+                            case VertexFormat.Usage.TexCoord:
+                                if (attr.Index >= uvs.Length)
+                                    Array.Resize(ref uvs, attr.Index + 1);
+                                if (uvs[attr.Index] == null)
+                                    uvs[attr.Index] = new List<Vector2>();
+                                uvs[attr.Index].Add(v * 16.0f);
                                 break;
-                            case VertexFormatUsage.TANGENT:
+                            case VertexFormat.Usage.Tangent:
                                 tangents.Add(v);
                                 break;
-                            case VertexFormatUsage.BINORMAL:
+                            case VertexFormat.Usage.Binormal:
                                 binormals.Add(v);
                                 break;
-                            case VertexFormatUsage.COLOR:
+                            case VertexFormat.Usage.Color:
                                 colours.Add(v);
                                 break;
                         }
@@ -104,38 +104,38 @@ public static class CathodeLibExtensions
         return mesh;
     }
 
-    private static Vector4 ReadVertexData(BinaryReader reader, VertexFormatType type)
+    private static Vector4 ReadVertexData(BinaryReader reader, VertexFormat.Type type)
     {
         switch (type)
         {
-            case VertexFormatType.FLOAT1:
+            case VertexFormat.Type.FP32_1:
                 return new Vector4(reader.ReadSingle(), 0, 0, 0);
-            case VertexFormatType.FLOAT2:
+            case VertexFormat.Type.FP32_2:
                 return new Vector4(reader.ReadSingle(), reader.ReadSingle(), 0, 0);
-            case VertexFormatType.FLOAT3:
+            case VertexFormat.Type.FP32_3:
                 return new Vector4(reader.ReadSingle(), reader.ReadSingle(), reader.ReadSingle(), 0);
-            case VertexFormatType.FLOAT4:
+            case VertexFormat.Type.FP32_4:
                 return new Vector4(reader.ReadSingle(), reader.ReadSingle(), reader.ReadSingle(), reader.ReadSingle());
-            case VertexFormatType.COLOUR:
+            case VertexFormat.Type.Color:
                 uint data = reader.ReadUInt32();
                 return new Vector4((float)((data & 0xFF000000) >> 24) / 255.0f, (float)((data & 0x00FF0000) >> 16) / 255.0f, (float)((data & 0x0000FF00) >> 8) / 255.0f, (float)((data & 0x000000FF) >> 0) / 255.0f);
-            case VertexFormatType.UBYTE4:
+            case VertexFormat.Type.U8_4:
                 return new Vector4(reader.ReadByte(), reader.ReadByte(), reader.ReadByte(), reader.ReadByte());
-            case VertexFormatType.SHORT2:
+            case VertexFormat.Type.S16_2:
                 return new Vector4(reader.ReadInt16(), reader.ReadInt16(), 0, 0);
-            case VertexFormatType.SHORT4:
+            case VertexFormat.Type.S16_4:
                 return new Vector4(reader.ReadInt16(), reader.ReadInt16(), reader.ReadInt16(), reader.ReadInt16());
-            case VertexFormatType.UBYTE4N:
+            case VertexFormat.Type.U8_4N:
                 return new Vector4((float)reader.ReadByte() / 255.0f, (float)reader.ReadByte() / 255.0f, (float)reader.ReadByte() / 255.0f, (float)reader.ReadByte() / 255.0f);
-            case VertexFormatType.SHORT2N:
+            case VertexFormat.Type.S16_2N:
                 return new Vector4((float)reader.ReadInt16() / (float)Int16.MaxValue, (float)reader.ReadInt16() / (float)Int16.MaxValue, 0, 0);
-            case VertexFormatType.SHORT4N:
+            case VertexFormat.Type.S16_4N:
                 return new Vector4((float)reader.ReadInt16() / (float)Int16.MaxValue, (float)reader.ReadInt16() / (float)Int16.MaxValue, (float)reader.ReadInt16() / (float)Int16.MaxValue, (float)reader.ReadInt16() / (float)Int16.MaxValue);
-            case VertexFormatType.USHORT2N:
+            case VertexFormat.Type.U16_2N:
                 return new Vector4((float)reader.ReadUInt16() / (float)UInt16.MaxValue, (float)reader.ReadUInt16() / (float)UInt16.MaxValue, 0, 0);
-            case VertexFormatType.USHORT4N:
+            case VertexFormat.Type.U16_4N:
                 return new Vector4((float)reader.ReadUInt16() / (float)UInt16.MaxValue, (float)reader.ReadUInt16() / (float)UInt16.MaxValue, (float)reader.ReadUInt16() / (float)UInt16.MaxValue, (float)reader.ReadUInt16() / (float)UInt16.MaxValue);
-            case VertexFormatType.DEC3N:
+            case VertexFormat.Type.Dec3N:
                 uint val = reader.ReadUInt32();
                 short sx = (short)((val >> 20) & 0x3ff);
                 short sy = (short)((val >> 10) & 0x3ff);

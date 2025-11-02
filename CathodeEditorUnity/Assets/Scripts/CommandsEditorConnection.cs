@@ -311,10 +311,10 @@ public class CommandsEditorConnection : MonoBehaviour
             Destroy(_scene.ParentGameObject);
             Destroy(_scene);
 
+            Resources.UnloadUnusedAssets();
+			
             _scene = this.gameObject.AddComponent<AlienScene>();
             _scene.LoadLevel(_levelName, _pathToAI);
-
-            Resources.UnloadUnusedAssets();
         }
 
         if (_compositeLoaded)

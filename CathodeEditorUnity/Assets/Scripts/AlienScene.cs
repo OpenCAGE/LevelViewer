@@ -1,4 +1,5 @@
-//#define LOCAL_DEV
+#define LOCAL_DEV
+#define SAVE_ASSETS
 
 using CATHODE;
 using CATHODE.LEGACY;
@@ -41,6 +42,13 @@ public class AlienScene : MonoBehaviour
     
     private Dictionary<ShortGuid, List<GameObject>> _compositeGameObjects = new Dictionary<ShortGuid, List<GameObject>>();
     private Dictionary<GameObject, Entity> _gameObjectEntities = new Dictionary<GameObject, Entity>();
+
+#if SAVE_ASSETS && UNITY_EDITOR
+    private Dictionary<Mesh, Mesh> _runtimeMeshToAssetMap = new Dictionary<Mesh, Mesh>();
+    private Dictionary<Material, Material> _runtimeMaterialToAssetMap = new Dictionary<Material, Material>();
+    private Dictionary<Texture, Texture> _runtimeTextureToAssetMap = new Dictionary<Texture, Texture>();
+    private Dictionary<Cubemap, Cubemap> _runtimeCubemapToAssetMap = new Dictionary<Cubemap, Cubemap>();
+#endif
 
     public LevelContent Content => _content;
     private LevelContent _content = new LevelContent();
@@ -102,6 +110,13 @@ public class AlienScene : MonoBehaviour
         //        if (kvp.Key != null)
         //            Destroy(kvp.Key);
         _gameObjectEntities.Clear();
+
+#if SAVE_ASSETS && UNITY_EDITOR
+        _runtimeMeshToAssetMap.Clear();
+        _runtimeMaterialToAssetMap.Clear();
+        _runtimeTextureToAssetMap.Clear();
+        _runtimeCubemapToAssetMap.Clear();
+#endif
 
         _content.Reset();
     }
@@ -168,6 +183,13 @@ public class AlienScene : MonoBehaviour
             AddEntity(composite, entity, compositeGO);
         foreach (Entity entity in composite.proxies)
             AddEntity(composite, entity, compositeGO);
+
+#if SAVE_ASSETS && UNITY_EDITOR
+        if (_compositeGameObjects.ContainsKey(composite.shortGUID) && _compositeGameObjects[composite.shortGUID].Count == 1)
+        {
+            SaveComposite(composite, compositeGO);
+        }
+#endif
     }
 
     /* Remove all instances of a given Composite in the scene */
@@ -515,6 +537,10 @@ public class AlienScene : MonoBehaviour
 
             //Save some memory! Since we won't need the raw mesh data again, we can clear it out.
             submesh.Data = null;
+
+#if SAVE_ASSETS && UNITY_EDITOR
+            SaveMesh(EntryIndex, thisMesh, submesh.MaterialIndex);
+#endif
         }
         return _modelGOs[EntryIndex];
     }
@@ -968,6 +994,11 @@ public class AlienScene : MonoBehaviour
             _materialSupport.Add(unityMaterial, true);
             _materials.Add(MTLIndex, unityMaterial);
         }
+
+#if SAVE_ASSETS && UNITY_EDITOR
+        SaveMaterial(MTLIndex);
+#endif
+
         return _materials[MTLIndex];
     }
 
@@ -1140,6 +1171,10 @@ public class AlienScene : MonoBehaviour
             InTexture.TextureStreamed.Content = null;
         if (InTexture.TexturePersistent != null)
             InTexture.TexturePersistent.Content = null;
+
+#if SAVE_ASSETS && UNITY_EDITOR
+        SaveTexture(ptr, tex);
+#endif
 
         return tex;
     }
@@ -1504,6 +1539,948 @@ public class AlienScene : MonoBehaviour
         if (props.displacementMapping != -1)
             unityMaterial.SetFloat("_DisplacementMapping", (shader.UbershaderFeatureFlags & (1L << props.displacementMapping)) != 0 ? 1.0f : 0.0f);
     }
+
+#if SAVE_ASSETS && UNITY_EDITOR
+    private string SanitizeFileName(string fileName)
+    {
+        if (string.IsNullOrEmpty(fileName))
+            return "Unknown";
+
+        char[] invalidChars = Path.GetInvalidFileNameChars();
+        string sanitized = fileName;
+        foreach (char c in invalidChars)
+        {
+            sanitized = sanitized.Replace(c, '_');
+        }
+
+        string[] reservedNames = { "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
+                                   "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9" };
+        string upperName = sanitized.ToUpper();
+        foreach (string reserved in reservedNames)
+        {
+            if (upperName == reserved || upperName.StartsWith(reserved + "."))
+            {
+                sanitized = "_" + sanitized;
+                break;
+            }
+        }
+
+        sanitized = sanitized.Trim('.', ' ');
+        if (sanitized.Length > 200)
+        {
+            sanitized = sanitized.Substring(0, 200);
+        }
+
+        if (string.IsNullOrEmpty(sanitized))
+            return "Unknown";
+
+        return sanitized;
+    }
+
+    private string GetAssetExportPath()
+    {
+        string levelFolderName = SanitizeFileName(_levelName.Replace("/", "_").Replace("\\", "_"));
+        if (string.IsNullOrEmpty(levelFolderName))
+            levelFolderName = "UnknownLevel";
+        return Path.Combine("Assets", "ExportedAssets", levelFolderName).Replace("\\", "/");
+    }
+
+    private void SaveMesh(int meshIndex, Mesh mesh, int defaultMaterialIndex)
+    {
+        string basePath = GetAssetExportPath();
+        string meshFolder = Path.Combine(basePath, "Meshes").Replace("\\", "/");
+        
+        if (!Directory.Exists(meshFolder))
+            Directory.CreateDirectory(meshFolder);
+
+        string meshName = SanitizeFileName(mesh.name);
+        string fileName = $"Mesh_{meshIndex}_{meshName}.asset";
+        string assetPath = Path.Combine(meshFolder, fileName).Replace("\\", "/");
+
+        if (File.Exists(assetPath))
+        {
+            Mesh existingMesh = AssetDatabase.LoadAssetAtPath<Mesh>(assetPath);
+            if (existingMesh != null)
+            {
+                _runtimeMeshToAssetMap[mesh] = existingMesh;
+            }
+            return;
+        }
+
+        Mesh meshCopy = UnityEngine.Object.Instantiate(mesh);
+        AssetDatabase.CreateAsset(meshCopy, assetPath);
+        AssetDatabase.SaveAssets();
+        AssetDatabase.Refresh();
+
+        Mesh savedMeshAsset = AssetDatabase.LoadAssetAtPath<Mesh>(assetPath);
+        if (savedMeshAsset != null)
+        {
+            _runtimeMeshToAssetMap[mesh] = savedMeshAsset;
+            Debug.Log($"Saved mesh: {assetPath}");
+        }
+        else
+        {
+            _runtimeMeshToAssetMap[mesh] = meshCopy;
+            Debug.LogWarning($"Saved mesh but could not reload from AssetDatabase: {assetPath}");
+        }
+
+        if (defaultMaterialIndex != -1)
+        {
+            SaveMaterial(defaultMaterialIndex);
+        }
+    }
+
+    private void SaveMaterial(int materialIndex)
+    {
+        if (!_materials.ContainsKey(materialIndex))
+            return;
+
+        Material material = _materials[materialIndex];
+        if (material == null)
+            return;
+
+        string basePath = GetAssetExportPath();
+        string materialFolder = Path.Combine(basePath, "Materials").Replace("\\", "/");
+        
+        if (!Directory.Exists(materialFolder))
+            Directory.CreateDirectory(materialFolder);
+
+        string materialName = SanitizeFileName(material.name);
+        string fileName = $"Material_{materialIndex}_{materialName}.mat";
+        string assetPath = Path.Combine(materialFolder, fileName).Replace("\\", "/");
+
+        if (File.Exists(assetPath))
+        {
+            Material existingMaterial = AssetDatabase.LoadAssetAtPath<Material>(assetPath);
+            if (existingMaterial != null)
+            {
+                ReplaceTextureReferencesInMaterial(existingMaterial);
+                EditorUtility.SetDirty(existingMaterial);
+                AssetDatabase.SaveAssets();
+                
+                _runtimeMaterialToAssetMap[material] = existingMaterial;
+            }
+            return;
+        }
+
+        Material materialCopy = new Material(material);
+        
+        ReplaceTextureReferencesInMaterial(materialCopy);
+        
+        AssetDatabase.CreateAsset(materialCopy, assetPath);
+        AssetDatabase.SaveAssets();
+        AssetDatabase.Refresh();
+
+        Material savedMaterialAsset = AssetDatabase.LoadAssetAtPath<Material>(assetPath);
+        if (savedMaterialAsset != null)
+        {
+            ReplaceTextureReferencesInMaterial(savedMaterialAsset);
+            EditorUtility.SetDirty(savedMaterialAsset);
+            AssetDatabase.SaveAssets();
+            
+            _runtimeMaterialToAssetMap[material] = savedMaterialAsset;
+            Debug.Log($"Saved material: {assetPath}");
+        }
+        else
+        {
+            _runtimeMaterialToAssetMap[material] = materialCopy;
+            Debug.LogWarning($"Saved material but could not reload from AssetDatabase: {assetPath}");
+        }
+    }
+
+    private void SaveTexture(TexturePtr ptr, TexOrCube texOrCube)
+    {
+        if (texOrCube == null)
+            return;
+
+        bool isGlobal = ptr.Location == TexturePtr.Source.GLOBAL;
+        string basePath = GetAssetExportPath();
+        string textureSubFolder = isGlobal ? "Global" : "Level";
+        string textureFolder = Path.Combine(basePath, "Textures", textureSubFolder).Replace("\\", "/");
+        
+        if (!Directory.Exists(textureFolder))
+            Directory.CreateDirectory(textureFolder);
+
+        string textureName = "";
+        UnityEngine.Object textureAsset = null;
+
+        if (texOrCube.Texture != null)
+        {
+            textureName = SanitizeFileName(texOrCube.Texture.name);
+            if (string.IsNullOrEmpty(textureName))
+                textureName = "Texture";
+            
+            Texture2D textureCopy = UnityEngine.Object.Instantiate(texOrCube.Texture);
+            textureAsset = textureCopy;
+        }
+        else if (texOrCube.Cubemap != null)
+        {
+            textureName = SanitizeFileName(texOrCube.Cubemap.name);
+            if (string.IsNullOrEmpty(textureName))
+                textureName = "Cubemap";
+            
+            Cubemap cubemapCopy = UnityEngine.Object.Instantiate(texOrCube.Cubemap);
+            textureAsset = cubemapCopy;
+        }
+
+        if (textureAsset == null)
+            return;
+
+        string fileName = $"Texture_{ptr.Index}_{textureName}.asset";
+        string assetPath = Path.Combine(textureFolder, fileName).Replace("\\", "/");
+
+        if (File.Exists(assetPath))
+        {
+            if (texOrCube.Texture != null)
+            {
+                Texture2D existingTexture = AssetDatabase.LoadAssetAtPath<Texture2D>(assetPath);
+                if (existingTexture != null)
+                {
+                    _runtimeTextureToAssetMap[texOrCube.Texture] = existingTexture;
+                }
+            }
+            else if (texOrCube.Cubemap != null)
+            {
+                Cubemap existingCubemap = AssetDatabase.LoadAssetAtPath<Cubemap>(assetPath);
+                if (existingCubemap != null)
+                {
+                    _runtimeCubemapToAssetMap[texOrCube.Cubemap] = existingCubemap;
+                }
+            }
+            return;
+        }
+
+        AssetDatabase.CreateAsset(textureAsset, assetPath);
+        AssetDatabase.SaveAssets();
+        AssetDatabase.Refresh();
+
+        if (texOrCube.Texture != null)
+        {
+            Texture2D savedTexture = AssetDatabase.LoadAssetAtPath<Texture2D>(assetPath);
+            if (savedTexture != null)
+            {
+                _runtimeTextureToAssetMap[texOrCube.Texture] = savedTexture;
+                Debug.Log($"Saved texture: {assetPath}");
+            }
+            else
+            {
+                Debug.LogWarning($"Saved texture but could not reload from AssetDatabase: {assetPath}");
+            }
+        }
+        else if (texOrCube.Cubemap != null)
+        {
+            Cubemap savedCubemap = AssetDatabase.LoadAssetAtPath<Cubemap>(assetPath);
+            if (savedCubemap != null)
+            {
+                _runtimeCubemapToAssetMap[texOrCube.Cubemap] = savedCubemap;
+                Debug.Log($"Saved cubemap: {assetPath}");
+            }
+            else
+            {
+                Debug.LogWarning($"Saved cubemap but could not reload from AssetDatabase: {assetPath}");
+            }
+        }
+    }
+
+    private void SaveComposite(Composite composite, GameObject compositeGO)
+    {
+        if (composite == null || compositeGO == null)
+        {
+            Debug.LogWarning("SaveComposite called with null composite or GameObject");
+            return;
+        }
+
+        string basePath = GetAssetExportPath();
+        string prefabFolder = Path.Combine(basePath, "Prefabs").Replace("\\", "/");
+        
+        if (!Directory.Exists(prefabFolder))
+            Directory.CreateDirectory(prefabFolder);
+
+        string compositeName = SanitizeFileName(composite.name);
+        if (string.IsNullOrEmpty(compositeName))
+            compositeName = $"Composite_{composite.shortGUID.AsUInt32}";
+
+        string fileName = $"{compositeName}.prefab";
+        string assetPath = Path.Combine(prefabFolder, fileName).Replace("\\", "/");
+
+        Debug.Log($"Attempting to save composite prefab: {assetPath} (Composite: {composite.name}, GUID: {composite.shortGUID.AsUInt32})");
+
+        if (AssetDatabase.LoadAssetAtPath<GameObject>(assetPath) != null)
+        {
+            Debug.Log($"Composite prefab already exists in AssetDatabase, skipping: {assetPath}");
+            return;
+        }
+
+        string systemPath = Path.Combine(Application.dataPath, assetPath.Substring("Assets/".Length));
+        if (File.Exists(systemPath))
+        {
+            Debug.Log($"Composite prefab already exists on disk, skipping: {assetPath}");
+            return;
+        }
+
+        bool wasActive = compositeGO.activeSelf;
+        if (!wasActive)
+            compositeGO.SetActive(true);
+
+        if (!compositeGO.scene.IsValid())
+        {
+            Debug.LogWarning($"Cannot save prefab - GameObject '{compositeGO.name}' is not in a valid scene. Composite: {composite.name}");
+            return;
+        }
+
+        Dictionary<GameObject, HideFlags> originalHideFlags = new Dictionary<GameObject, HideFlags>();
+        StoreAndClearHideFlagsRecursive(compositeGO.transform, originalHideFlags);
+
+        Dictionary<MeshFilter, Mesh> originalMeshes = new Dictionary<MeshFilter, Mesh>();
+        Dictionary<MeshRenderer, Material> originalMaterials = new Dictionary<MeshRenderer, Material>();
+        StoreRuntimeReferencesRecursive(compositeGO.transform, originalMeshes, originalMaterials);
+
+        ReplaceRuntimeReferencesWithAssetsRecursive(compositeGO.transform);
+        FixTextureReferencesInMaterialsRecursive(compositeGO.transform);
+        SaveModifiedMaterialsRecursive(compositeGO.transform);
+        
+        AssetDatabase.SaveAssets();
+        AssetDatabase.Refresh();
+        
+        ReloadMaterialsFromAssetsRecursive(compositeGO.transform);
+        
+        EditorUtility.SetDirty(compositeGO);
+
+        if (!HasMeshesRecursive(compositeGO.transform))
+        {
+            Debug.Log($"Skipping composite prefab - no meshes found: {assetPath}");
+            return;
+        }
+
+        RemoveEmptyGameObjectsRecursive(compositeGO.transform);
+
+        if (!HasMeshesRecursive(compositeGO.transform))
+        {
+            Debug.Log($"Skipping composite prefab - no meshes found after cleanup: {assetPath}");
+            return;
+        }
+
+        try
+        {
+            GameObject prefab = PrefabUtility.SaveAsPrefabAsset(compositeGO, assetPath);
+            
+            if (prefab == null)
+            {
+                Debug.LogError($"Failed to save composite prefab: {assetPath}. PrefabUtility.SaveAsPrefabAsset returned null.");
+            }
+            else
+            {
+                AssetDatabase.SaveAssets();
+                AssetDatabase.Refresh();
+                Debug.Log($"Successfully saved composite prefab: {assetPath}");
+            }
+        }
+        catch (System.Exception e)
+        {
+            Debug.LogError($"Exception while saving composite prefab {assetPath}: {e.Message}\nStack trace: {e.StackTrace}");
+        }
+        finally
+        {
+            RestoreRuntimeReferencesRecursive(compositeGO.transform, originalMeshes, originalMaterials);
+            RestoreHideFlagsRecursive(compositeGO.transform, originalHideFlags);
+            
+            if (!wasActive)
+                compositeGO.SetActive(false);
+        }
+    }
+
+    private void StoreAndClearHideFlagsRecursive(Transform parent, Dictionary<GameObject, HideFlags> hideFlagsMap)
+    {
+        if (parent == null)
+            return;
+
+        GameObject go = parent.gameObject;
+        hideFlagsMap[go] = go.hideFlags;
+        go.hideFlags = HideFlags.None;
+
+        foreach (Transform child in parent)
+        {
+            StoreAndClearHideFlagsRecursive(child, hideFlagsMap);
+        }
+    }
+
+    private void RestoreHideFlagsRecursive(Transform parent, Dictionary<GameObject, HideFlags> hideFlagsMap)
+    {
+        if (parent == null || parent.gameObject == null)
+            return;
+
+        GameObject go = parent.gameObject;
+        if (go != null && hideFlagsMap.ContainsKey(go))
+        {
+            try
+            {
+                go.hideFlags = hideFlagsMap[go];
+            }
+            catch
+            {
+
+            }
+        }
+
+        List<Transform> children = new List<Transform>();
+        foreach (Transform child in parent)
+        {
+            children.Add(child);
+        }
+        
+        foreach (Transform child in children)
+        {
+            RestoreHideFlagsRecursive(child, hideFlagsMap);
+        }
+    }
+
+    private void StoreRuntimeReferencesRecursive(Transform parent, Dictionary<MeshFilter, Mesh> originalMeshes, Dictionary<MeshRenderer, Material> originalMaterials)
+    {
+        if (parent == null)
+            return;
+
+        MeshFilter meshFilter = parent.GetComponent<MeshFilter>();
+        if (meshFilter != null && meshFilter.sharedMesh != null)
+        {
+            originalMeshes[meshFilter] = meshFilter.sharedMesh;
+        }
+
+        MeshRenderer meshRenderer = parent.GetComponent<MeshRenderer>();
+        if (meshRenderer != null && meshRenderer.sharedMaterial != null)
+        {
+            originalMaterials[meshRenderer] = meshRenderer.sharedMaterial;
+        }
+
+        foreach (Transform child in parent)
+        {
+            StoreRuntimeReferencesRecursive(child, originalMeshes, originalMaterials);
+        }
+    }
+
+    private void RestoreRuntimeReferencesRecursive(Transform parent, Dictionary<MeshFilter, Mesh> originalMeshes, Dictionary<MeshRenderer, Material> originalMaterials)
+    {
+        if (parent == null || parent.gameObject == null)
+            return;
+
+        MeshFilter meshFilter = parent.GetComponent<MeshFilter>();
+        if (meshFilter != null && originalMeshes.ContainsKey(meshFilter))
+        {
+            try
+            {
+                meshFilter.sharedMesh = originalMeshes[meshFilter];
+            }
+            catch
+            {
+
+            }
+        }
+
+        MeshRenderer meshRenderer = parent.GetComponent<MeshRenderer>();
+        if (meshRenderer != null && originalMaterials.ContainsKey(meshRenderer))
+        {
+            try
+            {
+                meshRenderer.sharedMaterial = originalMaterials[meshRenderer];
+            }
+            catch
+            {
+
+            }
+        }
+
+        List<Transform> children = new List<Transform>();
+        foreach (Transform child in parent)
+        {
+            children.Add(child);
+        }
+        
+        foreach (Transform child in children)
+        {
+            RestoreRuntimeReferencesRecursive(child, originalMeshes, originalMaterials);
+        }
+    }
+
+    private void ReplaceRuntimeReferencesWithAssetsRecursive(Transform parent)
+    {
+        if (parent == null)
+            return;
+
+        MeshFilter meshFilter = parent.GetComponent<MeshFilter>();
+        if (meshFilter != null && meshFilter.sharedMesh != null)
+        {
+            Mesh savedMesh = FindSavedMeshAsset(meshFilter.sharedMesh);
+            if (savedMesh != null)
+            {
+                meshFilter.sharedMesh = savedMesh;
+                EditorUtility.SetDirty(meshFilter);
+            }
+        }
+
+        MeshRenderer meshRenderer = parent.GetComponent<MeshRenderer>();
+        if (meshRenderer != null)
+        {
+            if (meshRenderer.sharedMaterial != null)
+            {
+                Material savedMaterial = FindSavedMaterialAsset(meshRenderer.sharedMaterial);
+                if (savedMaterial != null)
+                {
+                    meshRenderer.sharedMaterial = savedMaterial;
+                    EditorUtility.SetDirty(meshRenderer);
+                }
+                else
+                {
+                    Debug.LogWarning($"Could not find saved material asset for: {meshRenderer.sharedMaterial.name} on GameObject: {parent.name}");
+                }
+            }
+            
+            if (meshRenderer.sharedMaterials != null && meshRenderer.sharedMaterials.Length > 0)
+            {
+                Material[] savedMaterials = new Material[meshRenderer.sharedMaterials.Length];
+                bool anyReplaced = false;
+                
+                for (int i = 0; i < meshRenderer.sharedMaterials.Length; i++)
+                {
+                    if (meshRenderer.sharedMaterials[i] != null)
+                    {
+                        Material savedMaterial = FindSavedMaterialAsset(meshRenderer.sharedMaterials[i]);
+                        if (savedMaterial != null)
+                        {
+                            savedMaterials[i] = savedMaterial;
+                            anyReplaced = true;
+                        }
+                        else
+                        {
+                            savedMaterials[i] = meshRenderer.sharedMaterials[i];
+                            Debug.LogWarning($"Could not find saved material asset for: {meshRenderer.sharedMaterials[i].name} (index {i}) on GameObject: {parent.name}");
+                        }
+                    }
+                    else
+                    {
+                        savedMaterials[i] = null;
+                    }
+                }
+                
+                if (anyReplaced)
+                {
+                    meshRenderer.sharedMaterials = savedMaterials;
+                    EditorUtility.SetDirty(meshRenderer);
+                }
+            }
+        }
+
+        foreach (Transform child in parent)
+        {
+            ReplaceRuntimeReferencesWithAssetsRecursive(child);
+        }
+    }
+
+    private Mesh FindSavedMeshAsset(Mesh runtimeMesh)
+    {
+        if (runtimeMesh == null)
+            return null;
+
+        if (_runtimeMeshToAssetMap.ContainsKey(runtimeMesh))
+        {
+            return _runtimeMeshToAssetMap[runtimeMesh];
+        }
+
+        string basePath = GetAssetExportPath();
+        string meshFolder = Path.Combine(basePath, "Meshes").Replace("\\", "/");
+        string systemMeshFolder = Path.Combine(Application.dataPath, basePath.Substring("Assets/".Length), "Meshes");
+
+        if (!Directory.Exists(systemMeshFolder))
+            return null;
+
+        string meshName = runtimeMesh.name;
+        if (string.IsNullOrEmpty(meshName))
+            return null;
+
+        AssetDatabase.Refresh();
+
+        string[] meshFiles = Directory.GetFiles(systemMeshFolder, "Mesh_*.asset");
+        foreach (string meshFile in meshFiles)
+        {
+            string assetPath = "Assets" + meshFile.Substring(Application.dataPath.Length).Replace("\\", "/");
+            Mesh mesh = AssetDatabase.LoadAssetAtPath<Mesh>(assetPath);
+            if (mesh != null && mesh.name == meshName)
+            {
+                // Cache it for future lookups
+                _runtimeMeshToAssetMap[runtimeMesh] = mesh;
+                return mesh;
+            }
+        }
+
+        return null;
+    }
+
+    private void FixTextureReferencesInMaterialsRecursive(Transform parent)
+    {
+        if (parent == null)
+            return;
+
+        MeshRenderer meshRenderer = parent.GetComponent<MeshRenderer>();
+        if (meshRenderer != null)
+        {
+            if (meshRenderer.sharedMaterial != null)
+            {
+                ReplaceTextureReferencesInMaterial(meshRenderer.sharedMaterial);
+                EditorUtility.SetDirty(meshRenderer.sharedMaterial);
+            }
+            
+            if (meshRenderer.sharedMaterials != null && meshRenderer.sharedMaterials.Length > 0)
+            {
+                foreach (Material mat in meshRenderer.sharedMaterials)
+                {
+                    if (mat != null)
+                    {
+                        ReplaceTextureReferencesInMaterial(mat);
+                        EditorUtility.SetDirty(mat);
+                    }
+                }
+            }
+        }
+
+        foreach (Transform child in parent)
+        {
+            FixTextureReferencesInMaterialsRecursive(child);
+        }
+    }
+
+    private void SaveModifiedMaterialsRecursive(Transform parent)
+    {
+        if (parent == null)
+            return;
+
+        MeshRenderer meshRenderer = parent.GetComponent<MeshRenderer>();
+        if (meshRenderer != null)
+        {
+            if (meshRenderer.sharedMaterial != null)
+            {
+                string assetPath = AssetDatabase.GetAssetPath(meshRenderer.sharedMaterial);
+                if (!string.IsNullOrEmpty(assetPath) && assetPath.StartsWith("Assets/"))
+                {
+                    EditorUtility.SetDirty(meshRenderer.sharedMaterial);
+                }
+            }
+            
+            if (meshRenderer.sharedMaterials != null && meshRenderer.sharedMaterials.Length > 0)
+            {
+                foreach (Material mat in meshRenderer.sharedMaterials)
+                {
+                    if (mat != null)
+                    {
+                        string assetPath = AssetDatabase.GetAssetPath(mat);
+                        if (!string.IsNullOrEmpty(assetPath) && assetPath.StartsWith("Assets/"))
+                        {
+                            EditorUtility.SetDirty(mat);
+                        }
+                    }
+                }
+            }
+        }
+
+        foreach (Transform child in parent)
+        {
+            SaveModifiedMaterialsRecursive(child);
+        }
+    }
+
+    private void ReloadMaterialsFromAssetsRecursive(Transform parent)
+    {
+        if (parent == null)
+            return;
+
+        MeshRenderer meshRenderer = parent.GetComponent<MeshRenderer>();
+        if (meshRenderer != null)
+        {
+            if (meshRenderer.sharedMaterial != null)
+            {
+                string assetPath = AssetDatabase.GetAssetPath(meshRenderer.sharedMaterial);
+                if (!string.IsNullOrEmpty(assetPath) && assetPath.StartsWith("Assets/"))
+                {
+                    Material reloadedMaterial = AssetDatabase.LoadAssetAtPath<Material>(assetPath);
+                    if (reloadedMaterial != null && reloadedMaterial != meshRenderer.sharedMaterial)
+                    {
+                        meshRenderer.sharedMaterial = reloadedMaterial;
+                    }
+                }
+            }
+            
+            if (meshRenderer.sharedMaterials != null && meshRenderer.sharedMaterials.Length > 0)
+            {
+                Material[] reloadedMaterials = new Material[meshRenderer.sharedMaterials.Length];
+                bool anyReloaded = false;
+                
+                for (int i = 0; i < meshRenderer.sharedMaterials.Length; i++)
+                {
+                    if (meshRenderer.sharedMaterials[i] != null)
+                    {
+                        string assetPath = AssetDatabase.GetAssetPath(meshRenderer.sharedMaterials[i]);
+                        if (!string.IsNullOrEmpty(assetPath) && assetPath.StartsWith("Assets/"))
+                        {
+                            Material reloadedMaterial = AssetDatabase.LoadAssetAtPath<Material>(assetPath);
+                            if (reloadedMaterial != null && reloadedMaterial != meshRenderer.sharedMaterials[i])
+                            {
+                                reloadedMaterials[i] = reloadedMaterial;
+                                anyReloaded = true;
+                            }
+                            else
+                            {
+                                reloadedMaterials[i] = meshRenderer.sharedMaterials[i];
+                            }
+                        }
+                        else
+                        {
+                            reloadedMaterials[i] = meshRenderer.sharedMaterials[i];
+                        }
+                    }
+                    else
+                    {
+                        reloadedMaterials[i] = null;
+                    }
+                }
+                
+                if (anyReloaded)
+                {
+                    meshRenderer.sharedMaterials = reloadedMaterials;
+                }
+            }
+        }
+
+        foreach (Transform child in parent)
+        {
+            ReloadMaterialsFromAssetsRecursive(child);
+        }
+    }
+
+    private void ReplaceTextureReferencesInMaterial(Material material)
+    {
+        if (material == null || material.shader == null)
+            return;
+
+        int propertyCount = ShaderUtil.GetPropertyCount(material.shader);
+        for (int i = 0; i < propertyCount; i++)
+        {
+            if (ShaderUtil.GetPropertyType(material.shader, i) == ShaderUtil.ShaderPropertyType.TexEnv)
+            {
+                string propertyName = ShaderUtil.GetPropertyName(material.shader, i);
+                Texture texture = material.GetTexture(propertyName);
+                
+                if (texture != null)
+                {
+                    Texture savedTexture = null;
+                    if (texture is Texture2D texture2D)
+                    {
+                        if (_runtimeTextureToAssetMap.ContainsKey(texture2D))
+                        {
+                            savedTexture = _runtimeTextureToAssetMap[texture2D];
+                        }
+                        else
+                        {
+                            savedTexture = FindSavedTextureAsset(texture2D);
+                            if (savedTexture != null)
+                            {
+                                _runtimeTextureToAssetMap[texture2D] = (Texture2D)savedTexture;
+                            }
+                        }
+                    }
+                    else if (texture is Cubemap cubemap)
+                    {
+                        if (_runtimeCubemapToAssetMap.ContainsKey(cubemap))
+                        {
+                            savedTexture = _runtimeCubemapToAssetMap[cubemap];
+                        }
+                        else
+                        {
+                            savedTexture = FindSavedCubemapAsset(cubemap);
+                            if (savedTexture != null)
+                            {
+                                _runtimeCubemapToAssetMap[cubemap] = (Cubemap)savedTexture;
+                            }
+                        }
+                    }
+                    
+                    if (savedTexture != null)
+                    {
+                        material.SetTexture(propertyName, savedTexture);
+                        
+                        string materialAssetPath = AssetDatabase.GetAssetPath(material);
+                        if (!string.IsNullOrEmpty(materialAssetPath) && materialAssetPath.StartsWith("Assets/"))
+                        {
+                            EditorUtility.SetDirty(material);
+                            AssetDatabase.SaveAssetIfDirty(material);
+                        }
+                        
+                        Debug.Log($"Replaced texture '{propertyName}' in material '{material.name}' with saved asset: {savedTexture.name}");
+                    }
+                    else
+                    {
+                        Debug.LogWarning($"Could not find saved texture asset for '{propertyName}' in material '{material.name}'. Texture name: {texture.name}");
+                    }
+                }
+            }
+        }
+    }
+
+    private Texture2D FindSavedTextureAsset(Texture2D runtimeTexture)
+    {
+        if (runtimeTexture == null)
+            return null;
+
+        string basePath = GetAssetExportPath();
+        string textureName = runtimeTexture.name;
+        if (string.IsNullOrEmpty(textureName))
+            return null;
+
+        AssetDatabase.Refresh();
+
+        string[] textureFolders = { "Global", "Level" };
+        foreach (string folderName in textureFolders)
+        {
+            string textureFolder = Path.Combine(basePath, "Textures", folderName).Replace("\\", "/");
+            string systemTextureFolder = Path.Combine(Application.dataPath, basePath.Substring("Assets/".Length), "Textures", folderName);
+            
+            if (!Directory.Exists(systemTextureFolder))
+                continue;
+
+            string[] textureFiles = Directory.GetFiles(systemTextureFolder, "Texture_*.asset");
+            
+            foreach (string textureFile in textureFiles)
+            {
+                string assetPath = "Assets" + textureFile.Substring(Application.dataPath.Length).Replace("\\", "/");
+                Texture2D texture = AssetDatabase.LoadAssetAtPath<Texture2D>(assetPath);
+                if (texture != null && texture.name == textureName)
+                {
+                    return texture;
+                }
+            }
+        }
+
+        return null;
+    }
+
+    private Cubemap FindSavedCubemapAsset(Cubemap runtimeCubemap)
+    {
+        if (runtimeCubemap == null)
+            return null;
+
+        string basePath = GetAssetExportPath();
+        string cubemapName = runtimeCubemap.name;
+        if (string.IsNullOrEmpty(cubemapName))
+            return null;
+
+        AssetDatabase.Refresh();
+
+        string[] textureFolders = { "Global", "Level" };
+        foreach (string folderName in textureFolders)
+        {
+            string textureFolder = Path.Combine(basePath, "Textures", folderName).Replace("\\", "/");
+            string systemTextureFolder = Path.Combine(Application.dataPath, basePath.Substring("Assets/".Length), "Textures", folderName);
+            
+            if (!Directory.Exists(systemTextureFolder))
+                continue;
+
+            string[] textureFiles = Directory.GetFiles(systemTextureFolder, "Texture_*.asset");
+            
+            foreach (string textureFile in textureFiles)
+            {
+                string assetPath = "Assets" + textureFile.Substring(Application.dataPath.Length).Replace("\\", "/");
+                Cubemap cubemap = AssetDatabase.LoadAssetAtPath<Cubemap>(assetPath);
+                if (cubemap != null && cubemap.name == cubemapName)
+                {
+                    return cubemap;
+                }
+            }
+        }
+
+        return null;
+    }
+
+    private Material FindSavedMaterialAsset(Material runtimeMaterial)
+    {
+        if (runtimeMaterial == null)
+            return null;
+
+        if (_runtimeMaterialToAssetMap.ContainsKey(runtimeMaterial))
+        {
+            return _runtimeMaterialToAssetMap[runtimeMaterial];
+        }
+
+        string basePath = GetAssetExportPath();
+        string materialFolder = Path.Combine(basePath, "Materials").Replace("\\", "/");
+        string systemMaterialFolder = Path.Combine(Application.dataPath, basePath.Substring("Assets/".Length), "Materials");
+
+        if (!Directory.Exists(systemMaterialFolder))
+            return null;
+
+        string materialName = runtimeMaterial.name;
+        if (string.IsNullOrEmpty(materialName))
+            return null;
+
+        AssetDatabase.Refresh();
+
+        string[] materialFiles = Directory.GetFiles(systemMaterialFolder, "Material_*.mat");
+        foreach (string materialFile in materialFiles)
+        {
+            string assetPath = "Assets" + materialFile.Substring(Application.dataPath.Length).Replace("\\", "/");
+            Material material = AssetDatabase.LoadAssetAtPath<Material>(assetPath);
+            if (material != null && material.name == materialName)
+            {
+                _runtimeMaterialToAssetMap[runtimeMaterial] = material;
+                return material;
+            }
+        }
+
+        return null;
+    }
+
+    private bool HasMeshesRecursive(Transform transform)
+    {
+        if (transform == null)
+            return false;
+
+        MeshFilter meshFilter = transform.GetComponent<MeshFilter>();
+        if (meshFilter != null && meshFilter.sharedMesh != null)
+        {
+            return true;
+        }
+
+        foreach (Transform child in transform)
+        {
+            if (HasMeshesRecursive(child))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private void RemoveEmptyGameObjectsRecursive(Transform parent)
+    {
+        if (parent == null)
+            return;
+
+        List<Transform> childrenToRemove = new List<Transform>();
+        
+        foreach (Transform child in parent)
+        {
+            RemoveEmptyGameObjectsRecursive(child);
+            if (!HasMeshesRecursive(child))
+            {
+                childrenToRemove.Add(child);
+            }
+        }
+
+        foreach (Transform childToRemove in childrenToRemove)
+        {
+            if (childToRemove != null)
+            {
+                UnityEngine.Object.DestroyImmediate(childToRemove.gameObject);
+            }
+        }
+    }
+#endif
 
 }
 

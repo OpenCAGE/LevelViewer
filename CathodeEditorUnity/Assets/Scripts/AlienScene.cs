@@ -1520,7 +1520,7 @@ public class LevelContent
     {
         Reset();
 
-        string levelPath = aiPath + "/DATA/ENV/PRODUCTION/" + levelName + "/";
+        string levelPath = aiPath + "/DATA/ENV/" + levelName + "/";
         string worldPath = levelPath + "WORLD/";
         string renderablePath = levelPath + "RENDERABLE/";
 

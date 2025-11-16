@@ -37,6 +37,8 @@ public class CommandsEditorConnection : MonoBehaviour
     private bool _movingPointed = false;
     private bool _pointedPos = false;
 
+    private bool _didLoadLevel = true;
+
     List<Tuple<int, int>> _renderable;
     private Tuple<ShortGuid, ShortGuid> _renderableEntity = null;
 
@@ -272,6 +274,14 @@ public class CommandsEditorConnection : MonoBehaviour
                     }
                     break;
                 }
+            case PacketEvent.LEVEL_LOADED:
+                {
+                    lock (_lock)
+                    {
+                        _didLoadLevel = true;
+                    }
+                    break;
+                }
         }
     }
     private void HandlePointedTransform(Packet packet, out ShortGuid entityID, out ShortGuid compositeID, EntityPath path, Composite startComposite)
@@ -305,7 +315,7 @@ public class CommandsEditorConnection : MonoBehaviour
     /* Sync any changes that happened with our Unity scene */
     private void FixedUpdate()
     {
-        if (_levelName != "" && _scene.LevelName != _levelName)
+        if (_levelName != "" && _didLoadLevel)
         {
             //NEW: Destroy everything and start again, rather than manually handling everything.
             Destroy(_scene.ParentGameObject);
@@ -315,6 +325,8 @@ public class CommandsEditorConnection : MonoBehaviour
 			
             _scene = this.gameObject.AddComponent<AlienScene>();
             _scene.LoadLevel(_levelName, _pathToAI);
+
+            _didLoadLevel = false;
         }
 
         if (_compositeLoaded)

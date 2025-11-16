@@ -513,6 +513,9 @@ public class AlienScene : MonoBehaviour
             Mesh thisMesh = submesh.ToMesh();
             thisMesh.name = ((mesh == null) ? "" : mesh.Name) + ": " + ((lod == null) ? "" : lod.Name);
 
+            //Save some memory! We won't need this again.
+            submesh.Data = null;
+
             GameObjectHolder ThisModelPart = new GameObjectHolder();
             ThisModelPart.MainMesh = thisMesh;
             ThisModelPart.DefaultMaterial = submesh.Material;
@@ -1128,16 +1131,17 @@ public class AlienScene : MonoBehaviour
                 tex.Texture.Apply();
             }
         }
-        if (ptr.Location == TexturePtr.Source.GLOBAL)
-            _texturesGlobal.Add(ptr.Texture, tex);
-        else
-            _texturesLevel.Add(ptr.Texture, tex);
 
-        //Save some memory: since we won't need to access the raw data again, lets delete it
+        //Save some memory! We won't need this again.
         if (ptr.Texture.TextureStreamed != null)
             ptr.Texture.TextureStreamed.Content = null;
         if (ptr.Texture.TexturePersistent != null)
             ptr.Texture.TexturePersistent.Content = null;
+
+        if (ptr.Location == TexturePtr.Source.GLOBAL)
+            _texturesGlobal.Add(ptr.Texture, tex);
+        else
+            _texturesLevel.Add(ptr.Texture, tex);
 
         return tex;
     }
@@ -1529,6 +1533,17 @@ public class LevelContent
         }
 
         Level = new Level(aiPath + "\\DATA\\ENV\\" + levelName, Global);
+
+        //Lets save some memory: we're not gonna use these, so might as well unload them.
+        foreach (Shaders.Shader shader in Level.Shaders.Entries)
+        {
+            shader.VertexShader = null;
+            shader.PixelShader = null;
+            shader.HullShader = null;
+            shader.DomainShader = null;
+            shader.GeometryShader = null;
+            shader.ComputeShader = null;
+        }
     }
 
     public void Reset()

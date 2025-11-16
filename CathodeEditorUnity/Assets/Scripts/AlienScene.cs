@@ -1,7 +1,6 @@
-//#define LOCAL_DEV
+#define LOCAL_DEV
 
 using CATHODE;
-using CATHODE.LEGACY;
 using CATHODE.Scripting;
 using CATHODE.Scripting.Internal;
 using CATHODE.ShaderTypes;
@@ -17,6 +16,8 @@ using System.Threading.Tasks;
 using UnityEditor;
 using UnityEngine;
 using UnityEngine.Animations;
+using UnityEngine.UIElements;
+using static CATHODE.Shaders;
 
 public class AlienScene : MonoBehaviour
 {
@@ -33,11 +34,11 @@ public class AlienScene : MonoBehaviour
     public string CompositeIDString => _loadedComposite == null || _loadedComposite.shortGUID == ShortGuid.Invalid ? "" : _loadedComposite.shortGUID.ToByteString();
     public string CompositeName => _loadedComposite == null ? "" : _loadedComposite.name;
 
-    private Dictionary<int, TexOrCube> _texturesGlobal = new Dictionary<int, TexOrCube>();
-    private Dictionary<int, TexOrCube> _texturesLevel = new Dictionary<int, TexOrCube>();
-    private Dictionary<int, Material> _materials = new Dictionary<int, Material>();
+    private Dictionary<Textures.TEX4, TexOrCube> _texturesGlobal = new Dictionary<Textures.TEX4, TexOrCube>();
+    private Dictionary<Textures.TEX4, TexOrCube> _texturesLevel = new Dictionary<Textures.TEX4, TexOrCube>();
+    private Dictionary<Materials.Material, Material> _materials = new Dictionary<Materials.Material, Material>();
     private Dictionary<Material, bool> _materialSupport = new Dictionary<Material, bool>();
-    private Dictionary<int, GameObjectHolder> _modelGOs = new Dictionary<int, GameObjectHolder>();
+    private Dictionary<Models.CS2.Component.LOD.Submesh, GameObjectHolder> _modelGOs = new Dictionary<Models.CS2.Component.LOD.Submesh, GameObjectHolder>();
     
     private Dictionary<ShortGuid, List<GameObject>> _compositeGameObjects = new Dictionary<ShortGuid, List<GameObject>>();
     private Dictionary<GameObject, Entity> _gameObjectEntities = new Dictionary<GameObject, Entity>();
@@ -77,7 +78,7 @@ public class AlienScene : MonoBehaviour
         _materials.Clear();
         _materialSupport.Clear();
 
-        foreach (KeyValuePair<int, TexOrCube> kvp in _texturesLevel)
+        foreach (KeyValuePair<Textures.TEX4, TexOrCube> kvp in _texturesLevel)
         {
             if (kvp.Value.Texture != null)
                 Destroy(kvp.Value.Texture);
@@ -86,7 +87,7 @@ public class AlienScene : MonoBehaviour
         }
         _texturesLevel.Clear();
 
-        foreach (KeyValuePair<int, GameObjectHolder> kvp in _modelGOs)
+        foreach (KeyValuePair<Models.CS2.Component.LOD.Submesh, GameObjectHolder> kvp in _modelGOs)
             kvp.Value.MainMesh.Clear();
         _modelGOs.Clear();
 
@@ -137,7 +138,7 @@ public class AlienScene : MonoBehaviour
 #endif
         _parentGameObject.isStatic = true;
 
-        Composite comp = _content.CommandsPAK.GetComposite(guid);
+        Composite comp = _content.Level.Commands.GetComposite(guid);
         Debug.Log("Loading composite " + comp?.name + "...");
         _loadedComposite = comp;
         AddCompositeInstance(comp, _parentGameObject, null);
@@ -197,7 +198,7 @@ public class AlienScene : MonoBehaviour
             {
                 if (compositeInstance != null)
                 {
-                    Composite c = _content.CommandsPAK.Entries.FirstOrDefault(o => o.shortGUID == composite);
+                    Composite c = _content.Level.Commands.Entries.FirstOrDefault(o => o.shortGUID == composite);
                     Entity e = c.GetEntityByID(entity);
                     if (c != null && e != null)
                     {
@@ -257,7 +258,7 @@ public class AlienScene : MonoBehaviour
                     FunctionEntity function = (FunctionEntity)entity;
                     if (!function.function.IsFunctionType)
                     {
-                        Composite compositeNext = _content.CommandsPAK.GetComposite(function.function);
+                        Composite compositeNext = _content.Level.Commands.GetComposite(function.function);
                         if (compositeNext != null)
                         {
                             AddCompositeInstance(compositeNext, entityGO, function);
@@ -275,7 +276,8 @@ public class AlienScene : MonoBehaviour
                                     List<Tuple<int, int>> renderableElement = _content.RemappedResources[function];
                                     for (int i = 0; i < renderableElement.Count; i++)
                                     {
-                                        CreateRenderable(entityGO, renderableElement[i].Item1, renderableElement[i].Item2);
+                                        //TODO: this will diverge upon saves of commands editor
+                                        CreateRenderable(entityGO, _content.Level.Models.GetAtWriteIndex(renderableElement[i].Item1), _content.Level.Materials.GetAtWriteIndex(renderableElement[i].Item2));
                                     }
                                 }
                                 else
@@ -288,11 +290,7 @@ public class AlienScene : MonoBehaviour
                                         ResourceReference renderable = resource.GetResource(ResourceType.RENDERABLE_INSTANCE);
                                         if (renderable != null)
                                         {
-                                            for (int i = 0; i < renderable.count; i++)
-                                            {
-                                                RenderableElements.Element renderableElement = _content.RenderableREDS.Entries[renderable.index + i];
-                                                CreateRenderable(entityGO, renderableElement.ModelIndex, renderableElement.MaterialIndex);
-                                            }
+                                            CreateRenderableInstance(entityGO, renderable.RenderableInstance);
                                         }
                                     }
                                 }
@@ -435,7 +433,8 @@ public class AlienScene : MonoBehaviour
                             }
                             for (int x = 0; x < renderables.Count; x++)
                             {
-                                CreateRenderable(child.gameObject, renderables[x].Item1, renderables[x].Item2);
+                                //TODO: this will diverge upon saves of commands editor
+                                CreateRenderable(child.gameObject, _content.Level.Models.GetAtWriteIndex(renderables[x].Item1), _content.Level.Materials.GetAtWriteIndex(renderables[x].Item2));
                             }
                         }
                     }
@@ -444,36 +443,44 @@ public class AlienScene : MonoBehaviour
         }
     }
 
-    private void CreateRenderable(GameObject parent, int modelIndex, int materialIndex)
+    private void CreateRenderableInstance(GameObject parent, List<RenderableElements.Element> elements)
     {
-        GameObjectHolder holder = GetModel(modelIndex);
+        for (int i = 0; i < elements.Count; i++)
+        {
+            CreateRenderable(parent, elements[i].Model, elements[i].Material);
+        }
+    }
+
+    private void CreateRenderable(GameObject parent, Models.CS2.Component.LOD.Submesh submesh, Materials.Material material)
+    {
+        GameObjectHolder holder = GetModel(submesh);
         if (holder == null)
         {
-            Debug.Log("Attempted to load non-parsed model (" + modelIndex + "). Skipping!");
+            Debug.Log("Attempted to load non-parsed model. Skipping!");
             return;
         }
 
-        Material material = GetMaterial((materialIndex == -1) ? holder.DefaultMaterial : materialIndex);
-        if (!_materialSupport[material])
+        Material unityMaterial = GetMaterial(material);
+        if (!_materialSupport[unityMaterial])
             return;
 
         GameObject newModelSpawn = new GameObject();
         newModelSpawn.transform.parent = parent.transform;
         newModelSpawn.transform.localPosition = Vector3.zero;
         newModelSpawn.transform.localRotation = Quaternion.identity;
-        newModelSpawn.name = holder.MainMesh.name + " (" + material.name + ")";
+        newModelSpawn.name = holder.MainMesh.name + " (" + unityMaterial.name + ")";
         newModelSpawn.AddComponent<MeshFilter>().sharedMesh = holder.MainMesh;
 #if !LOCAL_DEV
         newModelSpawn.hideFlags = HideFlags.NotEditable | HideFlags.HideInHierarchy;
 #endif
 
         MeshRenderer renderer = newModelSpawn.AddComponent<MeshRenderer>();
-        renderer.sharedMaterial = material;
+        renderer.sharedMaterial = unityMaterial;
         renderer.reflectionProbeUsage = UnityEngine.Rendering.ReflectionProbeUsage.Off;
         renderer.lightProbeUsage = UnityEngine.Rendering.LightProbeUsage.Off;
         renderer.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
         renderer.receiveShadows = false;
-        newModelSpawn.SetActive(_materialSupport[material]);
+        newModelSpawn.SetActive(_materialSupport[unityMaterial]);
     }
 
     private bool GetEntityTransform(Entity entity, out Vector3 position, out Vector3 rotation)
@@ -497,42 +504,34 @@ public class AlienScene : MonoBehaviour
         return false;
     }
 
-    private GameObjectHolder GetModel(int EntryIndex)
+    private GameObjectHolder GetModel(Models.CS2.Component.LOD.Submesh submesh)
     {
-        if (!_modelGOs.ContainsKey(EntryIndex))
+        if (!_modelGOs.ContainsKey(submesh))
         {
-            Models.CS2.Component.LOD.Submesh submesh = _content.ModelsPAK.GetAtWriteIndex(EntryIndex);
-            if (submesh == null) return null;
-            Models.CS2.Component.LOD lod = _content.ModelsPAK.FindModelLODForSubmesh(submesh);
-            Models.CS2 mesh = _content.ModelsPAK.FindModelForSubmesh(submesh);
+            Models.CS2.Component.LOD lod = _content.Level.Models.FindModelLODForSubmesh(submesh);
+            Models.CS2 mesh = _content.Level.Models.FindModelForSubmesh(submesh);
             Mesh thisMesh = submesh.ToMesh();
             thisMesh.name = ((mesh == null) ? "" : mesh.Name) + ": " + ((lod == null) ? "" : lod.Name);
 
             GameObjectHolder ThisModelPart = new GameObjectHolder();
             ThisModelPart.MainMesh = thisMesh;
-            ThisModelPart.DefaultMaterial = submesh.MaterialIndex;
-            _modelGOs.Add(EntryIndex, ThisModelPart);
-
-            //Save some memory! Since we won't need the raw mesh data again, we can clear it out.
-            submesh.Data = null;
+            ThisModelPart.DefaultMaterial = submesh.Material;
+            _modelGOs.Add(submesh, ThisModelPart);
         }
-        return _modelGOs[EntryIndex];
+        return _modelGOs[submesh];
     }
 
-    private Material GetMaterial(int MTLIndex)
+    private Material GetMaterial(Materials.Material material)
     {
-        if (!_materials.ContainsKey(MTLIndex))
+        if (!_materials.ContainsKey(material))
         {
-            Materials.Material material = _content.ModelsMTL.GetAtWriteIndex(MTLIndex);
-            Shaders.Shader shader = _content.ShadersPAK.Entries[material.ShaderIndex];
-
             Material unityMaterial = new Material(UnityEngine.Shader.Find("OpenCAGE"));
-            unityMaterial.name = material.Name + " " + shader.Ubershader.ToString();
+            unityMaterial.name = material.Name + " " + material.Shader.Ubershader.ToString();
 
-            switch (shader.Ubershader)
+            switch (material.Shader.Ubershader)
             {
                 case SHADER_LIST.CA_ENVIRONMENT:
-                    UpdateMaterial(material, shader, unityMaterial, new MaterialProps()
+                    UpdateMaterial(material, material.Shader, unityMaterial, new MaterialProps()
                     {
                         separateAlphaMap = (int)CA_ENVIRONMENT.SAMPLERS.SEPARATE_ALPHA_MAP,
                         diffuseMap = (int)CA_ENVIRONMENT.SAMPLERS.DIFFUSE_MAP,
@@ -639,15 +638,15 @@ public class AlienScene : MonoBehaviour
                         phongTessellation = (int)CA_ENVIRONMENT.FEATURES.PHONG_TESSELLATION,
                         displacementMapping = (int)CA_ENVIRONMENT.FEATURES.DISPLACEMENT_MAPPING,
                         transparent =
-                            (shader.UbershaderFeatureFlags & (1L << (int)CA_ENVIRONMENT.FEATURES.ALPHA_TEST)) != 0 ||
-                            (shader.UbershaderFeatureFlags & (1L << (int)CA_ENVIRONMENT.FEATURES.FORCE_TO_ALPHA)) != 0 ||
-                            (shader.UbershaderFeatureFlags & (1L << (int)CA_ENVIRONMENT.FEATURES.GLASS)) != 0 ||
-                            (shader.UbershaderFeatureFlags & (1L << (int)CA_ENVIRONMENT.FEATURES.ALPHABLEND_NOISE)) != 0 ||
-                            (shader.UbershaderFeatureFlags & (1L << (int)CA_ENVIRONMENT.FEATURES.SEPARATE_ALPHA)) != 0
+                            (material.Shader.UbershaderFeatureFlags & (1L << (int)CA_ENVIRONMENT.FEATURES.ALPHA_TEST)) != 0 ||
+                            (material.Shader.UbershaderFeatureFlags & (1L << (int)CA_ENVIRONMENT.FEATURES.FORCE_TO_ALPHA)) != 0 ||
+                            (material.Shader.UbershaderFeatureFlags & (1L << (int)CA_ENVIRONMENT.FEATURES.GLASS)) != 0 ||
+                            (material.Shader.UbershaderFeatureFlags & (1L << (int)CA_ENVIRONMENT.FEATURES.ALPHABLEND_NOISE)) != 0 ||
+                            (material.Shader.UbershaderFeatureFlags & (1L << (int)CA_ENVIRONMENT.FEATURES.SEPARATE_ALPHA)) != 0
                     });
                     break;
                 case SHADER_LIST.CA_DECAL_ENVIRONMENT:
-                    UpdateMaterial(material, shader, unityMaterial, new MaterialProps()
+                    UpdateMaterial(material, material.Shader, unityMaterial, new MaterialProps()
                     {
                         diffuseMap = (int)CA_DECAL_ENVIRONMENT.SAMPLERS.DIFFUSE_MAP,
                         separateAlphaMap = (int)CA_DECAL_ENVIRONMENT.SAMPLERS.SEPARATE_ALPHA_MAP,
@@ -667,7 +666,7 @@ public class AlienScene : MonoBehaviour
                     });
                     break;
                 case SHADER_LIST.CA_CHARACTER:
-                    UpdateMaterial(material, shader, unityMaterial, new MaterialProps()
+                    UpdateMaterial(material, material.Shader, unityMaterial, new MaterialProps()
                     {
                         diffuseMap = (int)CA_CHARACTER.SAMPLERS.DIFFUSE_MAP,
                         separateAlphaMap = (int)CA_CHARACTER.SAMPLERS.SEPARATE_ALPHA_MAP,
@@ -684,14 +683,14 @@ public class AlienScene : MonoBehaviour
                         separateAlpha = (int)CA_CHARACTER.FEATURES.SEPARATE_ALPHA,
                         separateAlphaUseGreen = (int)CA_CHARACTER.FEATURES.SEPARATE_ALPHA_MAP_USE_GREEN_CHANNEL,
                         transparent =
-                            (shader.UbershaderFeatureFlags & (1L << (int)CA_CHARACTER.FEATURES.ALPHA_TEST)) != 0 ||
-                            (shader.UbershaderFeatureFlags & (1L << (int)CA_CHARACTER.FEATURES.FORCE_TO_ALPHA)) != 0 ||
-                            (shader.UbershaderFeatureFlags & (1L << (int)CA_CHARACTER.FEATURES.ALPHABLEND_NOISE)) != 0 ||
-                            (shader.UbershaderFeatureFlags & (1L << (int)CA_CHARACTER.FEATURES.SEPARATE_ALPHA)) != 0
+                            (material.Shader.UbershaderFeatureFlags & (1L << (int)CA_CHARACTER.FEATURES.ALPHA_TEST)) != 0 ||
+                            (material.Shader.UbershaderFeatureFlags & (1L << (int)CA_CHARACTER.FEATURES.FORCE_TO_ALPHA)) != 0 ||
+                            (material.Shader.UbershaderFeatureFlags & (1L << (int)CA_CHARACTER.FEATURES.ALPHABLEND_NOISE)) != 0 ||
+                            (material.Shader.UbershaderFeatureFlags & (1L << (int)CA_CHARACTER.FEATURES.SEPARATE_ALPHA)) != 0
                     });
                     break;
                 case SHADER_LIST.CA_SKIN:
-                    UpdateMaterial(material, shader, unityMaterial, new MaterialProps()
+                    UpdateMaterial(material, material.Shader, unityMaterial, new MaterialProps()
                     {
                         diffuseMap = (int)CA_SKIN.SAMPLERS.DIFFUSE_MAP,
                         normalMap = (int)CA_SKIN.SAMPLERS.NORMAL_MAP,
@@ -703,7 +702,7 @@ public class AlienScene : MonoBehaviour
                     });
                     break;
                 case SHADER_LIST.CA_HAIR:
-                    UpdateMaterial(material, shader, unityMaterial, new MaterialProps()
+                    UpdateMaterial(material, material.Shader, unityMaterial, new MaterialProps()
                     {
                         diffuseMap = (int)CA_HAIR.SAMPLERS.DIFFUSE_MAP,
                         normalMap = (int)CA_HAIR.SAMPLERS.NORMAL_MAP,
@@ -715,7 +714,7 @@ public class AlienScene : MonoBehaviour
                     });
                     break;
                 case SHADER_LIST.CA_EYE:
-                    UpdateMaterial(material, shader, unityMaterial, new MaterialProps()
+                    UpdateMaterial(material, material.Shader, unityMaterial, new MaterialProps()
                     {
                         diffuseMap = (int)CA_EYE.SAMPLERS.IRIS_MAP,
                         normalMap = (int)CA_EYE.SAMPLERS.NORMAL_MAP,
@@ -725,7 +724,7 @@ public class AlienScene : MonoBehaviour
                     });
                     break;
                 case SHADER_LIST.CA_SKIN_OCCLUSION:
-                    UpdateMaterial(material, shader, unityMaterial, new MaterialProps()
+                    UpdateMaterial(material, material.Shader, unityMaterial, new MaterialProps()
                     {
                         diffuseMap = (int)CA_SKIN_OCCLUSION.SAMPLERS.DIFFUSE_MAP,
                         diffuseUvMult = (int)CA_SKIN_OCCLUSION.PARAMETERS.DIFFUSE_UV_MULT,
@@ -734,7 +733,7 @@ public class AlienScene : MonoBehaviour
                     break;
                 /*
                 case SHADER_LIST.CA_DECAL:
-                    UpdateMaterial(material, shader, unityMaterial, new MaterialProps()
+                    UpdateMaterial(material, material.Shader, unityMaterial, new MaterialProps()
                     {
                         diffuseMap = (int)CA_DECAL.SAMPLERS.DIFFUSE_MAP,
                         separateAlphaMap = (int)CA_DECAL.SAMPLERS.SEPARATE_ALPHA_MAP,
@@ -747,26 +746,26 @@ public class AlienScene : MonoBehaviour
                     });
                     break;
                 case SHADER_LIST.CA_FOGPLANE:
-                    UpdateMaterial(material, shader, unityMaterial, new MaterialProps()
+                    UpdateMaterial(material, material.Shader, unityMaterial, new MaterialProps()
                     {
                         diffuseMap = (int)CA_FOGPLANE.SAMPLERS.DIFFUSE_MAP_0,
                         transparent = true
                     });
                     break;
                 case SHADER_LIST.CA_FOGSPHERE:
-                    UpdateMaterial(material, shader, unityMaterial, new MaterialProps()
+                    UpdateMaterial(material, material.Shader, unityMaterial, new MaterialProps()
                     {
                         transparent = true
                     });
                     break;
                 case SHADER_LIST.CA_DEBUG:
-                    UpdateMaterial(material, shader, unityMaterial, new MaterialProps()
+                    UpdateMaterial(material, material.Shader, unityMaterial, new MaterialProps()
                     {
                         diffuseTint = (int)CA_DEBUG.PARAMETERS.COLOUR_TINT
                     });
                     break;
                 case SHADER_LIST.CA_EFFECT:
-                    UpdateMaterial(material, shader, unityMaterial, new MaterialProps()
+                    UpdateMaterial(material, material.Shader, unityMaterial, new MaterialProps()
                     {
                         diffuseMap = (int)CA_EFFECT.SAMPLERS.DIFFUSE_MAP_0,
                         diffuseTint = (int)CA_EFFECT.PARAMETERS.COLOUR_TINT,
@@ -774,7 +773,7 @@ public class AlienScene : MonoBehaviour
                     });
                     break;
                 case SHADER_LIST.CA_LIQUID_ENVIRONMENT:
-                    UpdateMaterial(material, shader, unityMaterial, new MaterialProps()
+                    UpdateMaterial(material, material.Shader, unityMaterial, new MaterialProps()
                     {
                         normalMap = (int)CA_LIQUID_ENVIRONMENT.SAMPLERS.NORMAL_MAP,
                         normalUvMult = (int)CA_LIQUID_ENVIRONMENT.PARAMETERS.ENVIRONMENT_MAP_MULT,
@@ -784,7 +783,7 @@ public class AlienScene : MonoBehaviour
                     });
                     break;
                 case SHADER_LIST.CA_LIQUID_CHARACTER:
-                    UpdateMaterial(material, shader, unityMaterial, new MaterialProps()
+                    UpdateMaterial(material, material.Shader, unityMaterial, new MaterialProps()
                     {
                         normalMap = (int)CA_LIQUID_CHARACTER.SAMPLERS.NORMAL_MAP,
                         normalUvMult = (int)CA_LIQUID_CHARACTER.PARAMETERS.ENVIRONMENT_MAP_MULT,
@@ -794,7 +793,7 @@ public class AlienScene : MonoBehaviour
                     });
                     break;
                 case SHADER_LIST.CA_REFRACTION:
-                    UpdateMaterial(material, shader, unityMaterial, new MaterialProps()
+                    UpdateMaterial(material, material.Shader, unityMaterial, new MaterialProps()
                     {
                         normalMap = (int)CA_REFRACTION.SAMPLERS.NORMAL_MAP,
                         normalMapping = (int)CA_REFRACTION.FEATURES.SECONDARY_NORMAL_MAPPING,
@@ -802,7 +801,7 @@ public class AlienScene : MonoBehaviour
                     });
                     break;
                 case SHADER_LIST.CA_SIMPLE_REFRACTION:
-                    UpdateMaterial(material, shader, unityMaterial, new MaterialProps()
+                    UpdateMaterial(material, material.Shader, unityMaterial, new MaterialProps()
                     {
                         normalMap = (int)CA_SIMPLE_REFRACTION.SAMPLERS.NORMAL_MAP,
                         normalMapping = (int)CA_SIMPLE_REFRACTION.FEATURES.SECONDARY_NORMAL_MAPPING,
@@ -811,13 +810,13 @@ public class AlienScene : MonoBehaviour
                     break;
                 */
                 case SHADER_LIST.CA_SKYDOME:
-                    UpdateMaterial(material, shader, unityMaterial, new MaterialProps()
+                    UpdateMaterial(material, material.Shader, unityMaterial, new MaterialProps()
                     {
                         diffuseMap = (int)CA_SKYDOME.SAMPLERS.SKYDOME_MAP
                     });
                     break;
                 case SHADER_LIST.CA_SURFACE_EFFECTS:
-                    UpdateMaterial(material, shader, unityMaterial, new MaterialProps()
+                    UpdateMaterial(material, material.Shader, unityMaterial, new MaterialProps()
                     {
                         diffuseMap = (int)CA_SURFACE_EFFECTS.SAMPLERS.DIFFUSE_MAP,
                         normalMap = (int)CA_SURFACE_EFFECTS.SAMPLERS.NORMAL_MAP,
@@ -830,13 +829,13 @@ public class AlienScene : MonoBehaviour
                         emissive = (int)CA_SURFACE_EFFECTS.FEATURES.EMISSIVE,
                         normalMapping = (int)CA_SURFACE_EFFECTS.FEATURES.NORMAL_MAPPING,
                         transparent =
-                            (shader.UbershaderFeatureFlags & (1L << (int)CA_SURFACE_EFFECTS.FEATURES.ALPHA_TEST)) != 0 ||
-                            (shader.UbershaderFeatureFlags & (1L << (int)CA_SURFACE_EFFECTS.FEATURES.FORCE_TO_ALPHA)) != 0 ||
-                            (shader.UbershaderFeatureFlags & (1L << (int)CA_SURFACE_EFFECTS.FEATURES.ALPHA_LIGHTING)) != 0
+                            (material.Shader.UbershaderFeatureFlags & (1L << (int)CA_SURFACE_EFFECTS.FEATURES.ALPHA_TEST)) != 0 ||
+                            (material.Shader.UbershaderFeatureFlags & (1L << (int)CA_SURFACE_EFFECTS.FEATURES.FORCE_TO_ALPHA)) != 0 ||
+                            (material.Shader.UbershaderFeatureFlags & (1L << (int)CA_SURFACE_EFFECTS.FEATURES.ALPHA_LIGHTING)) != 0
                     });
                     break;
                 case SHADER_LIST.CA_EFFECT_OVERLAY:
-                    UpdateMaterial(material, shader, unityMaterial, new MaterialProps()
+                    UpdateMaterial(material, material.Shader, unityMaterial, new MaterialProps()
                     {
                         diffuseMap = (int)CA_EFFECT_OVERLAY.SAMPLERS.TEXTURE_MAP,
                         diffuseTint = (int)CA_EFFECT_OVERLAY.PARAMETERS.COLOUR_TINT,
@@ -844,7 +843,7 @@ public class AlienScene : MonoBehaviour
                     });
                     break;
                 case SHADER_LIST.CA_TERRAIN:
-                    UpdateMaterial(material, shader, unityMaterial, new MaterialProps()
+                    UpdateMaterial(material, material.Shader, unityMaterial, new MaterialProps()
                     {
                         diffuseMap = (int)CA_TERRAIN.SAMPLERS.DIFFUSE_MAP,
                         normalMap = (int)CA_TERRAIN.SAMPLERS.NORMAL_MAP,
@@ -855,7 +854,7 @@ public class AlienScene : MonoBehaviour
                     });
                     break;
                 case SHADER_LIST.CA_NONINTERACTIVE_WATER:
-                    UpdateMaterial(material, shader, unityMaterial, new MaterialProps()
+                    UpdateMaterial(material, material.Shader, unityMaterial, new MaterialProps()
                     {
                         normalMap = (int)CA_NONINTERACTIVE_WATER.SAMPLERS.NORMAL_MAP,
                         normalUvMult = (int)CA_NONINTERACTIVE_WATER.PARAMETERS.ENVIRONMENT_MAP_MULT,
@@ -864,7 +863,7 @@ public class AlienScene : MonoBehaviour
                     });
                     break;
                 case SHADER_LIST.CA_SIMPLEWATER:
-                    UpdateMaterial(material, shader, unityMaterial, new MaterialProps()
+                    UpdateMaterial(material, material.Shader, unityMaterial, new MaterialProps()
                     {
                         normalMap = (int)CA_SIMPLEWATER.SAMPLERS.NORMAL_MAP,
                         normalUvMult = (int)CA_SIMPLEWATER.PARAMETERS.ENVIRONMENT_MAP_MULT,
@@ -873,14 +872,14 @@ public class AlienScene : MonoBehaviour
                     });
                     break;
                 case SHADER_LIST.CA_PLANET:
-                    UpdateMaterial(material, shader, unityMaterial, new MaterialProps()
+                    UpdateMaterial(material, material.Shader, unityMaterial, new MaterialProps()
                     {
                         diffuseMap = (int)CA_PLANET.SAMPLERS.ATMOSPHERE_MAP,
                         diffuseTint = (int)CA_PLANET.PARAMETERS.ATMOSPHERE_RIM_COLOUR
                     });
                     break;
                 case SHADER_LIST.CA_LIGHTMAP_ENVIRONMENT:
-                    UpdateMaterial(material, shader, unityMaterial, new MaterialProps()
+                    UpdateMaterial(material, material.Shader, unityMaterial, new MaterialProps()
                     {
                         diffuseMap = (int)CA_LIGHTMAP_ENVIRONMENT.SAMPLERS.DIFFUSE_MAP,
                         separateAlphaMap = (int)CA_LIGHTMAP_ENVIRONMENT.SAMPLERS.SEPARATE_ALPHA_MAP,
@@ -897,14 +896,14 @@ public class AlienScene : MonoBehaviour
                         separateAlpha = (int)CA_LIGHTMAP_ENVIRONMENT.FEATURES.SEPARATE_ALPHA,
                         separateAlphaUseGreen = (int)CA_LIGHTMAP_ENVIRONMENT.FEATURES.SEPARATE_ALPHA_MAP_USE_GREEN_CHANNEL,
                         transparent =
-                            (shader.UbershaderFeatureFlags & (1L << (int)CA_LIGHTMAP_ENVIRONMENT.FEATURES.ALPHA_TEST)) != 0 ||
-                            (shader.UbershaderFeatureFlags & (1L << (int)CA_LIGHTMAP_ENVIRONMENT.FEATURES.FORCE_TO_ALPHA)) != 0 ||
-                            (shader.UbershaderFeatureFlags & (1L << (int)CA_LIGHTMAP_ENVIRONMENT.FEATURES.ALPHABLEND_NOISE)) != 0 ||
-                            (shader.UbershaderFeatureFlags & (1L << (int)CA_LIGHTMAP_ENVIRONMENT.FEATURES.SEPARATE_ALPHA)) != 0
+                            (material.Shader.UbershaderFeatureFlags & (1L << (int)CA_LIGHTMAP_ENVIRONMENT.FEATURES.ALPHA_TEST)) != 0 ||
+                            (material.Shader.UbershaderFeatureFlags & (1L << (int)CA_LIGHTMAP_ENVIRONMENT.FEATURES.FORCE_TO_ALPHA)) != 0 ||
+                            (material.Shader.UbershaderFeatureFlags & (1L << (int)CA_LIGHTMAP_ENVIRONMENT.FEATURES.ALPHABLEND_NOISE)) != 0 ||
+                            (material.Shader.UbershaderFeatureFlags & (1L << (int)CA_LIGHTMAP_ENVIRONMENT.FEATURES.SEPARATE_ALPHA)) != 0
                     });
                     break;
                 case SHADER_LIST.CA_STREAMER:
-                    UpdateMaterial(material, shader, unityMaterial, new MaterialProps()
+                    UpdateMaterial(material, material.Shader, unityMaterial, new MaterialProps()
                     {
                         diffuseMap = (int)CA_STREAMER.SAMPLERS.DIFFUSE_MAP,
                         separateAlphaMap = (int)CA_STREAMER.SAMPLERS.SEPARATE_ALPHA_MAP,
@@ -921,14 +920,14 @@ public class AlienScene : MonoBehaviour
                         separateAlpha = (int)CA_STREAMER.FEATURES.SEPARATE_ALPHA,
                         separateAlphaUseGreen = (int)CA_STREAMER.FEATURES.SEPARATE_ALPHA_MAP_USE_GREEN_CHANNEL,
                         transparent =
-                            (shader.UbershaderFeatureFlags & (1L << (int)CA_STREAMER.FEATURES.ALPHA_TEST)) != 0 ||
-                            (shader.UbershaderFeatureFlags & (1L << (int)CA_STREAMER.FEATURES.FORCE_TO_ALPHA)) != 0 ||
-                            (shader.UbershaderFeatureFlags & (1L << (int)CA_STREAMER.FEATURES.ALPHABLEND_NOISE)) != 0 ||
-                            (shader.UbershaderFeatureFlags & (1L << (int)CA_STREAMER.FEATURES.SEPARATE_ALPHA)) != 0
+                            (material.Shader.UbershaderFeatureFlags & (1L << (int)CA_STREAMER.FEATURES.ALPHA_TEST)) != 0 ||
+                            (material.Shader.UbershaderFeatureFlags & (1L << (int)CA_STREAMER.FEATURES.FORCE_TO_ALPHA)) != 0 ||
+                            (material.Shader.UbershaderFeatureFlags & (1L << (int)CA_STREAMER.FEATURES.ALPHABLEND_NOISE)) != 0 ||
+                            (material.Shader.UbershaderFeatureFlags & (1L << (int)CA_STREAMER.FEATURES.SEPARATE_ALPHA)) != 0
                     });
                     break;
                 case SHADER_LIST.CA_LOW_LOD_CHARACTER:
-                    UpdateMaterial(material, shader, unityMaterial, new MaterialProps()
+                    UpdateMaterial(material, material.Shader, unityMaterial, new MaterialProps()
                     {
                         diffuseMap = (int)CA_LOW_LOD_CHARACTER.SAMPLERS.DIFFUSE_MAP,
                         normalMap = (int)CA_LOW_LOD_CHARACTER.SAMPLERS.NORMAL_MAP,
@@ -938,12 +937,12 @@ public class AlienScene : MonoBehaviour
                         diffuseTint = (int)CA_LOW_LOD_CHARACTER.PARAMETERS.DIFFUSE_TINT,
                         normalMapping = (int)CA_LOW_LOD_CHARACTER.FEATURES.NORMAL_MAPPING,
                         transparent =
-                            (shader.UbershaderFeatureFlags & (1L << (int)CA_LOW_LOD_CHARACTER.FEATURES.ALPHA_TEST)) != 0 ||
-                            (shader.UbershaderFeatureFlags & (1L << (int)CA_LOW_LOD_CHARACTER.FEATURES.FORCE_TO_ALPHA)) != 0
+                            (material.Shader.UbershaderFeatureFlags & (1L << (int)CA_LOW_LOD_CHARACTER.FEATURES.ALPHA_TEST)) != 0 ||
+                            (material.Shader.UbershaderFeatureFlags & (1L << (int)CA_LOW_LOD_CHARACTER.FEATURES.FORCE_TO_ALPHA)) != 0
                     });
                     break;
                 case SHADER_LIST.CA_SPACESUIT_VISOR:
-                    UpdateMaterial(material, shader, unityMaterial, new MaterialProps()
+                    UpdateMaterial(material, material.Shader, unityMaterial, new MaterialProps()
                     {
                         normalMap = (int)CA_SPACESUIT_VISOR.SAMPLERS.NORMAL_MAP,
                         normalUvMult = (int)CA_SPACESUIT_VISOR.PARAMETERS.NORMAL_MAP_MULT,
@@ -953,7 +952,7 @@ public class AlienScene : MonoBehaviour
                     });
                     break;
                 case SHADER_LIST.CA_CAMERA_MAP:
-                    UpdateMaterial(material, shader, unityMaterial, new MaterialProps()
+                    UpdateMaterial(material, material.Shader, unityMaterial, new MaterialProps()
                     {
                         diffuseMap = (int)CA_CAMERA_MAP.SAMPLERS.DIFFUSE_MAP
                     });
@@ -961,14 +960,14 @@ public class AlienScene : MonoBehaviour
                 default:
                     unityMaterial.name += " (NOT RENDERED)";
                     _materialSupport.Add(unityMaterial, false);
-                    _materials.Add(MTLIndex, unityMaterial);
+                    _materials.Add(material, unityMaterial);
                     return unityMaterial;
             }
 
             _materialSupport.Add(unityMaterial, true);
-            _materials.Add(MTLIndex, unityMaterial);
+            _materials.Add(material, unityMaterial);
         }
-        return _materials[MTLIndex];
+        return _materials[material];
     }
 
     private float GetShaderFloat(Shaders.Shader shader, Materials.Material material, int index, float fallback = 0.0f)
@@ -1041,18 +1040,17 @@ public class AlienScene : MonoBehaviour
 
     private TexOrCube GetTexOrCube(TexturePtr ptr)
     {
-        if (!((ptr.Location == TexturePtr.Source.GLOBAL && !_texturesGlobal.ContainsKey(ptr.Index)) || 
-              (ptr.Location == TexturePtr.Source.LEVEL && !_texturesLevel.ContainsKey(ptr.Index))))
+        if (!((ptr.Location == TexturePtr.Source.GLOBAL && !_texturesGlobal.ContainsKey(ptr.Texture)) || 
+              (ptr.Location == TexturePtr.Source.LEVEL && !_texturesLevel.ContainsKey(ptr.Texture))))
         {
             if (ptr.Location == TexturePtr.Source.GLOBAL)
-                return _texturesGlobal[ptr.Index];
+                return _texturesGlobal[ptr.Texture];
             else
-                return _texturesLevel[ptr.Index];
+                return _texturesLevel[ptr.Texture];
         }
 
-        Textures.TEX4 InTexture = (ptr.Location == TexturePtr.Source.GLOBAL ? _content.TexturesPAK_GLOBAL : _content.TexturesPAK).GetAtWriteIndex(ptr.Index);
-        if (InTexture == null) return null;
-        Textures.TEX4.Texture TexPart = InTexture.TextureStreamed == null ? InTexture.TexturePersistent : InTexture.TextureStreamed;
+        if (ptr.Texture == null) return null;
+        Textures.TEX4.Texture TexPart = ptr.Texture.TextureStreamed == null ? ptr.Texture.TexturePersistent : ptr.Texture.TextureStreamed;
 
         Vector2 textureDims = new Vector2(TexPart.Width, TexPart.Height);
         if (TexPart.Content == null || TexPart.Content.Length == 0)
@@ -1061,7 +1059,7 @@ public class AlienScene : MonoBehaviour
         int mipLevels = TexPart.MipLevels;
 
         UnityEngine.TextureFormat format = UnityEngine.TextureFormat.BC7;
-        switch (InTexture.Format)
+        switch (ptr.Texture.Format)
         {
             case Textures.TextureFormat.A32R32G32B32F:
                 format = UnityEngine.TextureFormat.RGBAFloat; 
@@ -1103,17 +1101,17 @@ public class AlienScene : MonoBehaviour
                 format = UnityEngine.TextureFormat.RHalf; 
                 break;
             default:
-                Debug.LogError("Unsupported texture format: " + InTexture.Format);
+                Debug.LogError("Unsupported texture format: " + ptr.Texture.Format);
                 break;
         }
 
         TexOrCube tex = new TexOrCube();
         using (BinaryReader tempReader = new BinaryReader(new MemoryStream(TexPart.Content)))
         {
-            if (InTexture.StateFlags.HasFlag(Textures.TextureStateFlag.CUBE))
+            if (ptr.Texture.StateFlags.HasFlag(Textures.TextureStateFlag.CUBE))
             {
                 tex.Cubemap = new Cubemap((int)textureDims.x, format, false);
-                tex.Cubemap.name = InTexture.Name;
+                tex.Cubemap.name = ptr.Texture.Name;
                 tex.Cubemap.SetPixelData(tempReader.ReadBytes(textureLength / 6), 0, CubemapFace.PositiveX);
                 tex.Cubemap.SetPixelData(tempReader.ReadBytes(textureLength / 6), 0, CubemapFace.NegativeX);
                 tex.Cubemap.SetPixelData(tempReader.ReadBytes(textureLength / 6), 0, CubemapFace.PositiveY);
@@ -1125,21 +1123,21 @@ public class AlienScene : MonoBehaviour
             else
             {
                 tex.Texture = new Texture2D((int)textureDims[0], (int)textureDims[1], format, mipLevels, true);
-                tex.Texture.name = InTexture.Name;
+                tex.Texture.name = ptr.Texture.Name;
                 tex.Texture.LoadRawTextureData(tempReader.ReadBytes(textureLength));
                 tex.Texture.Apply();
             }
         }
         if (ptr.Location == TexturePtr.Source.GLOBAL)
-            _texturesGlobal.Add(ptr.Index, tex);
+            _texturesGlobal.Add(ptr.Texture, tex);
         else
-            _texturesLevel.Add(ptr.Index, tex);
+            _texturesLevel.Add(ptr.Texture, tex);
 
         //Save some memory: since we won't need to access the raw data again, lets delete it
-        if (InTexture.TextureStreamed != null)
-            InTexture.TextureStreamed.Content = null;
-        if (InTexture.TexturePersistent != null)
-            InTexture.TexturePersistent.Content = null;
+        if (ptr.Texture.TextureStreamed != null)
+            ptr.Texture.TextureStreamed.Content = null;
+        if (ptr.Texture.TexturePersistent != null)
+            ptr.Texture.TexturePersistent.Content = null;
 
         return tex;
     }
@@ -1511,102 +1509,37 @@ public class AlienScene : MonoBehaviour
 public class GameObjectHolder
 {
     public Mesh MainMesh; //TODO: should this be contained in a globally referenced array?
-    public int DefaultMaterial; 
+    public Materials.Material DefaultMaterial; 
 }
 
 public class LevelContent
 {
     public void Load(string aiPath, string levelName)
     {
-        Reset();
-
-        string levelPath = aiPath + "/DATA/ENV/" + levelName + "/";
-        string worldPath = levelPath + "WORLD/";
-        string renderablePath = levelPath + "RENDERABLE/";
-
-        //The game has two hard-coded _PATCH overrides. We should use RENDERABLE from the non-patched folder.
-        switch (levelName)
+        Reset(); 
+        
+        if (Global == null)
         {
-            case "DLC/BSPNOSTROMO_RIPLEY_PATCH":
-            case "DLC/BSPNOSTROMO_TWOTEAMS_PATCH":
-                renderablePath = levelPath.Replace(levelName, levelName.Substring(0, levelName.Length - ("_PATCH").Length)) + "RENDERABLE/";
-                break;
+            PAK2 animPAK = new PAK2(aiPath + "\\DATA\\GLOBAL\\ANIMATION.PAK");
+            Global = new Global()
+            {
+                Textures = new Textures(aiPath + "\\DATA\\ENV\\GLOBAL\\WORLD\\GLOBAL_TEXTURES.ALL.PAK"),
+                AnimationStrings_Debug = new AnimationStrings(animPAK.Entries.FirstOrDefault(o => o.Filename.Contains("ANIM_STRING_DB_DEBUG.BIN")).Content)
+            };
         }
 
-        Parallel.For(0, 9, (i) =>
-        {
-            switch (i)
-            {
-                case 0:
-                    CommandsPAK = new Commands(worldPath + "COMMANDS.PAK");
-                    break;
-                case 1:
-                    RenderableREDS = new RenderableElements(worldPath + "REDS.BIN");
-                    break;
-                case 2:
-                    ResourcesBIN = new CATHODE.Resources(worldPath + "RESOURCES.BIN");
-                    break;
-                case 4:
-                    ModelsMTL = new Materials(renderablePath + "LEVEL_MODELS.MTL");
-                    break;
-                case 5:
-                    ModelsPAK = new Models(renderablePath + "LEVEL_MODELS.PAK");
-                    break;
-                case 6:
-                    ShadersPAK = new Shaders(renderablePath + "LEVEL_SHADERS_DX11.PAK");
-
-                    //Lets save some memory: we're not gonna use these, so might as well unload them.
-                    foreach (Shaders.Shader shader in ShadersPAK.Entries)
-                    {
-                        shader.VertexShader = null;
-                        shader.PixelShader = null;
-                        shader.HullShader = null;
-                        shader.DomainShader = null;
-                        shader.GeometryShader = null;
-                        shader.ComputeShader = null;
-                    }
-                    break;
-                case 7:
-                    TexturesPAK = new Textures(renderablePath + "LEVEL_TEXTURES.ALL.PAK");
-                    break;
-                case 8:
-                    TexturesPAK_GLOBAL = new Textures(aiPath + "/DATA/ENV/GLOBAL/WORLD/GLOBAL_TEXTURES.ALL.PAK");
-                    break;
-            }
-        });
+        Level = new Level(aiPath + "\\DATA\\ENV\\" + levelName, Global);
     }
 
     public void Reset()
     {
-        CommandsPAK?.Entries.Clear();
-        CommandsPAK = null;
-        RenderableREDS?.Entries.Clear();
-        RenderableREDS = null;
-        ResourcesBIN?.Entries.Clear();
-        ResourcesBIN = null;
-        ModelsMTL?.Entries.Clear();
-        ModelsMTL = null;
-        ModelsPAK?.Entries.Clear();
-        ModelsPAK = null;
-        ShadersPAK?.Entries.Clear();
-        ShadersPAK = null;
-        TexturesPAK?.Entries.Clear();
-        TexturesPAK = null;
-        TexturesPAK_GLOBAL?.Entries.Clear();
-        TexturesPAK_GLOBAL = null;
-        RemappedResources.Clear();
+        Level = null;
     }
 
-    public bool Loaded => CommandsPAK != null && CommandsPAK.Loaded;
+    public bool Loaded => Level?.Commands != null && Level.Commands.Loaded;
 
-    public Commands CommandsPAK;
-    public RenderableElements RenderableREDS;
-    public CATHODE.Resources ResourcesBIN;
-    public Materials ModelsMTL;
-    public Models ModelsPAK;
-    public Shaders ShadersPAK;
-    public Textures TexturesPAK;
-    public Textures TexturesPAK_GLOBAL;
+    public Level Level = null;
+    public static Global Global = null;
 
     //This acts as a temporary override for REDS.BIN mapping runtime changes from Commands Editor
     public Dictionary<Entity, List<Tuple<int, int>>> RemappedResources = new Dictionary<Entity, List<Tuple<int, int>>>(); //Model Index, Material Index

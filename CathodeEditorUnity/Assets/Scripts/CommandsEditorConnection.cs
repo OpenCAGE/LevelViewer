@@ -57,7 +57,7 @@ public class CommandsEditorConnection : MonoBehaviour
     /* Recieve data from Commands Editor and sync it to our local Commands object */
     private void OnMessage(object sender, MessageEventArgs e)
     {
-        //Debug.Log(e.Data);
+        Debug.Log(e.Data);
 
         Packet packet = JsonConvert.DeserializeObject<Packet>(e.Data);
 
@@ -103,7 +103,7 @@ public class CommandsEditorConnection : MonoBehaviour
 
                         ShortGuid entityID = new ShortGuid(packet.entity);
                         ShortGuid compositeID = new ShortGuid(packet.composite);
-                        Composite composite = _scene.Content.CommandsPAK.Entries.FirstOrDefault(o => o.shortGUID == compositeID);
+                        Composite composite = _scene.Content.Level.Commands.Entries.FirstOrDefault(o => o.shortGUID == compositeID);
                         if (composite != null)
                         {
                             Entity entity = null;
@@ -142,7 +142,7 @@ public class CommandsEditorConnection : MonoBehaviour
                                 switch (entity.variant)
                                 {
                                     case EntityVariant.PROXY:
-                                        HandlePointedTransform(packet, out entityID, out compositeID, ((ProxyEntity)entity).proxy, _scene.Content.CommandsPAK.EntryPoints[0]);
+                                        HandlePointedTransform(packet, out entityID, out compositeID, ((ProxyEntity)entity).proxy, _scene.Content.Level.Commands.EntryPoints[0]);
                                         break;
                                     case EntityVariant.ALIAS:
                                         HandlePointedTransform(packet, out entityID, out compositeID, ((AliasEntity)entity).alias, composite);
@@ -161,7 +161,7 @@ public class CommandsEditorConnection : MonoBehaviour
                     {
                         ShortGuid entityID = new ShortGuid(packet.entity);
                         ShortGuid compositeID = new ShortGuid(packet.composite);
-                        Composite composite = _scene.Content.CommandsPAK.Entries.FirstOrDefault(o => o.shortGUID == compositeID);
+                        Composite composite = _scene.Content.Level.Commands.Entries.FirstOrDefault(o => o.shortGUID == compositeID);
                         if (composite != null)
                         {
                             Entity entity = null;
@@ -196,28 +196,28 @@ public class CommandsEditorConnection : MonoBehaviour
                 {
                     lock (_lock)
                     {
-                        Composite composite = _scene.Content.CommandsPAK.Entries.FirstOrDefault(o => o.shortGUID.AsUInt32 == packet.composite);
+                        Composite composite = _scene.Content.Level.Commands.Entries.FirstOrDefault(o => o.shortGUID.AsUInt32 == packet.composite);
                         if (composite != null)
                         {
                             switch (packet.entity_variant)
                             {
                                 case EntityVariant.FUNCTION:
-                                    composite.functions.Add(new FunctionEntity() { shortGUID = new ShortGuid(packet.entity), function = new ShortGuid(packet.entity_function) });
+                                    composite.AddFunction(new FunctionEntity() { shortGUID = new ShortGuid(packet.entity), function = new ShortGuid(packet.entity_function) });
                                     break;
                                 case EntityVariant.VARIABLE:
-                                    composite.variables.Add(new VariableEntity() { shortGUID = new ShortGuid(packet.entity) });
+                                    composite.AddVariable(new VariableEntity() { shortGUID = new ShortGuid(packet.entity) });
                                     break;
                                 case EntityVariant.ALIAS:
                                     EntityPath alias = new EntityPath() { path = new ShortGuid[packet.entity_pointed.Count] };
                                     for (int i = 0; i < packet.entity_pointed.Count; i++)
                                         alias.path[i] = new ShortGuid(packet.entity_pointed[i]);
-                                    composite.aliases.Add(new AliasEntity() { shortGUID = new ShortGuid(packet.entity), alias = alias });
+                                    composite.AddAlias(new AliasEntity() { shortGUID = new ShortGuid(packet.entity), alias = alias });
                                     break;
                                 case EntityVariant.PROXY:
                                     EntityPath proxy = new EntityPath() { path = new ShortGuid[packet.entity_pointed.Count] };
                                     for (int i = 0; i < packet.entity_pointed.Count; i++)
                                         proxy.path[i] = new ShortGuid(packet.entity_pointed[i]);
-                                    composite.proxies.Add(new ProxyEntity() { shortGUID = new ShortGuid(packet.entity), proxy = proxy });
+                                    composite.AddProxy(new ProxyEntity() { shortGUID = new ShortGuid(packet.entity), proxy = proxy });
                                     break;
                             }
                         }
@@ -230,7 +230,7 @@ public class CommandsEditorConnection : MonoBehaviour
                 {
                     lock (_lock)
                     {
-                        Composite composite = _scene.Content.CommandsPAK.Entries.FirstOrDefault(o => o.shortGUID.AsUInt32 == packet.composite);
+                        Composite composite = _scene.Content.Level.Commands.Entries.FirstOrDefault(o => o.shortGUID.AsUInt32 == packet.composite);
                         if (composite != null)
                         {
                             switch (packet.entity_variant)
@@ -258,7 +258,7 @@ public class CommandsEditorConnection : MonoBehaviour
                 {
                     lock (_lock)
                     {
-                        _scene.Content.CommandsPAK.Entries.Add(new Composite() { shortGUID = new ShortGuid(packet.composite) });
+                        _scene.Content.Level.Commands.Entries.Add(new Composite() { shortGUID = new ShortGuid(packet.composite) });
                     }
                     break;
                 }
@@ -266,7 +266,7 @@ public class CommandsEditorConnection : MonoBehaviour
                 {
                     lock (_lock)
                     {
-                        _scene.Content.CommandsPAK.Entries.RemoveAll(o => o.shortGUID == new ShortGuid(packet.composite));
+                        _scene.Content.Level.Commands.Entries.RemoveAll(o => o.shortGUID == new ShortGuid(packet.composite));
 
                         _removedComposite = new ShortGuid(packet.composite);
                     }
@@ -276,7 +276,7 @@ public class CommandsEditorConnection : MonoBehaviour
     }
     private void HandlePointedTransform(Packet packet, out ShortGuid entityID, out ShortGuid compositeID, EntityPath path, Composite startComposite)
     {
-        (Composite pComp, Entity pEnt) = _scene.Content.CommandsPAK.Utils.GetResolvedTarget(_scene.Content.CommandsPAK.Utils.ResolveAliasOrProxy(path, startComposite));
+        (Composite pComp, Entity pEnt) = _scene.Content.Level.Commands.Utils.GetResolvedTarget(_scene.Content.Level.Commands.Utils.ResolveAliasOrProxy(path, startComposite));
         entityID = pEnt != null ? pEnt.shortGUID : ShortGuid.Invalid;
         compositeID = pComp != null ? pComp.shortGUID : ShortGuid.Invalid;
         if (!packet.has_transform)

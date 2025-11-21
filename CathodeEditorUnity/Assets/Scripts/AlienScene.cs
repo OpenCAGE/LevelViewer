@@ -1,4 +1,4 @@
-#define LOCAL_DEV
+//#define LOCAL_DEV
 
 using CATHODE;
 using CATHODE.Scripting;
@@ -1523,15 +1523,7 @@ public class LevelContent
         Reset(); 
         
         if (Global == null)
-        {
-            PAK2 animPAK = new PAK2(aiPath + "\\DATA\\GLOBAL\\ANIMATION.PAK");
-            Global = new Global()
-            {
-                Textures = new Textures(aiPath + "\\DATA\\ENV\\GLOBAL\\WORLD\\GLOBAL_TEXTURES.ALL.PAK"),
-                AnimationStrings_Debug = new AnimationStrings(animPAK.Entries.FirstOrDefault(o => o.Filename.Contains("ANIM_STRING_DB_DEBUG.BIN")).Content)
-            };
-        }
-
+            Global = new Global(aiPath + "\\DATA\\ENV\\GLOBAL", new PAK2(aiPath + "\\DATA\\GLOBAL\\ANIMATION.PAK"));
         Level = new Level(aiPath + "\\DATA\\ENV\\" + levelName, Global);
 
         //Lets save some memory: we're not gonna use these, so might as well unload them.

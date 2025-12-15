@@ -506,6 +506,9 @@ public class AlienScene : MonoBehaviour
 
     private GameObjectHolder GetModel(Models.CS2.Component.LOD.Submesh submesh)
     {
+        if (submesh == null)
+            return null;
+
         if (!_modelGOs.ContainsKey(submesh))
         {
             Models.CS2.Component.LOD lod = _content.Level.Models.FindModelLODForSubmesh(submesh);

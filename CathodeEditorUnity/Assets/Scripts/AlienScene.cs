@@ -1106,6 +1106,15 @@ public class AlienScene : MonoBehaviour
             case Textures.TextureFormat.R16F:
                 format = UnityEngine.TextureFormat.RHalf; 
                 break;
+            case Textures.TextureFormat.ASTC4X4:
+                format = UnityEngine.TextureFormat.ASTC_4x4;
+                break;
+            case Textures.TextureFormat.ASTC8X8:
+                format = UnityEngine.TextureFormat.ASTC_8x8;
+                break;
+            case Textures.TextureFormat.ASTC12X12:
+                format = UnityEngine.TextureFormat.ASTC_12x12;
+                break;
             default:
                 Debug.LogError("Unsupported texture format: " + ptr.Texture.Format);
                 break;

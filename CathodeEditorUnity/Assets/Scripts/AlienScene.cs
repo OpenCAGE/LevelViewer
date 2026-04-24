@@ -511,8 +511,8 @@ public class AlienScene : MonoBehaviour
 
         if (!_modelGOs.ContainsKey(submesh))
         {
-            Models.CS2.Component.LOD lod = _content.Level.Models.FindModelLODForSubmesh(submesh);
-            Models.CS2 mesh = _content.Level.Models.FindModelForSubmesh(submesh);
+            Models.CS2.Component.LOD lod = _content.Level.Models.FindModelLOD(submesh);
+            Models.CS2 mesh = _content.Level.Models.FindModel(submesh);
             Mesh thisMesh = submesh.ToMesh();
             thisMesh.name = ((mesh == null) ? "" : mesh.Name) + ": " + ((lod == null) ? "" : lod.Name);
 

@@ -52,6 +52,7 @@ public class AlienScene : MonoBehaviour
         public Cubemap Cubemap = null;
     }
 
+#if UNITY_EDITOR
     IEnumerator Start()
     {
 #if !LOCAL_DEV
@@ -60,15 +61,14 @@ public class AlienScene : MonoBehaviour
 
         yield return new WaitForEndOfFrame();
 
-#if UNITY_EDITOR
         try
         {
             SceneView.FocusWindowIfItsOpen(typeof(SceneView));
             EditorWindow.GetWindow(typeof(EditorWindow).Assembly.GetType("UnityEditor.GameView")).Close();
         }
         catch { }
-#endif
     }
+#endif
 
     private void ResetLevel()
     {
@@ -133,7 +133,7 @@ public class AlienScene : MonoBehaviour
             Destroy(_parentGameObject);
 
         _parentGameObject = new GameObject(_levelName);
-#if !LOCAL_DEV
+#if UNITY_EDITOR && !LOCAL_DEV
         _parentGameObject.hideFlags = HideFlags.HideInHierarchy | HideFlags.DontSave;
 #endif
         _parentGameObject.isStatic = true;
@@ -216,7 +216,7 @@ public class AlienScene : MonoBehaviour
         GameObject entityGO = new GameObject(entity.shortGUID.AsUInt32.ToString());
         entityGO.transform.parent = parentGO.transform;
         entityGO.transform.SetLocalPositionAndRotation(position, Quaternion.Euler(rotation));
-#if !LOCAL_DEV
+#if UNITY_EDITOR && !LOCAL_DEV
         entityGO.hideFlags = HideFlags.HideInHierarchy | HideFlags.DontSave;
 #endif
         entityGO.isStatic = true;
@@ -472,7 +472,7 @@ public class AlienScene : MonoBehaviour
         newModelSpawn.transform.localRotation = Quaternion.identity;
         newModelSpawn.name = holder.MainMesh.name + " (" + unityMaterial.name + ")";
         newModelSpawn.AddComponent<MeshFilter>().sharedMesh = holder.MainMesh;
-#if !LOCAL_DEV
+#if UNITY_EDITOR && !LOCAL_DEV
         newModelSpawn.hideFlags = HideFlags.NotEditable | HideFlags.HideInHierarchy;
 #endif
 
@@ -1121,6 +1121,11 @@ public class AlienScene : MonoBehaviour
                 Debug.LogError("Unsupported texture format: " + ptr.Texture.Format);
                 break;
         }
+
+#if !UNITY_EDITOR
+        if (!SystemInfo.SupportsTextureFormat(format))
+            return null;
+#endif
 
         TexOrCube tex = new TexOrCube();
         using (BinaryReader tempReader = new BinaryReader(new MemoryStream(TexPart.Content)))

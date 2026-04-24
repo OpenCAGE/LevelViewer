@@ -305,6 +305,7 @@ public class AlienScene : MonoBehaviour
     /* Select an Entity GameObject at a specific instance hierarchy */
     public void SelectEntity(List<uint> path, bool focusSelected)
     {
+#if UNITY_EDITOR
         GameObject gameObject = GetGameObject(path, ParentGameObject.transform);
         if (gameObject != null)
         {
@@ -318,6 +319,7 @@ public class AlienScene : MonoBehaviour
 
         if (focusSelected)
             SceneView.FrameLastActiveSceneView();
+#endif
     }
 
     private GameObject GetGameObject(List<uint> path, Transform parent)

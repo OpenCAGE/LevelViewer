@@ -52,6 +52,7 @@ public class AlienScene : MonoBehaviour
         public Cubemap Cubemap = null;
     }
 
+#if UNITY_EDITOR
     IEnumerator Start()
     {
 #if !LOCAL_DEV
@@ -60,15 +61,14 @@ public class AlienScene : MonoBehaviour
 
         yield return new WaitForEndOfFrame();
 
-#if UNITY_EDITOR
         try
         {
             SceneView.FocusWindowIfItsOpen(typeof(SceneView));
             EditorWindow.GetWindow(typeof(EditorWindow).Assembly.GetType("UnityEditor.GameView")).Close();
         }
         catch { }
-#endif
     }
+#endif
 
     private void ResetLevel()
     {
@@ -133,7 +133,7 @@ public class AlienScene : MonoBehaviour
             Destroy(_parentGameObject);
 
         _parentGameObject = new GameObject(_levelName);
-#if !LOCAL_DEV
+#if UNITY_EDITOR && !LOCAL_DEV
         _parentGameObject.hideFlags = HideFlags.HideInHierarchy | HideFlags.DontSave;
 #endif
         _parentGameObject.isStatic = true;
@@ -216,7 +216,7 @@ public class AlienScene : MonoBehaviour
         GameObject entityGO = new GameObject(entity.shortGUID.AsUInt32.ToString());
         entityGO.transform.parent = parentGO.transform;
         entityGO.transform.SetLocalPositionAndRotation(position, Quaternion.Euler(rotation));
-#if !LOCAL_DEV
+#if UNITY_EDITOR && !LOCAL_DEV
         entityGO.hideFlags = HideFlags.HideInHierarchy | HideFlags.DontSave;
 #endif
         entityGO.isStatic = true;
@@ -305,6 +305,7 @@ public class AlienScene : MonoBehaviour
     /* Select an Entity GameObject at a specific instance hierarchy */
     public void SelectEntity(List<uint> path, bool focusSelected)
     {
+#if UNITY_EDITOR
         GameObject gameObject = GetGameObject(path, ParentGameObject.transform);
         if (gameObject != null)
         {
@@ -318,6 +319,7 @@ public class AlienScene : MonoBehaviour
 
         if (focusSelected)
             SceneView.FrameLastActiveSceneView();
+#endif
     }
 
     private GameObject GetGameObject(List<uint> path, Transform parent)
@@ -470,7 +472,7 @@ public class AlienScene : MonoBehaviour
         newModelSpawn.transform.localRotation = Quaternion.identity;
         newModelSpawn.name = holder.MainMesh.name + " (" + unityMaterial.name + ")";
         newModelSpawn.AddComponent<MeshFilter>().sharedMesh = holder.MainMesh;
-#if !LOCAL_DEV
+#if UNITY_EDITOR && !LOCAL_DEV
         newModelSpawn.hideFlags = HideFlags.NotEditable | HideFlags.HideInHierarchy;
 #endif
 
@@ -511,8 +513,8 @@ public class AlienScene : MonoBehaviour
 
         if (!_modelGOs.ContainsKey(submesh))
         {
-            Models.CS2.Component.LOD lod = _content.Level.Models.FindModelLODForSubmesh(submesh);
-            Models.CS2 mesh = _content.Level.Models.FindModelForSubmesh(submesh);
+            Models.CS2.Component.LOD lod = _content.Level.Models.FindModelLOD(submesh);
+            Models.CS2 mesh = _content.Level.Models.FindModel(submesh);
             Mesh thisMesh = submesh.ToMesh();
             thisMesh.name = ((mesh == null) ? "" : mesh.Name) + ": " + ((lod == null) ? "" : lod.Name);
 
@@ -1106,10 +1108,24 @@ public class AlienScene : MonoBehaviour
             case Textures.TextureFormat.R16F:
                 format = UnityEngine.TextureFormat.RHalf; 
                 break;
+            case Textures.TextureFormat.ASTC4X4:
+                format = UnityEngine.TextureFormat.ASTC_4x4;
+                break;
+            case Textures.TextureFormat.ASTC8X8:
+                format = UnityEngine.TextureFormat.ASTC_8x8;
+                break;
+            case Textures.TextureFormat.ASTC12X12:
+                format = UnityEngine.TextureFormat.ASTC_12x12;
+                break;
             default:
                 Debug.LogError("Unsupported texture format: " + ptr.Texture.Format);
                 break;
         }
+
+#if !UNITY_EDITOR
+        if (!SystemInfo.SupportsTextureFormat(format))
+            return null;
+#endif
 
         TexOrCube tex = new TexOrCube();
         using (BinaryReader tempReader = new BinaryReader(new MemoryStream(TexPart.Content)))

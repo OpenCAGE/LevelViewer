@@ -3,6 +3,7 @@
 using CATHODE;
 using CATHODE.Scripting;
 using CATHODE.Scripting.Internal;
+using OpenCAGE.UnityConnection;
 using CATHODE.ShaderTypes;
 using CathodeLib;
 using System;
@@ -418,6 +419,16 @@ public class AlienScene : MonoBehaviour
             return;
 
         FunctionEntityPreview[] previews = entityGO.GetComponents<FunctionEntityPreview>();
+        for (int i = 0; i < previews.Length; i++)
+            previews[i].Refresh();
+    }
+
+    public void RefreshBoxRenderFilters()
+    {
+        if (_parentGameObject == null)
+            return;
+
+        BoxPreview[] previews = _parentGameObject.GetComponentsInChildren<BoxPreview>(true);
         for (int i = 0; i < previews.Length; i++)
             previews[i].Refresh();
     }

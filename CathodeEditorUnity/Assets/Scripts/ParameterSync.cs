@@ -7,6 +7,8 @@ using System.Collections.Generic;
 using System.Linq;
 using UnityEngine;
 
+namespace OpenCAGE.UnityConnection
+{
 /// <summary>
 /// Platform-neutral parameter payload for websocket sync. Keep in sync with OpenCAGE ParameterSync.cs.
 /// </summary>
@@ -205,4 +207,5 @@ public static class ParameterSync
             return Vector3.zero;
         return new Vector3(values[0], values[1], values[2]);
     }
+}
 }

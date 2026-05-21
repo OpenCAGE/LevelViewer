@@ -44,6 +44,9 @@ public class AlienScene : MonoBehaviour
     private Dictionary<ShortGuid, List<GameObject>> _compositeGameObjects = new Dictionary<ShortGuid, List<GameObject>>();
     private Dictionary<GameObject, Entity> _gameObjectEntities = new Dictionary<GameObject, Entity>();
 
+    private FunctionEntityPreview[] _cachedFunctionEntityPreviews = System.Array.Empty<FunctionEntityPreview>();
+    private bool _functionEntityPreviewsCacheDirty = true;
+
     public class ParameterVisualContext
     {
         public Composite Composite;
@@ -173,6 +176,7 @@ public class AlienScene : MonoBehaviour
         _loadedComposite = comp;
         AddCompositeInstance(comp, _parentGameObject, null);
 
+        InvalidateFunctionEntityPreviewCache();
         OnLoaded?.Invoke();
     }
 
@@ -199,6 +203,8 @@ public class AlienScene : MonoBehaviour
             AddEntity(composite, entity, compositeGO);
         foreach (Entity entity in composite.proxies)
             AddEntity(composite, entity, compositeGO);
+
+        InvalidateFunctionEntityPreviewCache();
     }
 
     /* Remove all instances of a given Composite in the scene */
@@ -215,6 +221,7 @@ public class AlienScene : MonoBehaviour
                 }
             }
             _compositeGameObjects.Remove(composite);
+            InvalidateFunctionEntityPreviewCache();
         }
     }
 
@@ -296,14 +303,8 @@ public class AlienScene : MonoBehaviour
                     }
                     else
                     {
-                        if (BoxPreview.ShouldShowBoxPreview(function, _content.Level.Commands.Utils))
-                        {
-                            entityGO.AddComponent<BoxPreview>().Setup(function, _content.Level.Commands.Utils);
-                        }
-                        else if (function.function.AsFunctionType == FunctionType.ModelReference)
-                        {
-                            entityGO.AddComponent<ModelReferencePreview>().Setup(this, function);
-                        }
+                        if (FunctionEntityPreviewSetup.TryAddPreview(this, function, entityGO, _content.Level.Commands.Utils))
+                            _functionEntityPreviewsCacheDirty = true;
                     }
                 }
                 break;
@@ -423,14 +424,40 @@ public class AlienScene : MonoBehaviour
             previews[i].Refresh();
     }
 
-    public void RefreshBoxRenderFilters()
+    public void InvalidateFunctionEntityPreviewCache()
+    {
+        _functionEntityPreviewsCacheDirty = true;
+    }
+
+    public void RefreshRenderFilters(System.Collections.Generic.HashSet<uint> changedFunctionTypes = null)
     {
         if (_parentGameObject == null)
             return;
 
-        BoxPreview[] previews = _parentGameObject.GetComponentsInChildren<BoxPreview>(true);
-        for (int i = 0; i < previews.Length; i++)
-            previews[i].Refresh();
+        if (_functionEntityPreviewsCacheDirty)
+        {
+            _cachedFunctionEntityPreviews = _parentGameObject.GetComponentsInChildren<FunctionEntityPreview>(true);
+            _functionEntityPreviewsCacheDirty = false;
+        }
+
+        for (int i = 0; i < _cachedFunctionEntityPreviews.Length; i++)
+        {
+            FunctionEntityPreview preview = _cachedFunctionEntityPreviews[i];
+            if (preview == null)
+            {
+                _functionEntityPreviewsCacheDirty = true;
+                continue;
+            }
+
+            if (changedFunctionTypes != null && preview.Entity != null && preview.Entity.function.IsFunctionType)
+            {
+                uint functionType = (uint)preview.Entity.function.AsFunctionType;
+                if (!changedFunctionTypes.Contains(functionType))
+                    continue;
+            }
+
+            preview.Refresh();
+        }
     }
 
     private List<GameObject> GetEntityGameObjects(ShortGuid compositeID, ShortGuid entityID)
@@ -549,6 +576,7 @@ public class AlienScene : MonoBehaviour
                             }
                             Destroy(child.gameObject);
                             _gameObjectEntities.Remove(child.gameObject);
+                            _functionEntityPreviewsCacheDirty = true;
                         }
                     }
                 }

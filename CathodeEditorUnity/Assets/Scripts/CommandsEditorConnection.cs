@@ -54,6 +54,8 @@ public class CommandsEditorConnection : MonoBehaviour
     public bool FocusSelected => _focusSelected;
     private bool _focusSelected = false;
     private bool _renderFiltersDirty = false;
+    private int _renderFiltersGeneration = 0;
+    private HashSet<uint> _renderFiltersChangedFunctionTypes = null;
 
     void Start()
     {
@@ -64,13 +66,21 @@ public class CommandsEditorConnection : MonoBehaviour
     /* Recieve data from Commands Editor and sync it to our local Commands object */
     private void OnMessage(object sender, MessageEventArgs e)
     {
-        Debug.Log(e.Data);
-
         Packet packet = JsonConvert.DeserializeObject<Packet>(e.Data);
 
         if (packet.version != new Packet().version)
         {
             Debug.LogError("Your Commands Editor is utilising a different API version than this Unity client!!\nPlease ensure both are up to date.");
+            return;
+        }
+
+        if (packet.packet_event == PacketEvent.RENDER_FILTERS_CHANGED)
+        {
+            lock (_lock)
+            {
+                if (packet.box_render_filters != null && RenderFilters.ApplyFromPacket(packet.box_render_filters, out HashSet<uint> changed))
+                    MarkRenderFiltersDirty(changed);
+            }
             return;
         }
 
@@ -96,8 +106,8 @@ public class CommandsEditorConnection : MonoBehaviour
 
             _focusSelected = packet.focus_object;
 
-            if (packet.box_render_filters != null && BoxRenderFilters.ApplyFromPacket(packet.box_render_filters))
-                _renderFiltersDirty = true;
+            if (packet.box_render_filters != null && RenderFilters.ApplyFromPacket(packet.box_render_filters, out HashSet<uint> changed))
+                MarkRenderFiltersDirty(changed);
         }
 
         switch (packet.packet_event)
@@ -399,10 +409,28 @@ public class CommandsEditorConnection : MonoBehaviour
             }
         }
 
-        if (_renderFiltersDirty)
+        int renderFiltersGeneration = -1;
+        lock (_lock)
         {
-            _scene.RefreshBoxRenderFilters();
-            _renderFiltersDirty = false;
+            if (_renderFiltersDirty)
+                renderFiltersGeneration = _renderFiltersGeneration;
+        }
+
+        if (renderFiltersGeneration >= 0)
+        {
+            HashSet<uint> changedFunctionTypes = null;
+            lock (_lock)
+            {
+                changedFunctionTypes = _renderFiltersChangedFunctionTypes;
+                _renderFiltersChangedFunctionTypes = null;
+            }
+
+            _scene.RefreshRenderFilters(changedFunctionTypes);
+            lock (_lock)
+            {
+                if (_renderFiltersGeneration == renderFiltersGeneration)
+                    _renderFiltersDirty = false;
+            }
         }
 
         if (_currentEntityGOID != _currentEntity)
@@ -411,6 +439,19 @@ public class CommandsEditorConnection : MonoBehaviour
             _scene.SelectEntity(_pathEntities, _focusSelected);
             _currentEntityGOID = _currentEntity;
         }
+    }
+
+    private void MarkRenderFiltersDirty(HashSet<uint> changedFunctionTypes)
+    {
+        _renderFiltersDirty = true;
+        _renderFiltersGeneration++;
+        if (changedFunctionTypes == null || changedFunctionTypes.Count == 0)
+            return;
+
+        if (_renderFiltersChangedFunctionTypes == null)
+            _renderFiltersChangedFunctionTypes = new HashSet<uint>(changedFunctionTypes);
+        else
+            _renderFiltersChangedFunctionTypes.UnionWith(changedFunctionTypes);
     }
 
     private IEnumerator ReconnectLoop()

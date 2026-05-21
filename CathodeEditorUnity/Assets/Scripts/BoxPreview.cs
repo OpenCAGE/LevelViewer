@@ -1,8 +1,9 @@
 using CATHODE.Scripting;
 using CATHODE.Scripting.Internal;
 using CathodeLib;
-using System.Collections.Generic;
+using OpenCAGE;
 using UnityEngine;
+using UnityEngine.Rendering;
 
 /// <summary>
 /// Semi-transparent box volume preview for Box-like function entities.
@@ -13,16 +14,16 @@ public class BoxPreview : FunctionEntityPreview
 {
     private const string HalfDimensionsParameter = "half_dimensions";
 
-    private static Material _sharedMaterial;
-    private static readonly int ColorPropertyId = Shader.PropertyToID("_Color");
-
     private CommandsUtils _utils;
     private MaterialPropertyBlock _propertyBlock;
     private GameObject _volume;
 
     public static bool ShouldShowBoxPreview(FunctionEntity entity, CommandsUtils utils)
     {
-        return BoxRenderFilters.ShouldShowBoxPreview(entity, utils);
+        if (entity == null || !entity.function.IsFunctionType)
+            return false;
+
+        return RenderFilterDefinitions.GetPreviewKind(entity.function.AsFunctionType) == RenderPreviewKind.Box;
     }
 
     public void Setup(FunctionEntity entity, CommandsUtils utils)
@@ -36,7 +37,7 @@ public class BoxPreview : FunctionEntityPreview
         if (Entity == null)
             return;
 
-        bool visible = BoxRenderFilters.IsVisible(Entity, _utils);
+        bool visible = PreviewVisualUtility.IsVisible(Entity);
         if (_volume != null)
             _volume.SetActive(visible);
         if (!visible)
@@ -64,14 +65,7 @@ public class BoxPreview : FunctionEntityPreview
         if (renderer == null)
             return;
 
-        EnsureSharedMaterial();
-        renderer.sharedMaterial = _sharedMaterial;
-
-        if (_propertyBlock == null)
-            _propertyBlock = new MaterialPropertyBlock();
-
-        _propertyBlock.SetColor(ColorPropertyId, BoxRenderFilters.GetPreviewColor(Entity));
-        renderer.SetPropertyBlock(_propertyBlock);
+        PreviewVisualUtility.ApplyTransparentColor(renderer, PreviewVisualUtility.GetPreviewColor(Entity), ref _propertyBlock);
     }
 
     private Vector3 GetHalfDimensions(FunctionEntity entity)
@@ -88,8 +82,6 @@ public class BoxPreview : FunctionEntityPreview
         if (_volume != null)
             return;
 
-        EnsureSharedMaterial();
-
         _volume = GameObject.CreatePrimitive(PrimitiveType.Cube);
         _volume.name = "BoxPreview";
         _volume.transform.SetParent(transform, false);
@@ -99,25 +91,12 @@ public class BoxPreview : FunctionEntityPreview
             Destroy(collider);
 
         MeshRenderer renderer = _volume.GetComponent<MeshRenderer>();
-        renderer.sharedMaterial = _sharedMaterial;
-        renderer.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+        renderer.sharedMaterial = PreviewVisualUtility.SharedBoxMaterial;
+        renderer.shadowCastingMode = ShadowCastingMode.Off;
         renderer.receiveShadows = false;
 
 #if UNITY_EDITOR && !LOCAL_DEV
         _volume.hideFlags = HideFlags.HideInHierarchy | HideFlags.DontSave;
 #endif
-    }
-
-    private static void EnsureSharedMaterial()
-    {
-        if (_sharedMaterial != null)
-            return;
-
-        Shader shader = Shader.Find("Legacy Shaders/Transparent/Diffuse");
-        if (shader == null)
-            shader = Shader.Find("Standard");
-
-        _sharedMaterial = new Material(shader);
-        _sharedMaterial.renderQueue = 3000;
     }
 }

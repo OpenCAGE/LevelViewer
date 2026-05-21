@@ -20,6 +20,7 @@ namespace OpenCAGE.UnityConnection
         ENTITY_RESOURCE_MODIFIED,
         ENTITY_PARAMETER_MODIFIED,
 
+        RENDER_FILTERS_CHANGED,
         GENERIC_DATA_SYNC,
     }
 

@@ -6,7 +6,7 @@ using UnityEngine;
 /// </summary>
 public abstract class FunctionEntityPreview : MonoBehaviour
 {
-    protected FunctionEntity Entity { get; private set; }
+    public FunctionEntity Entity { get; private set; }
 
     public virtual void Setup(FunctionEntity entity)
     {

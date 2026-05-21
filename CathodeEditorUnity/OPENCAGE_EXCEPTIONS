@@ -1,4 +1,10 @@
 .vs\
+Assets\CathodeLib\.git
+Assets\CathodeLib\LICENSE
+Assets\CathodeLib\README.md
+Assets\CathodeLib\release.bat
+Assets\CathodeLib\.github
+Assets\CathodeLib\AlienBML\.git
 Assets\CathodeLib\CathodeLib\CathodeLib.sln
 Assets\CathodeLib\CathodeLib\CathodeLib.csproj
 Assets\CathodeLib\CathodeLib\Properties\Resources.resx

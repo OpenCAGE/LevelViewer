@@ -86,14 +86,30 @@ public static class PreviewVisualUtility
 
     public static bool IsVisible(FunctionEntity entity)
     {
+        return IsPreviewVisible(entity, 0);
+    }
+
+    public static bool IsPreviewVisible(FunctionEntity entity, uint ownerCompositeId)
+    {
         if (entity == null || !entity.function.IsFunctionType)
-            return true;
+            return false;
 
         FunctionType functionType = entity.function.AsFunctionType;
-        if (!RenderFilterDefinitions.IsSupported(functionType))
+
+        if (functionType == FunctionType.ModelReference)
             return true;
 
-        return RenderFilters.IsEnabled(functionType);
+        if (RenderFilterDefinitions.IsSupported(functionType) && !RenderFilters.IsEnabled(functionType))
+            return false;
+
+        if (PreviewVisibilitySettings.HideNestedScriptEntities
+            && PreviewVisibilitySettings.ActiveCompositeId != 0
+            && ownerCompositeId != PreviewVisibilitySettings.ActiveCompositeId)
+        {
+            return false;
+        }
+
+        return true;
     }
 
     public static void PreparePreviewObject(GameObject gameObject, bool opaque = false, bool hideInHierarchy = true)

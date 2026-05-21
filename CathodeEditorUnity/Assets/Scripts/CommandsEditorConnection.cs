@@ -53,6 +53,7 @@ public class CommandsEditorConnection : MonoBehaviour
     //settings
     public bool FocusSelected => _focusSelected;
     private bool _focusSelected = false;
+    private bool _hideNestedScriptEntities = false;
     private bool _renderFiltersDirty = false;
     private int _renderFiltersGeneration = 0;
     private HashSet<uint> _renderFiltersChangedFunctionTypes = null;
@@ -84,6 +85,20 @@ public class CommandsEditorConnection : MonoBehaviour
             return;
         }
 
+        if (packet.packet_event == PacketEvent.SETTINGS_CHANGED)
+        {
+            lock (_lock)
+            {
+                _focusSelected = packet.focus_object;
+                ApplyViewerSettings(packet);
+                ApplyActiveComposite(packet);
+                if (packet.box_render_filters != null)
+                    RenderFilters.ApplyFromPacket(packet.box_render_filters);
+                MarkRenderFiltersDirty(null);
+            }
+            return;
+        }
+
         //if (packet.dirty)
         //{
         //    Debug.LogError("Content has been modified inside the Commands editor without saving before opening Unity. Please save inside the Commands editor and re-play Unity to sync changes.");
@@ -105,9 +120,14 @@ public class CommandsEditorConnection : MonoBehaviour
             _currentEntity = _entitySelected ? _pathEntities[_pathEntities.Count - 1] : 0;
 
             _focusSelected = packet.focus_object;
+            bool hideNestedChanged = ApplyViewerSettings(packet);
+            bool activeCompositeChanged = ApplyActiveComposite(packet);
 
+            bool refreshAllPreviews = hideNestedChanged || (activeCompositeChanged && PreviewVisibilitySettings.HideNestedScriptEntities);
             if (packet.box_render_filters != null && RenderFilters.ApplyFromPacket(packet.box_render_filters, out HashSet<uint> changed))
-                MarkRenderFiltersDirty(changed);
+                MarkRenderFiltersDirty(refreshAllPreviews ? null : changed);
+            else if (refreshAllPreviews)
+                MarkRenderFiltersDirty(null);
         }
 
         switch (packet.packet_event)
@@ -439,6 +459,25 @@ public class CommandsEditorConnection : MonoBehaviour
             _scene.SelectEntity(_pathEntities, _focusSelected);
             _currentEntityGOID = _currentEntity;
         }
+    }
+
+    private bool ApplyViewerSettings(Packet packet)
+    {
+        bool hideNestedChanged = _hideNestedScriptEntities != packet.hide_nested_script_entities;
+        _hideNestedScriptEntities = packet.hide_nested_script_entities;
+        PreviewVisibilitySettings.HideNestedScriptEntities = _hideNestedScriptEntities;
+        return hideNestedChanged;
+    }
+
+    private bool ApplyActiveComposite(Packet packet)
+    {
+        uint activeCompositeId = _compositeLoaded && _pathComposites != null && _pathComposites.Count > 0
+            ? _currentComposite
+            : packet.composite;
+
+        bool changed = PreviewVisibilitySettings.ActiveCompositeId != activeCompositeId;
+        PreviewVisibilitySettings.ActiveCompositeId = activeCompositeId;
+        return changed;
     }
 
     private void MarkRenderFiltersDirty(HashSet<uint> changedFunctionTypes)

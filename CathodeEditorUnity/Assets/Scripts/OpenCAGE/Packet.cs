@@ -21,6 +21,7 @@ namespace OpenCAGE.UnityConnection
         ENTITY_PARAMETER_MODIFIED,
 
         RENDER_FILTERS_CHANGED,
+        SETTINGS_CHANGED,
         GENERIC_DATA_SYNC,
     }
 
@@ -33,7 +34,7 @@ namespace OpenCAGE.UnityConnection
 
         //Packet metadata
         public PacketEvent packet_event;
-        public int version = 5;
+        public int version = 6;
 
         //Setup metadata
         public string level_name = "";
@@ -66,6 +67,7 @@ namespace OpenCAGE.UnityConnection
 
         //Settings
         public bool focus_object = false;
+        public bool hide_nested_script_entities = false;
         public Dictionary<uint, bool> box_render_filters = new Dictionary<uint, bool>();
     }
 }

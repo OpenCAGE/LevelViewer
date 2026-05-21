@@ -26,10 +26,10 @@ public class BoxPreview : FunctionEntityPreview
         return RenderFilterDefinitions.GetPreviewKind(entity.function.AsFunctionType) == RenderPreviewKind.Box;
     }
 
-    public void Setup(FunctionEntity entity, CommandsUtils utils)
+    public void Setup(FunctionEntity entity, CommandsUtils utils, uint ownerCompositeId = 0)
     {
         _utils = utils;
-        base.Setup(entity);
+        base.Setup(entity, ownerCompositeId);
     }
 
     public override void Refresh()
@@ -37,7 +37,7 @@ public class BoxPreview : FunctionEntityPreview
         if (Entity == null)
             return;
 
-        bool visible = PreviewVisualUtility.IsVisible(Entity);
+        bool visible = PreviewVisualUtility.IsPreviewVisible(Entity, OwnerCompositeId);
         if (_volume != null)
             _volume.SetActive(visible);
         if (!visible)

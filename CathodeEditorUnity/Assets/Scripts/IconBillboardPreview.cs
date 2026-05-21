@@ -17,10 +17,10 @@ public class IconBillboardPreview : FunctionEntityPreview
     private bool _visible;
     private GameObject _billboard;
 
-    public void Setup(FunctionEntity entity, IconKind iconKind)
+    public void Setup(FunctionEntity entity, IconKind iconKind, uint ownerCompositeId = 0)
     {
         _iconKind = iconKind;
-        base.Setup(entity);
+        base.Setup(entity, ownerCompositeId);
     }
 
     public override void Refresh()
@@ -28,7 +28,7 @@ public class IconBillboardPreview : FunctionEntityPreview
         if (Entity == null)
             return;
 
-        _visible = PreviewVisualUtility.IsVisible(Entity);
+        _visible = PreviewVisualUtility.IsPreviewVisible(Entity, OwnerCompositeId);
         if (_billboard != null)
             _billboard.SetActive(_visible);
 

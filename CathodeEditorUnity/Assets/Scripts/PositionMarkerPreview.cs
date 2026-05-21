@@ -19,7 +19,7 @@ public class PositionMarkerPreview : FunctionEntityPreview
         if (Entity == null)
             return;
 
-        bool visible = PreviewVisualUtility.IsVisible(Entity);
+        bool visible = PreviewVisualUtility.IsPreviewVisible(Entity, OwnerCompositeId);
         if (_root != null)
             _root.SetActive(visible);
         if (!visible)

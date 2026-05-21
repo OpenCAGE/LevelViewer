@@ -15,10 +15,10 @@ public class ModelReferencePreview : FunctionEntityPreview
 
     private AlienScene _scene;
 
-    public void Setup(AlienScene scene, FunctionEntity entity)
+    public void Setup(AlienScene scene, FunctionEntity entity, uint ownerCompositeId = 0)
     {
         _scene = scene;
-        base.Setup(entity);
+        base.Setup(entity, ownerCompositeId);
     }
 
     public override void Refresh()

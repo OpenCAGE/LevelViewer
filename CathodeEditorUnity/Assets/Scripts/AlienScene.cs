@@ -83,6 +83,7 @@ public class AlienScene : MonoBehaviour
     private void RegisterDefaultParameterVisualHandlers()
     {
         RegisterParameterVisualHandler(DataType.TRANSFORM, ApplyTransformVisual);
+        RegisterParameterVisualHandler(DataType.VECTOR, ApplyVectorVisual);
     }
 
 #if UNITY_EDITOR
@@ -303,7 +304,7 @@ public class AlienScene : MonoBehaviour
                     }
                     else
                     {
-                        if (FunctionEntityPreviewSetup.TryAddPreview(this, function, entityGO, _content.Level.Commands.Utils))
+                        if (FunctionEntityPreviewSetup.TryAddPreview(this, function, entityGO, _content.Level.Commands.Utils, composite.shortGUID))
                             _functionEntityPreviewsCacheDirty = true;
                     }
                 }
@@ -485,6 +486,11 @@ public class AlienScene : MonoBehaviour
                 results.Add(child.gameObject);
             CollectEntityGameObjectsRecursive(child, entityGameObjectName, results);
         }
+    }
+
+    private void ApplyVectorVisual(ParameterVisualContext context)
+    {
+        RefreshFunctionEntityPreviews(context.EntityGameObject);
     }
 
     private void ApplyTransformVisual(ParameterVisualContext context)

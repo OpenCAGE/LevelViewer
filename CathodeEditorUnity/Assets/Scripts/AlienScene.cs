@@ -1,4 +1,4 @@
-//#define LOCAL_DEV
+#define LOCAL_DEV
 
 using CATHODE;
 using CATHODE.Scripting;
@@ -43,6 +43,20 @@ public class AlienScene : MonoBehaviour
     private Dictionary<ShortGuid, List<GameObject>> _compositeGameObjects = new Dictionary<ShortGuid, List<GameObject>>();
     private Dictionary<GameObject, Entity> _gameObjectEntities = new Dictionary<GameObject, Entity>();
 
+    public class ParameterVisualContext
+    {
+        public Composite Composite;
+        public Entity Entity;
+        public GameObject EntityGameObject;
+        public SyncedParameter Sync;
+        public bool FromPointer;
+        public bool PointedOverride;
+    }
+
+    public delegate void ParameterVisualHandler(ParameterVisualContext context);
+
+    private readonly Dictionary<DataType, ParameterVisualHandler> _parameterVisualHandlers = new Dictionary<DataType, ParameterVisualHandler>();
+
     public LevelContent Content => _content;
     private LevelContent _content = new LevelContent();
 
@@ -50,6 +64,21 @@ public class AlienScene : MonoBehaviour
     {
         public Texture2D Texture = null;
         public Cubemap Cubemap = null;
+    }
+
+    private void Awake()
+    {
+        RegisterDefaultParameterVisualHandlers();
+    }
+
+    public void RegisterParameterVisualHandler(DataType dataType, ParameterVisualHandler handler)
+    {
+        _parameterVisualHandlers[dataType] = handler;
+    }
+
+    private void RegisterDefaultParameterVisualHandlers()
+    {
+        RegisterParameterVisualHandler(DataType.TRANSFORM, ApplyTransformVisual);
     }
 
 #if UNITY_EDITOR
@@ -266,35 +295,13 @@ public class AlienScene : MonoBehaviour
                     }
                     else
                     {
-                        switch ((FunctionType)function.function.AsUInt32)
+                        if (BoxPreview.ShouldShowBoxPreview(function, _content.Level.Commands.Utils))
                         {
-                            //Renderables
-                            case FunctionType.ModelReference:
-                                if (_content.RemappedResources.ContainsKey(function))
-                                {
-                                    //Using a resource mapping which has changed at runtime
-                                    List<Tuple<int, int>> renderableElement = _content.RemappedResources[function];
-                                    for (int i = 0; i < renderableElement.Count; i++)
-                                    {
-                                        //TODO: this will diverge upon saves of commands editor
-                                        CreateRenderable(entityGO, _content.Level.Models.GetAtWriteIndex(renderableElement[i].Item1), _content.Level.Materials.GetAtWriteIndex(renderableElement[i].Item2));
-                                    }
-                                }
-                                else
-                                {
-                                    //Using a resource mapping which was written to disk
-                                    Parameter resourceParam = function.GetParameter("resource");
-                                    if (resourceParam != null && resourceParam.content != null && resourceParam.content.dataType == DataType.RESOURCE)
-                                    {
-                                        cResource resource = (cResource)resourceParam.content;
-                                        ResourceReference renderable = resource.GetResource(ResourceType.RENDERABLE_INSTANCE);
-                                        if (renderable != null)
-                                        {
-                                            CreateRenderableInstance(entityGO, renderable.RenderableInstance);
-                                        }
-                                    }
-                                }
-                                break;
+                            entityGO.AddComponent<BoxPreview>().Setup(function, _content.Level.Commands.Utils);
+                        }
+                        else if (function.function.AsFunctionType == FunctionType.ModelReference)
+                        {
+                            entityGO.AddComponent<ModelReferencePreview>().Setup(this, function);
                         }
                     }
                 }
@@ -348,6 +355,132 @@ public class AlienScene : MonoBehaviour
             list.Add(guid.AsUInt32);
         }
         return list;
+    }
+
+    /* Apply synced parameter changes to the data model and scene without rebuilding */
+    public void ApplyEntityParameter(ShortGuid dataCompositeID, ShortGuid dataEntityID, SyncedParameter sync, ShortGuid visualCompositeID, ShortGuid visualEntityID, bool fromPointer, bool pointedOverride)
+    {
+        if (sync == null)
+            return;
+
+        Composite dataComposite = _content.Level.Commands.Entries.FirstOrDefault(o => o.shortGUID == dataCompositeID);
+        if (dataComposite == null)
+            return;
+
+        Entity dataEntity = dataComposite.GetEntityByID(dataEntityID);
+        if (dataEntity == null)
+            return;
+
+        ParameterSync.ApplyToEntity(dataEntity, sync, _content);
+
+        FunctionEntity remapEntity = ModelReferencePreview.ResolveModelReferenceEntity(
+            dataEntity, dataComposite, _content.Level.Commands);
+        DataType syncDataType = ParameterSync.GetDataType(sync);
+        if (sync.removed && syncDataType == DataType.RESOURCE)
+        {
+            if (remapEntity != null)
+                _content.RemappedResources.Remove(remapEntity);
+        }
+        else if (syncDataType == DataType.RESOURCE)
+        {
+            List<Tuple<int, int>> renderables = ParameterSync.ToRenderableIndexList(sync, _content);
+            if (renderables.Count > 0 && remapEntity != null)
+                _content.RemappedResources[remapEntity] = renderables;
+        }
+
+        Composite visualComposite = _content.Level.Commands.Entries.FirstOrDefault(o => o.shortGUID == visualCompositeID);
+        Entity visualEntity = visualComposite?.GetEntityByID(visualEntityID);
+        if (visualComposite == null || visualEntity == null)
+            return;
+
+        foreach (GameObject entityGO in GetEntityGameObjects(visualCompositeID, visualEntityID))
+        {
+            ParameterVisualContext context = new ParameterVisualContext()
+            {
+                Composite = visualComposite,
+                Entity = visualEntity,
+                EntityGameObject = entityGO,
+                Sync = sync,
+                FromPointer = fromPointer,
+                PointedOverride = pointedOverride,
+            };
+
+            if (_parameterVisualHandlers.TryGetValue(syncDataType, out ParameterVisualHandler handler))
+                handler(context);
+
+            RefreshFunctionEntityPreviews(entityGO);
+        }
+    }
+
+    private void RefreshFunctionEntityPreviews(GameObject entityGO)
+    {
+        if (entityGO == null)
+            return;
+
+        FunctionEntityPreview[] previews = entityGO.GetComponents<FunctionEntityPreview>();
+        for (int i = 0; i < previews.Length; i++)
+            previews[i].Refresh();
+    }
+
+    private List<GameObject> GetEntityGameObjects(ShortGuid compositeID, ShortGuid entityID)
+    {
+        List<GameObject> results = new List<GameObject>();
+        string entityGameObjectName = entityID.AsUInt32.ToString();
+        if (!_compositeGameObjects.ContainsKey(compositeID))
+            return results;
+
+        foreach (GameObject compositeInstance in _compositeGameObjects[compositeID])
+        {
+            if (compositeInstance == null)
+                continue;
+            CollectEntityGameObjectsRecursive(compositeInstance.transform, entityGameObjectName, results);
+        }
+        return results;
+    }
+
+    private void CollectEntityGameObjectsRecursive(Transform parent, string entityGameObjectName, List<GameObject> results)
+    {
+        for (int i = 0; i < parent.childCount; i++)
+        {
+            Transform child = parent.GetChild(i);
+            if (child.name == entityGameObjectName)
+                results.Add(child.gameObject);
+            CollectEntityGameObjectsRecursive(child, entityGameObjectName, results);
+        }
+    }
+
+    private void ApplyTransformVisual(ParameterVisualContext context)
+    {
+        GameObject target = context.EntityGameObject;
+        EntityOverride entityOverride = target.GetComponent<EntityOverride>();
+        if (entityOverride != null && entityOverride.PointedEntity != null)
+            target = entityOverride.PointedEntity;
+
+        if (context.Sync.removed)
+        {
+            GetEntityTransform(context.Entity, out Vector3 position, out Vector3 rotation);
+            target.transform.SetLocalPositionAndRotation(position, Quaternion.Euler(rotation));
+            target.tag = "Untagged";
+            return;
+        }
+
+        Vector3 pos = ParameterSync.ToVector3(context.Sync.vector3_a);
+        Vector3 rot = ParameterSync.ToVector3(context.Sync.vector3_b);
+        bool applyToPointed = entityOverride != null;
+        target.tag = applyToPointed || context.PointedOverride ? "pointed" : "Untagged";
+        if (!(target.tag == "pointed" && !context.FromPointer && !applyToPointed))
+            target.transform.SetLocalPositionAndRotation(pos, Quaternion.Euler(rot));
+    }
+
+    public void ClearRenderableChildren(Transform parent)
+    {
+        for (int x = parent.childCount - 1; x >= 0; x--)
+            Destroy(parent.GetChild(x).gameObject);
+    }
+
+    public void SpawnRenderable(GameObject parent, Models.CS2.Component.LOD.Submesh submesh, Materials.Material material)
+    {
+        CreateRenderable(parent, submesh, material);
     }
 
     /* Reposition all Entities in the scene with a new local position and rotation */
@@ -415,42 +548,15 @@ public class AlienScene : MonoBehaviour
     /* Update the MeshRenderers for all Entities in the scene */
     public void UpdateRenderable(ShortGuid composite, ShortGuid entity, List<Tuple<int, int>> renderables)
     {
-        //todo: this should handle overrides
-        string entityGameObjectName = entity.AsUInt32.ToString();
-        if (_compositeGameObjects.ContainsKey(composite))
-        {
-            foreach (GameObject compositeInstance in _compositeGameObjects[composite])
-            {
-                if (compositeInstance != null)
-                {
-                    Transform compositeInstanceTransform = compositeInstance.transform;
-                    for (int i = 0; i < compositeInstanceTransform.childCount; i++)
-                    {
-                        Transform child = compositeInstanceTransform.GetChild(i);
-                        if (child.name == entityGameObjectName)
-                        {
-                            for (int x = 0; x < child.childCount; x++)
-                            {
-                                Destroy(child.GetChild(x).gameObject);
-                            }
-                            for (int x = 0; x < renderables.Count; x++)
-                            {
-                                //TODO: this will diverge upon saves of commands editor
-                                CreateRenderable(child.gameObject, _content.Level.Models.GetAtWriteIndex(renderables[x].Item1), _content.Level.Materials.GetAtWriteIndex(renderables[x].Item2));
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
+        FunctionEntity function = _content.Level.Commands.Entries
+            .FirstOrDefault(o => o.shortGUID == composite)?
+            .GetEntityByID(entity) as FunctionEntity;
 
-    private void CreateRenderableInstance(GameObject parent, List<RenderableElements.Element> elements)
-    {
-        for (int i = 0; i < elements.Count; i++)
-        {
-            CreateRenderable(parent, elements[i].Model, elements[i].Material);
-        }
+        if (function != null)
+            _content.RemappedResources[function] = renderables;
+
+        foreach (GameObject entityGO in GetEntityGameObjects(composite, entity))
+            RefreshFunctionEntityPreviews(entityGO);
     }
 
     private void CreateRenderable(GameObject parent, Models.CS2.Component.LOD.Submesh submesh, Materials.Material material)

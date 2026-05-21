@@ -31,16 +31,19 @@ public class CommandsEditorConnection : MonoBehaviour
 
     private uint _currentEntityGOID = 0;
 
-    private Vector3 _position;
-    private Vector3 _rotation;
-    private Tuple<ShortGuid, ShortGuid> _movedEntity = null;
-    private bool _movingPointed = false;
-    private bool _pointedPos = false;
-
     private bool _didLoadLevel = true;
 
-    List<Tuple<int, int>> _renderable;
-    private Tuple<ShortGuid, ShortGuid> _renderableEntity = null;
+    private class PendingParameterSync
+    {
+        public ShortGuid DataCompositeID;
+        public ShortGuid DataEntityID;
+        public ShortGuid VisualCompositeID;
+        public ShortGuid VisualEntityID;
+        public SyncedParameter Sync;
+        public bool FromPointer;
+        public bool PointedOverride;
+    }
+    private readonly List<PendingParameterSync> _pendingParameterSyncs = new List<PendingParameterSync>();
 
     private Tuple<ShortGuid, ShortGuid> _addedEntity = null;
     private Tuple<ShortGuid, ShortGuid> _removedEntity = null;
@@ -94,103 +97,13 @@ public class CommandsEditorConnection : MonoBehaviour
 
         switch (packet.packet_event)
         {
+            case PacketEvent.ENTITY_PARAMETER_MODIFIED:
             case PacketEvent.ENTITY_MOVED:
-                {
-                    lock (_lock)
-                    {
-                        _position = new Vector3(packet.position.X, packet.position.Y, packet.position.Z);
-                        _rotation = new Vector3(packet.rotation.X, packet.rotation.Y, packet.rotation.Z);
-                        _movingPointed = false;
-                        _pointedPos = false;
-
-                        ShortGuid entityID = new ShortGuid(packet.entity);
-                        ShortGuid compositeID = new ShortGuid(packet.composite);
-                        Composite composite = _scene.Content.Level.Commands.Entries.FirstOrDefault(o => o.shortGUID == compositeID);
-                        if (composite != null)
-                        {
-                            Entity entity = null;
-                            switch (packet.entity_variant)
-                            {
-                                case EntityVariant.FUNCTION:
-                                    entity = composite.functions.FirstOrDefault(o => o.shortGUID == entityID);
-                                    break;
-                                case EntityVariant.VARIABLE:
-                                    entity = composite.variables.FirstOrDefault(o => o.shortGUID == entityID);
-                                    break;
-                                case EntityVariant.ALIAS:
-                                    entity = composite.aliases.FirstOrDefault(o => o.shortGUID == entityID);
-                                    break;
-                                case EntityVariant.PROXY:
-                                    entity = composite.proxies.FirstOrDefault(o => o.shortGUID == entityID);
-                                    break;
-                            }
-                            if (entity != null)
-                            {
-                                if (packet.has_transform)
-                                {
-                                    Parameter position = entity.GetParameter("position");
-                                    if (position == null || position?.content?.dataType == DataType.TRANSFORM)
-                                        position = entity.AddParameter("position", new cTransform());
-                                    cTransform transform = (cTransform)position.content;
-                                    transform.position = new Vector3(packet.position.X, packet.position.Y, packet.position.Z);
-                                    transform.rotation = new Vector3(packet.rotation.X, packet.rotation.Y, packet.rotation.Z);
-                                }
-                                else
-                                {
-                                    entity.RemoveParameter("position");
-                                }
-
-                                //If this entity points to another, resolve it to apply the transform correctly in scene
-                                switch (entity.variant)
-                                {
-                                    case EntityVariant.PROXY:
-                                        HandlePointedTransform(packet, out entityID, out compositeID, ((ProxyEntity)entity).proxy, _scene.Content.Level.Commands.EntryPoints[0]);
-                                        break;
-                                    case EntityVariant.ALIAS:
-                                        HandlePointedTransform(packet, out entityID, out compositeID, ((AliasEntity)entity).alias, composite);
-                                        break;
-                                }
-                            }
-                        }
-
-                        _movedEntity = new Tuple<ShortGuid, ShortGuid>(compositeID, entityID);
-                    }
-                    break;
-                }
             case PacketEvent.ENTITY_RESOURCE_MODIFIED:
                 {
                     lock (_lock)
                     {
-                        ShortGuid entityID = new ShortGuid(packet.entity);
-                        ShortGuid compositeID = new ShortGuid(packet.composite);
-                        Composite composite = _scene.Content.Level.Commands.Entries.FirstOrDefault(o => o.shortGUID == compositeID);
-                        if (composite != null)
-                        {
-                            Entity entity = null;
-                            switch (packet.entity_variant)
-                            {
-                                case EntityVariant.FUNCTION:
-                                    entity = composite.functions.FirstOrDefault(o => o.shortGUID == entityID);
-                                    break;
-                                case EntityVariant.VARIABLE:
-                                    entity = composite.variables.FirstOrDefault(o => o.shortGUID == entityID);
-                                    break;
-                                case EntityVariant.ALIAS:
-                                    entity = composite.aliases.FirstOrDefault(o => o.shortGUID == entityID);
-                                    break;
-                                case EntityVariant.PROXY:
-                                    entity = composite.proxies.FirstOrDefault(o => o.shortGUID == entityID);
-                                    break;
-                            }
-                            if (entity != null)
-                            {
-                                _scene.Content.RemappedResources.Remove(entity);
-                                _scene.Content.RemappedResources.Add(entity, packet.renderable);
-                            }
-                        }
-
-                        _renderable = packet.renderable;
-                        _renderableEntity = new Tuple<ShortGuid, ShortGuid>(compositeID, entityID);
+                        QueueParameterSync(packet);
                     }
                     break;
                 }
@@ -284,32 +197,138 @@ public class CommandsEditorConnection : MonoBehaviour
                 }
         }
     }
-    private void HandlePointedTransform(Packet packet, out ShortGuid entityID, out ShortGuid compositeID, EntityPath path, Composite startComposite)
+    private void QueueParameterSync(Packet packet)
+    {
+        ShortGuid entityID = new ShortGuid(packet.entity);
+        ShortGuid compositeID = new ShortGuid(packet.composite);
+        Composite composite = _scene.Content.Level.Commands.Entries.FirstOrDefault(o => o.shortGUID == compositeID);
+        if (composite == null)
+            return;
+
+        Entity entity = GetEntity(composite, entityID, packet.entity_variant);
+        if (entity == null)
+            return;
+
+        List<SyncedParameter> syncs = new List<SyncedParameter>();
+        if (packet.parameters != null && packet.parameters.Count > 0)
+            syncs.AddRange(packet.parameters);
+        else
+            syncs.AddRange(BuildLegacySyncedParameters(packet, entity));
+
+        foreach (SyncedParameter sync in syncs)
+        {
+            if (sync == null)
+                continue;
+
+            if (ParameterSync.GetDataType(sync) == DataType.RESOURCE &&
+                (sync.renderable == null || sync.renderable.Count == 0) &&
+                packet.renderable != null && packet.renderable.Count > 0)
+            {
+                foreach (Tuple<int, int> element in packet.renderable)
+                {
+                    sync.renderable.Add(new RenderableSyncElement()
+                    {
+                        model_index = element.Item1,
+                        material_index = element.Item2,
+                    });
+                }
+            }
+
+            bool fromPointer = false;
+            bool pointedOverride = false;
+            ShortGuid visualCompositeID = compositeID;
+            ShortGuid visualEntityID = entityID;
+
+            DataType syncDataType = ParameterSync.GetDataType(sync);
+            if (syncDataType == DataType.TRANSFORM || syncDataType == DataType.RESOURCE)
+            {
+                switch (entity.variant)
+                {
+                    case EntityVariant.PROXY:
+                        HandlePointedEntity(sync, out visualEntityID, out visualCompositeID, ((ProxyEntity)entity).proxy, _scene.Content.Level.Commands.EntryPoints[0], out fromPointer, out pointedOverride);
+                        break;
+                    case EntityVariant.ALIAS:
+                        HandlePointedEntity(sync, out visualEntityID, out visualCompositeID, ((AliasEntity)entity).alias, composite, out fromPointer, out pointedOverride);
+                        break;
+                }
+            }
+
+            _pendingParameterSyncs.Add(new PendingParameterSync()
+            {
+                DataCompositeID = compositeID,
+                DataEntityID = entityID,
+                VisualCompositeID = visualCompositeID,
+                VisualEntityID = visualEntityID,
+                Sync = sync,
+                FromPointer = fromPointer,
+                PointedOverride = pointedOverride,
+            });
+        }
+    }
+
+    private List<SyncedParameter> BuildLegacySyncedParameters(Packet packet, Entity entity)
+    {
+        List<SyncedParameter> syncs = new List<SyncedParameter>();
+        switch (packet.packet_event)
+        {
+            case PacketEvent.ENTITY_MOVED:
+                SyncedParameter transformSync = new SyncedParameter()
+                {
+                    name = ShortGuidUtils.Generate("position").AsUInt32,
+                    removed = !packet.has_transform,
+                    data_type = (uint)DataType.TRANSFORM,
+                };
+                if (packet.has_transform)
+                {
+                    transformSync.vector3_a = new float[] { packet.position.X, packet.position.Y, packet.position.Z };
+                    transformSync.vector3_b = new float[] { packet.rotation.X, packet.rotation.Y, packet.rotation.Z };
+                }
+                syncs.Add(transformSync);
+                break;
+            case PacketEvent.ENTITY_RESOURCE_MODIFIED:
+                SyncedParameter resourceSync = new SyncedParameter()
+                {
+                    name = ShortGuidUtils.Generate("resource").AsUInt32,
+                    removed = false,
+                    data_type = (uint)DataType.RESOURCE,
+                };
+                foreach (Tuple<int, int> element in packet.renderable)
+                {
+                    resourceSync.renderable.Add(new RenderableSyncElement()
+                    {
+                        model_index = element.Item1,
+                        material_index = element.Item2,
+                    });
+                }
+                syncs.Add(resourceSync);
+                break;
+        }
+        return syncs;
+    }
+
+    private Entity GetEntity(Composite composite, ShortGuid entityID, EntityVariant variant)
+    {
+        switch (variant)
+        {
+            case EntityVariant.FUNCTION:
+                return composite.functions.FirstOrDefault(o => o.shortGUID == entityID);
+            case EntityVariant.VARIABLE:
+                return composite.variables.FirstOrDefault(o => o.shortGUID == entityID);
+            case EntityVariant.ALIAS:
+                return composite.aliases.FirstOrDefault(o => o.shortGUID == entityID);
+            case EntityVariant.PROXY:
+                return composite.proxies.FirstOrDefault(o => o.shortGUID == entityID);
+        }
+        return null;
+    }
+
+    private void HandlePointedEntity(SyncedParameter sync, out ShortGuid entityID, out ShortGuid compositeID, EntityPath path, Composite startComposite, out bool fromPointer, out bool pointedOverride)
     {
         (Composite pComp, Entity pEnt) = _scene.Content.Level.Commands.Utils.GetResolvedTarget(_scene.Content.Level.Commands.Utils.ResolveAliasOrProxy(path, startComposite));
         entityID = pEnt != null ? pEnt.shortGUID : ShortGuid.Invalid;
         compositeID = pComp != null ? pComp.shortGUID : ShortGuid.Invalid;
-        if (!packet.has_transform)
-        {
-            _pointedPos = false;
-            Parameter p = pEnt.GetParameter("position");
-            if (p != null && p?.content?.dataType == DataType.TRANSFORM)
-            {
-                cTransform pT = (cTransform)p.content;
-                _position = pT.position;
-                _rotation = pT.rotation;
-            }
-            else
-            {
-                _position = Vector3.zero;
-                _rotation = Vector3.zero;
-            }
-        }
-        else
-        {
-            _pointedPos = true;
-        }
-        _movingPointed = true;
+        fromPointer = true;
+        pointedOverride = !sync.removed;
     }
 
     /* Sync any changes that happened with our Unity scene */
@@ -357,18 +376,22 @@ public class CommandsEditorConnection : MonoBehaviour
             _removedComposite = ShortGuid.Invalid;
         }
 
-        if (_renderableEntity != null)
+        List<PendingParameterSync> pendingParameterSyncs = null;
+        lock (_lock)
         {
-            Debug.Log("Updating renderables for entity: " + _renderableEntity.Item2.AsUInt32 + " [" + _renderable.Count + "]");
-            _scene.UpdateRenderable(_renderableEntity.Item1, _renderableEntity.Item2, _renderable);
-            _renderableEntity = null;
+            if (_pendingParameterSyncs.Count > 0)
+            {
+                pendingParameterSyncs = new List<PendingParameterSync>(_pendingParameterSyncs);
+                _pendingParameterSyncs.Clear();
+            }
         }
 
-        if (_movedEntity != null)
+        if (pendingParameterSyncs != null)
         {
-            Debug.Log("Updating transform for entity: " + _movedEntity.Item2.AsUInt32 + " [" + _position + ", " + _rotation + "]");
-            _scene.RepositionEntity(_movedEntity.Item1, _movedEntity.Item2, _position, Quaternion.Euler(_rotation), _movingPointed, _pointedPos);
-            _movedEntity = null;
+            foreach (PendingParameterSync pending in pendingParameterSyncs)
+            {
+                _scene.ApplyEntityParameter(pending.DataCompositeID, pending.DataEntityID, pending.Sync, pending.VisualCompositeID, pending.VisualEntityID, pending.FromPointer, pending.PointedOverride);
+            }
         }
 
         if (_currentEntityGOID != _currentEntity)
@@ -435,6 +458,7 @@ public class CommandsEditorConnection : MonoBehaviour
         ENTITY_DELETED,
         ENTITY_ADDED,
         ENTITY_RESOURCE_MODIFIED,
+        ENTITY_PARAMETER_MODIFIED,
 
         GENERIC_DATA_SYNC,
     }
@@ -448,7 +472,7 @@ public class CommandsEditorConnection : MonoBehaviour
 
         //Packet metadata
         public PacketEvent packet_event;
-        public int version = 4;
+        public int version = 5;
 
         //Setup metadata
         public string level_name = "";
@@ -467,6 +491,9 @@ public class CommandsEditorConnection : MonoBehaviour
 
         //Renderable resource
         public List<Tuple<int, int>> renderable = new List<Tuple<int, int>>(); //Model Index, Material Index
+
+        //Generic parameter sync
+        public List<SyncedParameter> parameters = new List<SyncedParameter>();
 
         //Modified entity info
         public EntityVariant entity_variant;

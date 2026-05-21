@@ -1,4 +1,4 @@
-#define LOCAL_DEV
+//#define LOCAL_DEV
 
 using CATHODE;
 using CATHODE.Scripting;

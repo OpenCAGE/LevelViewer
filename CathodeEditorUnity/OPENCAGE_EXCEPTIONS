@@ -5,9 +5,4 @@ Assets\CathodeLib\CathodeLib\CathodeLib.csproj
 Assets\CathodeLib\CathodeLib\Properties\Resources.resx
 Assets\CathodeLib\CathodeLib\Properties\Resources.Designer.cs
 Assets\CathodeLib\CathodeLib\Resources\sound_names.bin
-Assets\CathodeLib\CathodeLib\Resources\NodeDBs\cathode_entity_lut.bin
-Assets\CathodeLib\CathodeLib\Resources\NodeDBs\cathode_enum_lut.bin
-Assets\CathodeLib\CathodeLib\Resources\NodeDBs\cathode_shortguid_lut.bin
-Assets\CathodeLib\CathodeLib\Resources\NodeDBs\composite_entity_names.bin
-Assets\CathodeLib\CathodeLib\Resources\NodeDBs\composite_parameter_info.bin
-Assets\CathodeLib\CathodeLib\Resources\NodeDBs\composite_paths.bin
+Assets\CathodeLib\CathodeLib\Resources\info.dat

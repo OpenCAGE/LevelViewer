@@ -55,6 +55,8 @@ public class CommandsEditorConnection : MonoBehaviour
     private bool _focusSelected = false;
     private bool _hideNestedScriptEntities = false;
     private bool _renderFiltersDirty = false;
+    private bool _nestedVisibilityDirty = false;
+    private uint _nestedVisibilityPreviousCompositeId = 0;
     private int _renderFiltersGeneration = 0;
     private HashSet<uint> _renderFiltersChangedFunctionTypes = null;
 
@@ -120,14 +122,27 @@ public class CommandsEditorConnection : MonoBehaviour
             _currentEntity = _entitySelected ? _pathEntities[_pathEntities.Count - 1] : 0;
 
             _focusSelected = packet.focus_object;
+            uint previousActiveCompositeId = PreviewVisibilitySettings.ActiveCompositeId;
             bool hideNestedChanged = ApplyViewerSettings(packet);
             bool activeCompositeChanged = ApplyActiveComposite(packet);
 
-            bool refreshAllPreviews = hideNestedChanged || (activeCompositeChanged && PreviewVisibilitySettings.HideNestedScriptEntities);
+            bool nestedVisibilityOnly = !hideNestedChanged
+                && activeCompositeChanged
+                && PreviewVisibilitySettings.HideNestedScriptEntities;
+
             if (packet.box_render_filters != null && RenderFilters.ApplyFromPacket(packet.box_render_filters, out HashSet<uint> changed))
-                MarkRenderFiltersDirty(refreshAllPreviews ? null : changed);
-            else if (refreshAllPreviews)
+            {
+                if (hideNestedChanged)
+                    MarkRenderFiltersDirty(null);
+                else if (nestedVisibilityOnly)
+                    MarkNestedVisibilityDirty(previousActiveCompositeId);
+                else
+                    MarkRenderFiltersDirty(changed);
+            }
+            else if (hideNestedChanged)
                 MarkRenderFiltersDirty(null);
+            else if (nestedVisibilityOnly)
+                MarkNestedVisibilityDirty(previousActiveCompositeId);
         }
 
         switch (packet.packet_event)
@@ -438,14 +453,30 @@ public class CommandsEditorConnection : MonoBehaviour
 
         if (renderFiltersGeneration >= 0)
         {
+            bool nestedVisibilityDirty = false;
+            uint nestedVisibilityPreviousCompositeId = 0;
             HashSet<uint> changedFunctionTypes = null;
             lock (_lock)
             {
+                nestedVisibilityDirty = _nestedVisibilityDirty;
+                nestedVisibilityPreviousCompositeId = _nestedVisibilityPreviousCompositeId;
+                _nestedVisibilityDirty = false;
+
                 changedFunctionTypes = _renderFiltersChangedFunctionTypes;
                 _renderFiltersChangedFunctionTypes = null;
             }
 
-            _scene.RefreshRenderFilters(changedFunctionTypes);
+            if (nestedVisibilityDirty)
+            {
+                _scene.RefreshNestedCompositeVisibility(
+                    nestedVisibilityPreviousCompositeId,
+                    PreviewVisibilitySettings.ActiveCompositeId);
+            }
+            else
+            {
+                _scene.RefreshRenderFilters(changedFunctionTypes);
+            }
+
             lock (_lock)
             {
                 if (_renderFiltersGeneration == renderFiltersGeneration)
@@ -483,6 +514,7 @@ public class CommandsEditorConnection : MonoBehaviour
     private void MarkRenderFiltersDirty(HashSet<uint> changedFunctionTypes)
     {
         _renderFiltersDirty = true;
+        _nestedVisibilityDirty = false;
         _renderFiltersGeneration++;
         if (changedFunctionTypes == null || changedFunctionTypes.Count == 0)
             return;
@@ -491,6 +523,15 @@ public class CommandsEditorConnection : MonoBehaviour
             _renderFiltersChangedFunctionTypes = new HashSet<uint>(changedFunctionTypes);
         else
             _renderFiltersChangedFunctionTypes.UnionWith(changedFunctionTypes);
+    }
+
+    private void MarkNestedVisibilityDirty(uint previousActiveCompositeId)
+    {
+        _renderFiltersDirty = true;
+        _nestedVisibilityDirty = true;
+        _nestedVisibilityPreviousCompositeId = previousActiveCompositeId;
+        _renderFiltersChangedFunctionTypes = null;
+        _renderFiltersGeneration++;
     }
 
     private IEnumerator ReconnectLoop()

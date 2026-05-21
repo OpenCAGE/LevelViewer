@@ -21,6 +21,13 @@ public class ModelReferencePreview : FunctionEntityPreview
         base.Setup(entity, ownerCompositeId);
     }
 
+    protected override GameObject GetVisibilityRoot() => null;
+
+    public override void RefreshVisibility()
+    {
+        // Model references are not gated by hide-nested; avoid respawning meshes.
+    }
+
     public override void Refresh()
     {
         if (_scene == null || Entity == null)

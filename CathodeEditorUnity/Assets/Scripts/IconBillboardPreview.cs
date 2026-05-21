@@ -23,16 +23,15 @@ public class IconBillboardPreview : FunctionEntityPreview
         base.Setup(entity, ownerCompositeId);
     }
 
+    protected override GameObject GetVisibilityRoot() => _billboard;
+
     public override void Refresh()
     {
         if (Entity == null)
             return;
 
         _visible = PreviewVisualUtility.IsPreviewVisible(Entity, OwnerCompositeId);
-        if (_billboard != null)
-            _billboard.SetActive(_visible);
-
-        if (!_visible)
+        if (SyncVisibility(_visible, _billboard))
             return;
 
         EnsureBillboard();

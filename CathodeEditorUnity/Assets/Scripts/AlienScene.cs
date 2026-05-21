@@ -45,6 +45,7 @@ public class AlienScene : MonoBehaviour
     private Dictionary<GameObject, Entity> _gameObjectEntities = new Dictionary<GameObject, Entity>();
 
     private FunctionEntityPreview[] _cachedFunctionEntityPreviews = System.Array.Empty<FunctionEntityPreview>();
+    private readonly Dictionary<uint, List<FunctionEntityPreview>> _previewsByOwnerComposite = new Dictionary<uint, List<FunctionEntityPreview>>();
     private bool _functionEntityPreviewsCacheDirty = true;
 
     public class ParameterVisualContext
@@ -428,6 +429,64 @@ public class AlienScene : MonoBehaviour
     public void InvalidateFunctionEntityPreviewCache()
     {
         _functionEntityPreviewsCacheDirty = true;
+        _previewsByOwnerComposite.Clear();
+    }
+
+    private void EnsureFunctionEntityPreviewCache()
+    {
+        if (!_functionEntityPreviewsCacheDirty)
+            return;
+
+        _cachedFunctionEntityPreviews = _parentGameObject.GetComponentsInChildren<FunctionEntityPreview>(true);
+        _previewsByOwnerComposite.Clear();
+
+        for (int i = 0; i < _cachedFunctionEntityPreviews.Length; i++)
+        {
+            FunctionEntityPreview preview = _cachedFunctionEntityPreviews[i];
+            if (preview == null)
+                continue;
+
+            uint ownerCompositeId = preview.OwnerCompositeId;
+            if (!_previewsByOwnerComposite.TryGetValue(ownerCompositeId, out List<FunctionEntityPreview> previews))
+            {
+                previews = new List<FunctionEntityPreview>();
+                _previewsByOwnerComposite.Add(ownerCompositeId, previews);
+            }
+
+            previews.Add(preview);
+        }
+
+        _functionEntityPreviewsCacheDirty = false;
+    }
+
+    /// <summary>
+    /// When hide-nested is on, only previews owned by the previous or new active composite can change visibility.
+    /// </summary>
+    public void RefreshNestedCompositeVisibility(uint previousActiveCompositeId, uint newActiveCompositeId)
+    {
+        if (_parentGameObject == null)
+            return;
+
+        EnsureFunctionEntityPreviewCache();
+
+        if (previousActiveCompositeId != 0)
+            RefreshVisibilityForComposite(previousActiveCompositeId);
+
+        if (newActiveCompositeId != 0 && newActiveCompositeId != previousActiveCompositeId)
+            RefreshVisibilityForComposite(newActiveCompositeId);
+    }
+
+    private void RefreshVisibilityForComposite(uint ownerCompositeId)
+    {
+        if (!_previewsByOwnerComposite.TryGetValue(ownerCompositeId, out List<FunctionEntityPreview> previews))
+            return;
+
+        for (int i = 0; i < previews.Count; i++)
+        {
+            FunctionEntityPreview preview = previews[i];
+            if (preview != null)
+                preview.RefreshVisibility();
+        }
     }
 
     public void RefreshRenderFilters(System.Collections.Generic.HashSet<uint> changedFunctionTypes = null)
@@ -435,11 +494,7 @@ public class AlienScene : MonoBehaviour
         if (_parentGameObject == null)
             return;
 
-        if (_functionEntityPreviewsCacheDirty)
-        {
-            _cachedFunctionEntityPreviews = _parentGameObject.GetComponentsInChildren<FunctionEntityPreview>(true);
-            _functionEntityPreviewsCacheDirty = false;
-        }
+        EnsureFunctionEntityPreviewCache();
 
         for (int i = 0; i < _cachedFunctionEntityPreviews.Length; i++)
         {
@@ -449,6 +504,9 @@ public class AlienScene : MonoBehaviour
                 _functionEntityPreviewsCacheDirty = true;
                 continue;
             }
+
+            if (preview is ModelReferencePreview)
+                continue;
 
             if (changedFunctionTypes != null && preview.Entity != null && preview.Entity.function.IsFunctionType)
             {

@@ -14,15 +14,15 @@ public class PositionMarkerPreview : FunctionEntityPreview
     protected virtual float AxisLength => 0.22f;
     protected virtual float AxisWidth => 0.03f;
 
+    protected override GameObject GetVisibilityRoot() => _root;
+
     public override void Refresh()
     {
         if (Entity == null)
             return;
 
         bool visible = PreviewVisualUtility.IsPreviewVisible(Entity, OwnerCompositeId);
-        if (_root != null)
-            _root.SetActive(visible);
-        if (!visible)
+        if (SyncVisibility(visible, _root))
             return;
 
         EnsureVisual();

@@ -17,4 +17,37 @@ public abstract class FunctionEntityPreview : MonoBehaviour
     }
 
     public abstract void Refresh();
+
+    /// <summary>
+    /// Fast path for hide-nested / active-composite changes — toggles visibility without rebuilding visuals.
+    /// </summary>
+    public virtual void RefreshVisibility()
+    {
+        if (Entity == null)
+            return;
+
+        bool visible = PreviewVisualUtility.IsPreviewVisible(Entity, OwnerCompositeId);
+        if (SyncVisibility(visible, GetVisibilityRoot()))
+            return;
+
+        if (visible)
+            Refresh();
+    }
+
+    protected abstract GameObject GetVisibilityRoot();
+
+    /// <summary>
+    /// Returns true when no further refresh work is needed.
+    /// </summary>
+    protected bool SyncVisibility(bool visible, GameObject root)
+    {
+        if (root == null)
+            return !visible;
+
+        if (root.activeSelf == visible && visible)
+            return true;
+
+        root.SetActive(visible);
+        return !visible;
+    }
 }

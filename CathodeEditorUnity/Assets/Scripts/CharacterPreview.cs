@@ -13,15 +13,15 @@ public class CharacterPreview : FunctionEntityPreview
     private GameObject _root;
     private MaterialPropertyBlock _propertyBlock;
 
+    protected override GameObject GetVisibilityRoot() => _root;
+
     public override void Refresh()
     {
         if (Entity == null)
             return;
 
         bool visible = PreviewVisualUtility.IsPreviewVisible(Entity, OwnerCompositeId);
-        if (_root != null)
-            _root.SetActive(visible);
-        if (!visible)
+        if (SyncVisibility(visible, _root))
             return;
 
         EnsureVisual();

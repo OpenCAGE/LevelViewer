@@ -32,15 +32,15 @@ public class BoxPreview : FunctionEntityPreview
         base.Setup(entity, ownerCompositeId);
     }
 
+    protected override GameObject GetVisibilityRoot() => _volume;
+
     public override void Refresh()
     {
         if (Entity == null)
             return;
 
         bool visible = PreviewVisualUtility.IsPreviewVisible(Entity, OwnerCompositeId);
-        if (_volume != null)
-            _volume.SetActive(visible);
-        if (!visible)
+        if (SyncVisibility(visible, _volume))
             return;
 
         EnsureVolume();

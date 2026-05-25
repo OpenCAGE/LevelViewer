@@ -8,12 +8,91 @@
     <DefineConstants>GODOT</DefineConstants>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>disable</Nullable>
+    <CathodeLibResourcesPath>$(MSBuildProjectDirectory)\..\..\..\CathodeLib\CathodeLib\Resources</CathodeLibResourcesPath>
+    <UnityStreamingAssetsPath>$(MSBuildProjectDirectory)\..\CathodeEditorUnity\Assets\StreamingAssets</UnityStreamingAssetsPath>
+    <GodotStreamingAssetsPath>$(MSBuildProjectDirectory)\streaming_assets</GodotStreamingAssetsPath>
   </PropertyGroup>
 
   <ItemGroup>
     <Compile Include="..\..\..\CathodeLib\CathodeLib\Scripts\**\*.cs" Exclude="..\..\..\CathodeLib\CathodeLib\Scripts\Instancing.cs" Link="CathodeLib\%(RecursiveDir)%(Filename)%(Extension)" />
     <Compile Include="..\..\..\CathodeLib\AlienBML\BML.cs" Link="CathodeLib\Scripts\CATHODE\BML.cs" />
+    <Compile Include="..\..\..\CathodeLib\CathodeLib\Properties\Resources.Designer.cs" Link="CathodeLib\Properties\Resources.Designer.cs">
+      <DependentUpon>Resources.resx</DependentUpon>
+      <AutoGen>True</AutoGen>
+      <DesignTime>True</DesignTime>
+    </Compile>
+    <EmbeddedResource Include="..\..\..\CathodeLib\CathodeLib\Properties\Resources.resx" Link="CathodeLib\Properties\Resources.resx">
+      <Generator>ResXFileCodeGenerator</Generator>
+      <LastGenOutput>Resources.Designer.cs</LastGenOutput>
+    </EmbeddedResource>
   </ItemGroup>
+
+  <!-- Populate project streaming_assets/ from CathodeLib or Unity when the files are not checked in here. -->
+  <Target Name="EnsureGodotStreamingAssets" BeforeTargets="BeforeBuild;Publish">
+    <MakeDir Directories="$(GodotStreamingAssetsPath)" Condition="!Exists('$(GodotStreamingAssetsPath)')" />
+    <Copy SourceFiles="$(CathodeLibResourcesPath)\info.dat"
+          DestinationFiles="$(GodotStreamingAssetsPath)\info.dat"
+          SkipUnchangedFiles="true"
+          Condition="Exists('$(CathodeLibResourcesPath)\info.dat') And !Exists('$(GodotStreamingAssetsPath)\info.dat')" />
+    <Copy SourceFiles="$(CathodeLibResourcesPath)\sound_names.bin"
+          DestinationFiles="$(GodotStreamingAssetsPath)\sound_names.bin"
+          SkipUnchangedFiles="true"
+          Condition="Exists('$(CathodeLibResourcesPath)\sound_names.bin') And !Exists('$(GodotStreamingAssetsPath)\sound_names.bin')" />
+    <Copy SourceFiles="$(UnityStreamingAssetsPath)\info.dat"
+          DestinationFiles="$(GodotStreamingAssetsPath)\info.dat"
+          SkipUnchangedFiles="true"
+          Condition="Exists('$(UnityStreamingAssetsPath)\info.dat') And !Exists('$(GodotStreamingAssetsPath)\info.dat')" />
+    <Copy SourceFiles="$(UnityStreamingAssetsPath)\sound_names.bin"
+          DestinationFiles="$(GodotStreamingAssetsPath)\sound_names.bin"
+          SkipUnchangedFiles="true"
+          Condition="Exists('$(UnityStreamingAssetsPath)\sound_names.bin') And !Exists('$(GodotStreamingAssetsPath)\sound_names.bin')" />
+  </Target>
+
+  <ItemGroup>
+    <Content Include="streaming_assets\info.dat" Condition="Exists('streaming_assets\info.dat')">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+      <Link>streaming_assets\info.dat</Link>
+    </Content>
+    <Content Include="streaming_assets\sound_names.bin" Condition="Exists('streaming_assets\sound_names.bin')">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+      <Link>streaming_assets\sound_names.bin</Link>
+    </Content>
+  </ItemGroup>
+
+  <Target Name="CopyStreamingAssetsToGodotOutput" AfterTargets="Build" DependsOnTargets="EnsureGodotStreamingAssets">
+    <ItemGroup>
+      <_StreamingAssetFiles Include="$(GodotStreamingAssetsPath)\info.dat" Condition="Exists('$(GodotStreamingAssetsPath)\info.dat')" />
+      <_StreamingAssetFiles Include="$(GodotStreamingAssetsPath)\sound_names.bin" Condition="Exists('$(GodotStreamingAssetsPath)\sound_names.bin')" />
+    </ItemGroup>
+    <MakeDir Directories="$(OutputPath)streaming_assets" />
+    <Copy SourceFiles="@(_StreamingAssetFiles)"
+          DestinationFiles="@(_StreamingAssetFiles->'$(OutputPath)streaming_assets\%(Filename)%(Extension)')"
+          SkipUnchangedFiles="true"
+          Condition="'@(_StreamingAssetFiles)' != ''" />
+  </Target>
+
+  <Target Name="WarnIfStreamingAssetsUnavailable" AfterTargets="Build" DependsOnTargets="EnsureGodotStreamingAssets">
+    <PropertyGroup>
+      <_HasInfoDat Condition="Exists('$(GodotStreamingAssetsPath)\info.dat')">true</_HasInfoDat>
+      <_HasSoundNames Condition="Exists('$(GodotStreamingAssetsPath)\sound_names.bin')">true</_HasSoundNames>
+    </PropertyGroup>
+    <Warning Condition="'$(_HasInfoDat)' != 'true' Or '$(_HasSoundNames)' != 'true'"
+             Text="Godot streaming_assets missing info.dat and/or sound_names.bin. Copy them into $(GodotStreamingAssetsPath) or $(CathodeLibResourcesPath) before building. Runtime will use embedded CathodeLib resources only if those were compiled into the assembly." />
+  </Target>
+
+  <Target Name="CopyStreamingAssetsToPublishDir" AfterTargets="Publish" DependsOnTargets="EnsureGodotStreamingAssets">
+    <ItemGroup>
+      <_PublishStreamingAssetFiles Include="$(GodotStreamingAssetsPath)\info.dat" Condition="Exists('$(GodotStreamingAssetsPath)\info.dat')" />
+      <_PublishStreamingAssetFiles Include="$(GodotStreamingAssetsPath)\sound_names.bin" Condition="Exists('$(GodotStreamingAssetsPath)\sound_names.bin')" />
+    </ItemGroup>
+    <MakeDir Directories="$(PublishDir)streaming_assets" Condition="'$(PublishDir)' != ''" />
+    <Copy SourceFiles="@(_PublishStreamingAssetFiles)"
+          DestinationFiles="@(_PublishStreamingAssetFiles->'$(PublishDir)streaming_assets\%(Filename)%(Extension)')"
+          SkipUnchangedFiles="true"
+          Condition="'$(PublishDir)' != '' And '@(_PublishStreamingAssetFiles)' != ''" />
+  </Target>
 
   <ItemGroup>
     <PackageReference Include="K4os.Compression.LZ4" Version="1.3.8" />

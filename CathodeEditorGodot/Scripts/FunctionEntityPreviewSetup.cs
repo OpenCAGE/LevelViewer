@@ -82,6 +82,34 @@ public static class FunctionEntityPreviewSetup
                 preview.Setup(function, ownerCompositeId);
                 return true;
             }
+            case RenderPreviewKind.EnvironmentMap:
+            {
+                EnvironmentMapPreview preview = new EnvironmentMapPreview();
+                entityNode.AddChild(preview);
+                preview.Setup(function, ownerCompositeId);
+                return true;
+            }
+            case RenderPreviewKind.SoundNetworkNode:
+            {
+                SoundNetworkNodePreview preview = new SoundNetworkNodePreview();
+                entityNode.AddChild(preview);
+                preview.Setup(function, ownerCompositeId);
+                return true;
+            }
+            case RenderPreviewKind.SoundObject:
+            {
+                IconBillboardPreview preview = new IconBillboardPreview();
+                entityNode.AddChild(preview);
+                preview.Setup(function, IconBillboardPreview.IconKind.Sound, ownerCompositeId);
+                return true;
+            }
+            case RenderPreviewKind.CameraResource:
+            {
+                IconBillboardPreview preview = new IconBillboardPreview();
+                entityNode.AddChild(preview);
+                preview.Setup(function, IconBillboardPreview.IconKind.Camera, ownerCompositeId);
+                return true;
+            }
             default:
                 return false;
         }

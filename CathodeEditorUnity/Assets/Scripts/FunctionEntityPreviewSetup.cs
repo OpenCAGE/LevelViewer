@@ -47,6 +47,18 @@ public static class FunctionEntityPreviewSetup
             case RenderPreviewKind.SplinePath:
                 entityGO.AddComponent<SplinePathPreview>().Setup(function, ownerCompositeId);
                 return true;
+            case RenderPreviewKind.EnvironmentMap:
+                entityGO.AddComponent<EnvironmentMapPreview>().Setup(function, ownerCompositeId);
+                return true;
+            case RenderPreviewKind.SoundNetworkNode:
+                entityGO.AddComponent<SoundNetworkNodePreview>().Setup(function, ownerCompositeId);
+                return true;
+            case RenderPreviewKind.SoundObject:
+                entityGO.AddComponent<IconBillboardPreview>().Setup(function, IconBillboardPreview.IconKind.Sound, ownerCompositeId);
+                return true;
+            case RenderPreviewKind.CameraResource:
+                entityGO.AddComponent<IconBillboardPreview>().Setup(function, IconBillboardPreview.IconKind.Camera, ownerCompositeId);
+                return true;
             default:
                 return false;
         }

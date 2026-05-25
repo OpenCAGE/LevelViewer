@@ -11,6 +11,7 @@ public class IconBillboardPreview : FunctionEntityPreview
         Sound,
         Light,
         Particle,
+        Camera,
     }
 
     private IconKind _iconKind;
@@ -61,6 +62,7 @@ internal static class EditorIconTextures
     private static Texture2D _sound;
     private static Texture2D _light;
     private static Texture2D _particle;
+    private static Texture2D _camera;
     private static bool _loaded;
 
     public static Texture2D Get(IconBillboardPreview.IconKind kind)
@@ -74,6 +76,8 @@ internal static class EditorIconTextures
                 return _light;
             case IconBillboardPreview.IconKind.Particle:
                 return _particle;
+            case IconBillboardPreview.IconKind.Camera:
+                return _camera;
             default:
                 return null;
         }
@@ -88,6 +92,7 @@ internal static class EditorIconTextures
         _sound = LoadComponentIcon(typeof(UnityEngine.AudioSource));
         _light = LoadComponentIcon(typeof(UnityEngine.Light));
         _particle = LoadComponentIcon(typeof(UnityEngine.ParticleSystem));
+        _camera = LoadComponentIcon(typeof(UnityEngine.Camera));
 #endif
         _loaded = true;
     }

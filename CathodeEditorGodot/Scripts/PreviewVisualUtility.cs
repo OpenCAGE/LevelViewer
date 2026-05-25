@@ -50,22 +50,20 @@ public static class PreviewVisualUtility
         return extraEuler + euler;
     }
 
-    /// <summary>CylinderMesh is Y-aligned; rotate to the cardinal axis without Basis.LookingAt.</summary>
+    /// <summary>CylinderMesh is Y-aligned; rotate local +Y onto <paramref name="axis"/> (matches Unity FromToRotation(Vector3.up, axis)).</summary>
     public static Vector3 GetAxisStubEuler(Vector3 axis)
     {
         axis = axis.Normalized();
-        if (axis.Dot(Vector3.Right) > LookParallelEpsilon)
-            return new Vector3(0f, 0f, -Mathf.Pi * 0.5f);
-        if (axis.Dot(Vector3.Up) > LookParallelEpsilon)
-            return new Vector3(Mathf.Pi * 0.5f, 0f, 0f);
-        if (axis.Dot(Vector3.Back) > LookParallelEpsilon)
-            return new Vector3(-Mathf.Pi * 0.5f, 0f, 0f);
-        if (axis.Dot(Vector3.Left) > LookParallelEpsilon)
-            return new Vector3(0f, 0f, Mathf.Pi * 0.5f);
-        if (axis.Dot(Vector3.Down) > LookParallelEpsilon)
-            return new Vector3(-Mathf.Pi * 0.5f, 0f, 0f);
+        if (axis.LengthSquared() < 0.0001f)
+            return Vector3.Zero;
 
-        return GetLookEuler(axis, new Vector3(Mathf.Pi * 0.5f, 0f, 0f));
+        if (axis.Dot(Vector3.Up) > LookParallelEpsilon)
+            return Vector3.Zero;
+
+        if (axis.Dot(Vector3.Down) > LookParallelEpsilon)
+            return new Vector3(Mathf.Pi, 0f, 0f);
+
+        return new Quaternion(Vector3.Up, axis).GetEuler();
     }
 
     public static ShaderMaterial SharedBoxMaterial

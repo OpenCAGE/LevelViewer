@@ -1,8 +1,8 @@
 using Godot;
 
 /// <summary>
-/// Icons for sound / light / particle billboards. Prefers Godot editor node icons when running from the editor;
-/// falls back to bundled textures under res://textures/preview_icons/.
+/// Icons for sound / light / particle / camera billboards. Sound/light/particle prefer Godot editor node icons when available;
+/// camera prefers bundled res://textures/preview_icons/camera.png (video-camera silhouette). All kinds fall back to bundled PNGs then procedural gizmos.
 /// </summary>
 internal static class EditorIconTextures
 {
@@ -11,11 +11,13 @@ internal static class EditorIconTextures
     private static Texture2D _sound;
     private static Texture2D _light;
     private static Texture2D _particle;
+    private static Texture2D _camera;
     private static bool _loaded;
 
     private static readonly string[] SoundEditorIconNames = { "AudioStreamPlayer3D", "AudioStreamPlayer" };
     private static readonly string[] LightEditorIconNames = { "OmniLight3D", "SpotLight3D", "DirectionalLight3D", "Light3D" };
     private static readonly string[] ParticleEditorIconNames = { "GPUParticles3D", "CPUParticles3D", "Particles3D" };
+    private const string CameraResourcePath = "res://textures/preview_icons/camera.png";
 
     public static Texture2D Get(IconBillboardPreview.IconKind kind)
     {
@@ -28,6 +30,8 @@ internal static class EditorIconTextures
                 return _light;
             case IconBillboardPreview.IconKind.Particle:
                 return _particle;
+            case IconBillboardPreview.IconKind.Camera:
+                return _camera;
             default:
                 return null;
         }
@@ -41,7 +45,17 @@ internal static class EditorIconTextures
         _sound = LoadIcon(IconBillboardPreview.IconKind.Sound, SoundEditorIconNames, "res://textures/preview_icons/sound.png");
         _light = LoadIcon(IconBillboardPreview.IconKind.Light, LightEditorIconNames, "res://textures/preview_icons/light.png");
         _particle = LoadIcon(IconBillboardPreview.IconKind.Particle, ParticleEditorIconNames, "res://textures/preview_icons/particle.png");
+        _camera = LoadCameraIcon();
         _loaded = true;
+    }
+
+    private static Texture2D LoadCameraIcon()
+    {
+        Texture2D icon = TryLoadResourceIcon(CameraResourcePath);
+        if (icon != null)
+            return MakeDarkBackgroundTransparent(icon);
+
+        return CreateVideoCameraIcon();
     }
 
     private static Texture2D LoadIcon(IconBillboardPreview.IconKind kind, string[] editorIconNames, string resourcePath)
@@ -192,9 +206,79 @@ internal static class EditorIconTextures
                 FillFilledCircle(image, new Vector2I(32, 46), 9, cyan);
                 break;
             }
+            case IconBillboardPreview.IconKind.Camera:
+                DrawVideoCameraIcon(image);
+                break;
         }
 
         return ImageTexture.CreateFromImage(image);
+    }
+
+    private static Texture2D CreateVideoCameraIcon()
+    {
+        const int size = 64;
+        Image image = Image.CreateEmpty(size, size, false, Image.Format.Rgba8);
+        image.Fill(Colors.Transparent);
+        DrawVideoCameraIcon(image);
+        return ImageTexture.CreateFromImage(image);
+    }
+
+    private static void DrawVideoCameraIcon(Image image)
+    {
+        Color gray = new Color(0.76f, 0.76f, 0.76f);
+        image.FillRect(new Rect2I(10, 18, 28, 28), gray);
+        FillPolygon(image, new Vector2[]
+        {
+            new Vector2(42, 22),
+            new Vector2(56, 16),
+            new Vector2(56, 48),
+            new Vector2(42, 42),
+        }, gray);
+    }
+
+    private static void FillPolygon(Image image, Vector2[] points, Color color)
+    {
+        if (points.Length < 3)
+            return;
+
+        int minY = (int)points[0].Y;
+        int maxY = (int)points[0].Y;
+        for (int i = 1; i < points.Length; i++)
+        {
+            minY = Mathf.Min(minY, (int)points[i].Y);
+            maxY = Mathf.Max(maxY, (int)points[i].Y);
+        }
+
+        minY = Mathf.Clamp(minY, 0, image.GetHeight() - 1);
+        maxY = Mathf.Clamp(maxY, 0, image.GetHeight() - 1);
+
+        for (int y = minY; y <= maxY; y++)
+        {
+            float scanY = y + 0.5f;
+            var intersections = new System.Collections.Generic.List<float>();
+            for (int i = 0; i < points.Length; i++)
+            {
+                Vector2 a = points[i];
+                Vector2 b = points[(i + 1) % points.Length];
+                if ((a.Y <= scanY && b.Y > scanY) || (b.Y <= scanY && a.Y > scanY))
+                {
+                    float t = (scanY - a.Y) / (b.Y - a.Y);
+                    intersections.Add(a.X + t * (b.X - a.X));
+                }
+            }
+
+            if (intersections.Count < 2)
+                continue;
+
+            intersections.Sort();
+            for (int i = 0; i + 1 < intersections.Count; i += 2)
+            {
+                int startX = Mathf.Clamp((int)Mathf.Floor(intersections[i]), 0, image.GetWidth() - 1);
+                int endX = Mathf.Clamp((int)Mathf.Ceil(intersections[i + 1]), 0, image.GetWidth() - 1);
+                for (int x = startX; x <= endX; x++)
+                    image.SetPixel(x, y, color);
+            }
+        }
     }
 
     private static void FillFilledCircle(Image image, Vector2I center, int radius, Color color)

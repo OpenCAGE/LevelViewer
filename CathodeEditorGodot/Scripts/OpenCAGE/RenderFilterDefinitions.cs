@@ -13,6 +13,10 @@ namespace OpenCAGE
         Character,
         ParticleEmitter,
         SplinePath,
+        EnvironmentMap,
+        SoundNetworkNode,
+        SoundObject,
+        CameraResource,
     }
 
     /// <summary>
@@ -93,6 +97,17 @@ namespace OpenCAGE
             new Definition(FunctionType.RibbonEmitterReference, RenderPreviewKind.ParticleEmitter, 0.75f, 0.35f, 1f),
             new Definition(FunctionType.GPU_PFXEmitterReference, RenderPreviewKind.ParticleEmitter, 1f, 0.4f, 0.75f),
             new Definition(FunctionType.SplinePath, RenderPreviewKind.SplinePath, 0.55f, 0.28f, 0.95f),
+            new Definition(FunctionType.EnvironmentMap, RenderPreviewKind.EnvironmentMap, 0.45f, 0.8f, 0.9f),
+            new Definition(FunctionType.SoundNetworkNode, RenderPreviewKind.SoundNetworkNode, 0.7f, 0.3f, 0.95f),
+            new Definition(FunctionType.SoundObject, RenderPreviewKind.SoundObject, 0.25f, 0.75f, 0.45f),
+
+            // Pathfinding / nav / camera
+            new Definition(FunctionType.PathfindingAlienBackstageNode, RenderPreviewKind.PositionMarker, 0.2f, 0.45f, 1f),
+            new Definition(FunctionType.PathfindingManualNode, RenderPreviewKind.PositionMarker, 1f, 0.25f, 0.25f),
+            new Definition(FunctionType.NavMeshReachabilitySeedPoint, RenderPreviewKind.PositionMarker, 1f, 1f, 1f),
+            new Definition(FunctionType.CameraResource, RenderPreviewKind.CameraResource, 0.78f, 0.82f, 0.88f),
+            new Definition(FunctionType.PathfindingTeleportNode, RenderPreviewKind.PositionMarker, 0.25f, 0.85f, 0.35f),
+            new Definition(FunctionType.PathfindingWaitNode, RenderPreviewKind.PositionMarker, 0.55f, 0.35f, 0.15f),
         };
 
         private static readonly HashSet<FunctionType> SupportedTypes = BuildSupportedTypes();

@@ -11,6 +11,7 @@ public partial class IconBillboardPreview : FunctionEntityPreview
         Sound,
         Light,
         Particle,
+        Camera,
     }
 
     private IconKind _iconKind;

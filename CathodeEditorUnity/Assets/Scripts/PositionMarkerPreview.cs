@@ -16,6 +16,12 @@ public class PositionMarkerPreview : FunctionEntityPreview
 
     protected override GameObject GetVisibilityRoot() => _root;
 
+    public override void CleanupPreviewVisuals()
+    {
+        PreviewVisualUtility.DestroyObject(_root);
+        _root = null;
+    }
+
     public override void Refresh()
     {
         if (Entity == null)

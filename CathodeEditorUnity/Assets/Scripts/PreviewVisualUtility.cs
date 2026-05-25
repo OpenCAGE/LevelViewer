@@ -231,29 +231,36 @@ public static class PreviewVisualUtility
         axisObject.transform.localScale = new Vector3(width, length * 0.5f, width);
     }
 
-    private static Material _sharedLineMaterial;
+    private static Material _sharedOverlayLineMaterial;
 
-    public static void ConfigureLineRenderer(LineRenderer lineRenderer, Color color, float width = 0.025f)
+    /// <summary>
+    /// LineRenderer configured to draw on top of scene geometry (orange-friendly spline paths).
+    /// </summary>
+    public static void ConfigureOverlayLineRenderer(LineRenderer lineRenderer, Color color, float width = 0.012f)
     {
         if (lineRenderer == null)
             return;
 
-        if (_sharedLineMaterial == null)
+        if (_sharedOverlayLineMaterial == null)
         {
             Shader shader = Shader.Find("Hidden/Internal-Colored");
             if (shader == null)
                 shader = Shader.Find("Unlit/Color");
             if (shader == null)
                 shader = Shader.Find("Sprites/Default");
-            _sharedLineMaterial = new Material(shader);
-            _sharedLineMaterial.renderQueue = OpaqueRenderQueue;
-            if (_sharedLineMaterial.HasProperty("_ZWrite"))
-                _sharedLineMaterial.SetInt("_ZWrite", 0);
+
+            _sharedOverlayLineMaterial = new Material(shader);
+            _sharedOverlayLineMaterial.renderQueue = (int)RenderQueue.Overlay;
+            if (_sharedOverlayLineMaterial.HasProperty("_ZTest"))
+                _sharedOverlayLineMaterial.SetInt("_ZTest", (int)CompareFunction.Always);
+            if (_sharedOverlayLineMaterial.HasProperty("_ZWrite"))
+                _sharedOverlayLineMaterial.SetInt("_ZWrite", 0);
         }
 
-        lineRenderer.sharedMaterial = _sharedLineMaterial;
+        lineRenderer.sharedMaterial = _sharedOverlayLineMaterial;
         lineRenderer.useWorldSpace = false;
         lineRenderer.loop = false;
+        lineRenderer.alignment = LineAlignment.View;
         lineRenderer.startWidth = width;
         lineRenderer.endWidth = width;
         lineRenderer.startColor = color;
@@ -264,6 +271,7 @@ public static class PreviewVisualUtility
         lineRenderer.receiveShadows = false;
         lineRenderer.lightProbeUsage = UnityEngine.Rendering.LightProbeUsage.Off;
         lineRenderer.textureMode = LineTextureMode.Stretch;
+        lineRenderer.generateLightingData = false;
     }
 
     public static GameObject CreateDirectionArrow(
@@ -444,4 +452,98 @@ public static class PreviewVisualUtility
         _billboardQuadMesh.RecalculateBounds();
         return _billboardQuadMesh;
     }
+
+    public static void DestroyObject(Object obj)
+    {
+        if (obj == null)
+            return;
+
+#if UNITY_EDITOR
+        if (!Application.isPlaying)
+        {
+            Object.DestroyImmediate(obj);
+            return;
+        }
+#endif
+        Object.Destroy(obj);
+    }
+
+    /// <summary>
+    /// Tear down all function-entity preview visuals (e.g. before destroying the level root or exiting play mode).
+    /// </summary>
+    public static void CleanupAllFunctionEntityPreviews()
+    {
+        FunctionEntityPreview[] previews = Object.FindObjectsOfType<FunctionEntityPreview>(true);
+        for (int i = 0; i < previews.Length; i++)
+        {
+            if (previews[i] != null)
+                previews[i].CleanupPreviewVisuals();
+        }
+
+#if UNITY_EDITOR
+        DestroyOrphanedPreviewObjects();
+#endif
+    }
+
+#if UNITY_EDITOR
+    private static readonly string[] OrphanedPreviewRootNames =
+    {
+        "SplinePathPreview",
+        "BoxPreview",
+        "PositionMarkerPreview",
+        "SoundEnvironmentMarkerPreview",
+        "CharacterPreview",
+        "IconBillboard",
+    };
+
+    private static void DestroyOrphanedPreviewObjects()
+    {
+        GameObject[] gameObjects = Resources.FindObjectsOfTypeAll<GameObject>();
+        for (int i = 0; i < gameObjects.Length; i++)
+        {
+            GameObject gameObject = gameObjects[i];
+            if (gameObject == null)
+                continue;
+
+            if ((gameObject.hideFlags & HideFlags.DontSave) == 0)
+                continue;
+
+            if (!IsOrphanedPreviewObject(gameObject))
+                continue;
+
+            DestroyObject(gameObject);
+        }
+    }
+
+    private static bool IsOrphanedPreviewObject(GameObject gameObject)
+    {
+        if (IsPartOfLivePreviewHierarchy(gameObject))
+            return false;
+
+        string name = gameObject.name;
+        for (int i = 0; i < OrphanedPreviewRootNames.Length; i++)
+        {
+            if (name == OrphanedPreviewRootNames[i])
+                return true;
+        }
+
+        if (name.StartsWith("Segment"))
+            return true;
+
+        return false;
+    }
+
+    private static bool IsPartOfLivePreviewHierarchy(GameObject gameObject)
+    {
+        FunctionEntityPreview owner = gameObject.GetComponentInParent<FunctionEntityPreview>(true);
+        if (owner == null)
+            return false;
+
+        GameObject visualRoot = owner.PreviewVisualRoot;
+        if (visualRoot == null)
+            return false;
+
+        return gameObject == visualRoot || gameObject.transform.IsChildOf(visualRoot.transform);
+    }
+#endif
 }

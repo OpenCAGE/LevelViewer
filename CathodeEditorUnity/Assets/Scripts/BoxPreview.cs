@@ -100,6 +100,12 @@ public class BoxPreview : FunctionEntityPreview
         return new Vector3(0.5f, 1f, 0.5f);
     }
 
+    public override void CleanupPreviewVisuals()
+    {
+        PreviewVisualUtility.DestroyObject(_volume);
+        _volume = null;
+    }
+
     private void EnsureVolume()
     {
         if (_volume != null)

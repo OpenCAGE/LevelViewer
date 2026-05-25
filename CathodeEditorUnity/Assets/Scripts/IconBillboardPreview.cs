@@ -25,6 +25,12 @@ public class IconBillboardPreview : FunctionEntityPreview
 
     protected override GameObject GetVisibilityRoot() => _billboard;
 
+    public override void CleanupPreviewVisuals()
+    {
+        PreviewVisualUtility.DestroyObject(_billboard);
+        _billboard = null;
+    }
+
     public override void Refresh()
     {
         if (Entity == null)

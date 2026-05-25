@@ -96,6 +96,17 @@ public class CommandsEditorConnection : MonoBehaviour
         StartCoroutine(ReconnectLoop());
     }
 
+    private void OnDestroy()
+    {
+        if (_scene == null)
+            return;
+
+        PreviewVisualUtility.CleanupAllFunctionEntityPreviews();
+
+        if (_scene.ParentGameObject != null)
+            Destroy(_scene.ParentGameObject);
+    }
+
     /* Recieve data from Commands Editor and sync it to our local Commands object */
     private void OnMessage(object sender, MessageEventArgs e)
     {

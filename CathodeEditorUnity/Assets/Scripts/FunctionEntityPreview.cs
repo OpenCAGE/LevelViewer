@@ -36,6 +36,22 @@ public abstract class FunctionEntityPreview : MonoBehaviour
 
     protected abstract GameObject GetVisibilityRoot();
 
+    /// <summary>Root object created by the preview, if any (used for cleanup guards).</summary>
+    public GameObject PreviewVisualRoot => GetVisibilityRoot();
+
+    /// <summary>
+    /// Destroys spawned preview geometry. Called when the preview component or scene is torn down.
+    /// </summary>
+    public virtual void CleanupPreviewVisuals()
+    {
+        PreviewVisualUtility.DestroyObject(GetVisibilityRoot());
+    }
+
+    protected virtual void OnDestroy()
+    {
+        CleanupPreviewVisuals();
+    }
+
     /// <summary>
     /// Returns true when no further refresh work is needed.
     /// </summary>

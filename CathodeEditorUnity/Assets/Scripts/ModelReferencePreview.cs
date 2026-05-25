@@ -23,6 +23,16 @@ public class ModelReferencePreview : FunctionEntityPreview
 
     protected override GameObject GetVisibilityRoot() => null;
 
+    public override void CleanupPreviewVisuals()
+    {
+        if (_scene == null)
+            return;
+
+        Transform renderTarget = GetRenderTarget();
+        if (renderTarget != null)
+            _scene.ClearRenderableChildren(renderTarget);
+    }
+
     public override void RefreshVisibility()
     {
         // Model references are not gated by hide-nested; avoid respawning meshes.

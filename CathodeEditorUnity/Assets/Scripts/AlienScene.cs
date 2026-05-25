@@ -87,6 +87,7 @@ public class AlienScene : MonoBehaviour
         RegisterParameterVisualHandler(DataType.TRANSFORM, ApplyTransformVisual);
         RegisterParameterVisualHandler(DataType.VECTOR, ApplyVectorVisual);
         RegisterParameterVisualHandler(DataType.SPLINE, ApplySplineVisual);
+        RegisterParameterVisualHandler(DataType.BOOL, ApplyBoolVisual);
     }
 
 #if UNITY_EDITOR
@@ -107,10 +108,22 @@ public class AlienScene : MonoBehaviour
     }
 #endif
 
-    private void ResetLevel()
+    private void OnDestroy()
     {
         if (_parentGameObject != null)
             Destroy(_parentGameObject);
+
+        _parentGameObject = null;
+    }
+
+    private void ResetLevel()
+    {
+        PreviewVisualUtility.CleanupAllFunctionEntityPreviews();
+
+        if (_parentGameObject != null)
+            Destroy(_parentGameObject);
+
+        _parentGameObject = null;
 
         _materials.Clear();
         _materialSupport.Clear();
@@ -167,6 +180,7 @@ public class AlienScene : MonoBehaviour
         _compositeGameObjects.Clear();
         _gameObjectEntities.Clear();
         ClearEntityGameObjectCache();
+        PreviewVisualUtility.CleanupAllFunctionEntityPreviews();
 
         if (_parentGameObject != null)
             Destroy(_parentGameObject);
@@ -183,6 +197,7 @@ public class AlienScene : MonoBehaviour
         AddCompositeInstance(comp, _parentGameObject, null);
 
         InvalidateFunctionEntityPreviewCache();
+        RefreshRenderFilters();
         OnLoaded?.Invoke();
     }
 
@@ -429,7 +444,7 @@ public class AlienScene : MonoBehaviour
 
             if (_parameterVisualHandlers.TryGetValue(syncDataType, out ParameterVisualHandler handler))
                 handler(context);
-            else if (syncDataType != DataType.VECTOR && syncDataType != DataType.SPLINE)
+            else if (syncDataType != DataType.VECTOR && syncDataType != DataType.SPLINE && syncDataType != DataType.BOOL)
                 RefreshFunctionEntityPreviews(entityGO);
         }
     }
@@ -584,6 +599,14 @@ public class AlienScene : MonoBehaviour
 
     private void ApplySplineVisual(ParameterVisualContext context)
     {
+        RefreshSplinePathPreviews(context.EntityGameObject);
+    }
+
+    private void ApplyBoolVisual(ParameterVisualContext context)
+    {
+        if (context.Sync != null && new ShortGuid(context.Sync.name) != ShortGuidUtils.Generate("loop"))
+            return;
+
         RefreshSplinePathPreviews(context.EntityGameObject);
     }
 

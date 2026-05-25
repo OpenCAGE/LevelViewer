@@ -7,16 +7,18 @@ using UnityEngine;
 /// <summary>
 /// Preview for SplinePath entities: compact position-style point markers, always-visible segment lines, and direction arrows.
 /// </summary>
-[ExecuteAlways]
 public class SplinePathPreview : FunctionEntityPreview
 {
     private const string PointsParameter = "points";
+    private const string LoopParameter = "loop";
+
+    private static readonly Color SplinePathLineColor = new Color(1f, 0.55f, 0.1f, 1f);
 
     private const float TorusRadius = 0.11f;
     private const float TubeRadius = 0.014f;
     private const float AxisLength = 0.11f;
     private const float AxisWidth = 0.016f;
-    private const float LineWidth = 0.025f;
+    private const float LineWidth = 0.012f;
     private const float ArrowHeadLength = 0.12f;
     private const float ArrowHeadWidth = 0.07f;
     private const float ArrowAlongSegment = 0.65f;
@@ -38,28 +40,61 @@ public class SplinePathPreview : FunctionEntityPreview
 
     protected override GameObject GetVisibilityRoot() => _root;
 
+    public override void CleanupPreviewVisuals()
+    {
+        for (int i = 0; i < _pointMarkers.Count; i++)
+            PreviewVisualUtility.DestroyObject(_pointMarkers[i]);
+        _pointMarkers.Clear();
+
+        for (int i = 0; i < _segmentVisuals.Count; i++)
+            PreviewVisualUtility.DestroyObject(_segmentVisuals[i].Root);
+        _segmentVisuals.Clear();
+
+        PreviewVisualUtility.DestroyObject(_root);
+        _root = null;
+        _pointsRoot = null;
+        _segmentsRoot = null;
+    }
+
     public override void Refresh()
     {
         if (Entity == null)
             return;
 
         bool visible = PreviewVisualUtility.IsPreviewVisible(Entity, OwnerCompositeId);
-        if (_root != null)
-            _root.SetActive(visible);
         if (!visible)
+        {
+            if (_root != null)
+                _root.SetActive(false);
             return;
+        }
+
+        if (!IsRootHierarchyValid())
+            CleanupPreviewVisuals();
 
         EnsureRoot();
+        _root.SetActive(true);
         ReadSplinePoints(_localPoints);
-        Color splineColor = PreviewVisualUtility.GetOpaquePreviewColor(Entity);
-        SyncPointMarkers(splineColor);
-        SyncSegments(splineColor);
+        Color markerColor = PreviewVisualUtility.GetOpaquePreviewColor(Entity);
+        SyncPointMarkers(markerColor);
+        SyncSegments(SplinePathLineColor);
+    }
+
+    private bool IsRootHierarchyValid()
+    {
+        if (_root == null)
+            return false;
+
+        return _pointsRoot != null && _segmentsRoot != null;
     }
 
     private void EnsureRoot()
     {
-        if (_root != null)
+        if (IsRootHierarchyValid())
             return;
+
+        if (_root != null)
+            PreviewVisualUtility.DestroyObject(_root);
 
         _root = new GameObject("SplinePathPreview");
         _root.transform.SetParent(transform, false);
@@ -100,8 +135,45 @@ public class SplinePathPreview : FunctionEntityPreview
         }
     }
 
+    private bool IsLoopClosed()
+    {
+        Parameter loopParam = Entity.GetParameter(LoopParameter);
+        return loopParam?.content is cBool loopValue && loopValue.value;
+    }
+
+    private int GetSegmentCount()
+    {
+        if (_localPoints.Count < 2)
+            return 0;
+
+        int segmentCount = _localPoints.Count - 1;
+        if (IsLoopClosed())
+            segmentCount++;
+        return segmentCount;
+    }
+
+    private void GetSegmentEndpoints(int segmentIndex, out Vector3 from, out Vector3 to)
+    {
+        int lastPointIndex = _localPoints.Count - 1;
+        if (segmentIndex < lastPointIndex)
+        {
+            from = _localPoints[segmentIndex];
+            to = _localPoints[segmentIndex + 1];
+            return;
+        }
+
+        from = _localPoints[lastPointIndex];
+        to = _localPoints[0];
+    }
+
     private void SyncPointMarkers(Color splineColor)
     {
+        for (int i = _pointMarkers.Count - 1; i >= 0; i--)
+        {
+            if (_pointMarkers[i] == null)
+                _pointMarkers.RemoveAt(i);
+        }
+
         while (_pointMarkers.Count < _localPoints.Count)
         {
             GameObject marker = PreviewVisualUtility.CreatePositionStyleMarker(
@@ -172,9 +244,15 @@ public class SplinePathPreview : FunctionEntityPreview
         }
     }
 
-    private void SyncSegments(Color splineColor)
+    private void SyncSegments(Color lineColor)
     {
-        int segmentCount = Mathf.Max(0, _localPoints.Count - 1);
+        for (int i = _segmentVisuals.Count - 1; i >= 0; i--)
+        {
+            if (_segmentVisuals[i].Root == null)
+                _segmentVisuals.RemoveAt(i);
+        }
+
+        int segmentCount = GetSegmentCount();
 
         while (_segmentVisuals.Count < segmentCount)
             _segmentVisuals.Add(CreateSegmentVisual());
@@ -188,16 +266,15 @@ public class SplinePathPreview : FunctionEntityPreview
 
         for (int i = 0; i < segmentCount; i++)
         {
-            Vector3 from = _localPoints[i];
-            Vector3 to = _localPoints[i + 1];
+            GetSegmentEndpoints(i, out Vector3 from, out Vector3 to);
             SegmentVisual segment = _segmentVisuals[i];
-            segment.Root.name = "Segment_" + i;
+            segment.Root.name = IsLoopClosed() && i == segmentCount - 1 ? "Segment_LoopClose" : "Segment_" + i;
             segment.Root.SetActive(true);
 
             segment.Line.positionCount = 2;
             segment.Line.SetPosition(0, from);
             segment.Line.SetPosition(1, to);
-            PreviewVisualUtility.ConfigureLineRenderer(segment.Line, splineColor, LineWidth);
+            PreviewVisualUtility.ConfigureOverlayLineRenderer(segment.Line, lineColor, LineWidth);
 
             Vector3 direction = to - from;
             float length = direction.magnitude;
@@ -220,7 +297,7 @@ public class SplinePathPreview : FunctionEntityPreview
                 segment.Root.transform,
                 anchor,
                 direction,
-                splineColor,
+                lineColor,
                 headLength,
                 headWidth,
                 ref _propertyBlock);
@@ -233,7 +310,7 @@ public class SplinePathPreview : FunctionEntityPreview
         segmentRoot.transform.SetParent(_segmentsRoot, false);
 
         LineRenderer line = segmentRoot.AddComponent<LineRenderer>();
-        PreviewVisualUtility.ConfigureLineRenderer(line, Color.white, LineWidth);
+        PreviewVisualUtility.ConfigureOverlayLineRenderer(line, SplinePathLineColor, LineWidth);
 
 #if UNITY_EDITOR && !LOCAL_DEV
         segmentRoot.hideFlags = HideFlags.HideInHierarchy | HideFlags.DontSave;

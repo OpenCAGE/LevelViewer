@@ -20,6 +20,7 @@ public partial class AlienScene : Node3D
 	public Node3D ParentNode => _parentNode;
 
 	private Composite _loadedComposite = null;
+	private Node3D _selectedEntity;
 	public uint CompositeID => _loadedComposite == null ? 0 : _loadedComposite.shortGUID.AsUInt32;
 	public string CompositeIDString => _loadedComposite == null || _loadedComposite.shortGUID == ShortGuid.Invalid ? "" : _loadedComposite.shortGUID.ToByteString();
 	public string CompositeName => _loadedComposite == null ? "" : _loadedComposite.name;
@@ -93,9 +94,21 @@ public partial class AlienScene : Node3D
 		base._ExitTree();
 	}
 
+	public bool TryGetSelectedEntity(out Node3D entity)
+	{
+		entity = _selectedEntity;
+		return entity != null && GodotObject.IsInstanceValid(entity);
+	}
+
+	private void ClearSelectedEntity()
+	{
+		_selectedEntity = null;
+	}
+
 	private void ResetLevel()
 	{
 		PreviewVisualUtility.CleanupAllFunctionEntityPreviews(this);
+		ClearSelectedEntity();
 		LevelViewerSelection.Clear();
 
 		if (_parentNode != null && GodotObject.IsInstanceValid(_parentNode))
@@ -150,6 +163,7 @@ public partial class AlienScene : Node3D
 		_nodeEntities.Clear();
 		ClearEntityNodeCache();
 		PreviewVisualUtility.CleanupAllFunctionEntityPreviews(this);
+		ClearSelectedEntity();
 		LevelViewerSelection.Clear();
 
 		if (_parentNode != null && GodotObject.IsInstanceValid(_parentNode))
@@ -168,11 +182,6 @@ public partial class AlienScene : Node3D
 		InvalidateFunctionEntityPreviewCache();
 		RefreshRenderFilters();
 		OnLoaded?.Invoke();
-		Callable.From(() =>
-		{
-			RecenterContentOrigin();
-			RequestFrameView(ParentNode, false);
-		}).CallDeferred();
 	}
 
 	/// <summary>Moves level root so loaded content is centered near the origin for stable rendering.</summary>
@@ -338,12 +347,13 @@ public partial class AlienScene : Node3D
 				entityNode = entityOverride.PointedEntity;
 		}
 
+		_selectedEntity = entityNode;
 		LevelViewerSelection.Apply(entityNode);
 
 		if (entityNode != null)
 			GD.Print("SelectEntity: " + string.Join("/", path) + " -> " + entityNode.Name);
 
-		if (entityNode != null)
+		if (focusSelected && entityNode != null)
 			Callable.From(() => FocusSelectedEntity(entityNode)).CallDeferred();
 	}
 
@@ -370,7 +380,7 @@ public partial class AlienScene : Node3D
 		if (focusEditor)
 			LevelViewerView.FrameAll(ParentNode ?? target, camera, focusEditor: true);
 		else
-			LevelViewerView.FrameRuntimeCameraOnNode(target, camera);
+			LevelViewerView.FrameRuntimeCamera(ParentNode ?? target, camera);
 	}
 
 	private Node3D GetEntityNode(List<uint> path, Node3D parent)

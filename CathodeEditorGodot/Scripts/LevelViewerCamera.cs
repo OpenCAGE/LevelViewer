@@ -1,7 +1,8 @@
 using Godot;
 
 /// <summary>
-/// Godot editor-style free camera: hold right mouse to look, WASD + Q/E move along view axes.
+/// Free camera: WASD/QE always move along view axes; hold RMB to look; MMB pan; scroll adjusts speed; Z frames selection.
+/// MoveSpeed is world units per second (framerate-independent via delta).
 /// </summary>
 public partial class LevelViewerCamera : Camera3D
 {
@@ -11,6 +12,7 @@ public partial class LevelViewerCamera : Camera3D
     [Export]
     public bool FrameEditorViewport = true;
 
+    /// <summary>Movement speed in world units per second.</summary>
     [Export]
     public float MoveSpeed = 16f;
 
@@ -32,11 +34,36 @@ public partial class LevelViewerCamera : Camera3D
     [Export]
     public float ScrollSpeedScale = 1.12f;
 
+    [Export]
+    public float FocusDistanceScale = 1.35f;
+
+    [Export]
+    public float FocusMinDistance = 1.5f;
+
+    [Export]
+    public float FocusMaxDistance = 64f;
+
+    [Export]
+    public float HudFadeSeconds = 2.5f;
+
+    [Export]
+    public float PositionDisplayEpsilon = 0.01f;
+
     private AlienScene _alienScene;
     private float _yaw;
     private float _pitch;
     private bool _mouseLookActive;
     private bool _panning;
+
+    private CanvasLayer _hudLayer;
+    private PanelContainer _speedPanel;
+    private PanelContainer _positionPanel;
+    private Label _speedLabel;
+    private Label _positionLabel;
+    private float _speedHudTimer;
+    private float _positionHudTimer;
+    private Vector3 _lastDisplayedPosition;
+    private bool _hasDisplayedPosition;
 
     public override void _Ready()
     {
@@ -47,6 +74,7 @@ public partial class LevelViewerCamera : Camera3D
             viewport.UseOcclusionCulling = false;
 
         SyncAnglesFromTransform();
+        Callable.From(SetupHud).CallDeferred();
 
         _alienScene = GetNodeOrNull<AlienScene>(AlienScenePath);
         if (_alienScene != null)
@@ -58,37 +86,143 @@ public partial class LevelViewerCamera : Camera3D
         ReleaseMouse();
         if (_alienScene != null)
             _alienScene.OnLoaded -= OnCompositeLoaded;
+        if (_hudLayer != null && GodotObject.IsInstanceValid(_hudLayer))
+            _hudLayer.QueueFree();
         base._ExitTree();
+    }
+
+    public override void _Input(InputEvent @event)
+    {
+        if (TryHandleScrollWheel(@event))
+            GetViewport().SetInputAsHandled();
     }
 
     public override void _UnhandledInput(InputEvent @event)
     {
+        if (TryHandleScrollWheel(@event))
+        {
+            GetViewport().SetInputAsHandled();
+            return;
+        }
+
         switch (@event)
         {
-            case InputEventMouseButton mouseButton when mouseButton.Pressed:
+            case InputEventKey keyEvent when keyEvent.Pressed && !keyEvent.Echo:
+                if (keyEvent.Keycode == Key.Z)
+                {
+                    FocusSelectedEntity();
+                    GetViewport().SetInputAsHandled();
+                }
+                break;
+            case InputEventMouseButton mouseButton when mouseButton.Pressed && !IsScrollWheelButton(mouseButton.ButtonIndex):
                 HandleMouseButtonPressed(mouseButton);
                 break;
-            case InputEventMouseButton mouseButtonReleased when !mouseButtonReleased.Pressed:
+            case InputEventMouseButton mouseButtonReleased when !mouseButtonReleased.Pressed && !IsScrollWheelButton(mouseButtonReleased.ButtonIndex):
                 HandleMouseButtonReleased(mouseButtonReleased);
                 break;
             case InputEventMouseMotion mouseMotion when _mouseLookActive || _panning:
                 HandleMouseMotion(mouseMotion);
                 GetViewport().SetInputAsHandled();
                 break;
-            case InputEventMouseButton wheel when wheel.Pressed
-                && (wheel.ButtonIndex == MouseButton.WheelUp || wheel.ButtonIndex == MouseButton.WheelDown):
-                AdjustMoveSpeed(wheel.ButtonIndex == MouseButton.WheelUp);
-                GetViewport().SetInputAsHandled();
-                break;
         }
+    }
+
+    private static bool IsScrollWheelButton(MouseButton button)
+    {
+        return button == MouseButton.WheelUp || button == MouseButton.WheelDown;
+    }
+
+    private bool TryHandleScrollWheel(InputEvent @event)
+    {
+        if (@event is not InputEventMouseButton mouseButton)
+            return false;
+
+        if (!IsScrollWheelButton(mouseButton.ButtonIndex))
+            return false;
+
+        // Godot emits press+release for the wheel; only act on press.
+        if (!mouseButton.Pressed)
+            return false;
+
+        AdjustMoveSpeed(mouseButton.ButtonIndex == MouseButton.WheelUp);
+        return true;
     }
 
     public override void _Process(double delta)
     {
-        if (!_mouseLookActive)
+        float deltaSeconds = (float)delta;
+        Vector3 positionBefore = GlobalPosition;
+
+        ApplyKeyboardMovement(deltaSeconds);
+        UpdatePositionHud(positionBefore);
+        UpdateHudFade(deltaSeconds);
+    }
+
+    /// <summary>Sync internal yaw/pitch after external framing (LookAt, etc.).</summary>
+    public void SyncAnglesFromTransform()
+    {
+        Vector3 euler = GlobalRotation;
+        _pitch = euler.X;
+        _yaw = euler.Y;
+    }
+
+    public void FocusOnTarget(Node3D target)
+    {
+        if (target == null || !GodotObject.IsInstanceValid(target))
             return;
 
-        float speed = MoveSpeed * (float)delta;
+        Vector3 positionBefore = GlobalPosition;
+        LevelViewerView.FrameRuntimeCameraClose(
+            target,
+            this,
+            FocusDistanceScale,
+            FocusMinDistance,
+            FocusMaxDistance);
+        SyncAnglesFromTransform();
+        UpdatePositionHud(positionBefore);
+        _positionHudTimer = HudFadeSeconds;
+    }
+
+    private void FocusSelectedEntity()
+    {
+        if (_alienScene == null || !_alienScene.TryGetSelectedEntity(out Node3D selected))
+            return;
+
+        FocusOnTarget(selected);
+    }
+
+    private void OnCompositeLoaded()
+    {
+        FrameLoadedContentWhenReadyAsync();
+    }
+
+    private async void FrameLoadedContentWhenReadyAsync()
+    {
+        if (_alienScene == null)
+            return;
+
+        await ToSignal(GetTree(), SceneTree.SignalName.ProcessFrame);
+        await ToSignal(GetTree(), SceneTree.SignalName.ProcessFrame);
+
+        if (_alienScene.ParentNode == null || !GodotObject.IsInstanceValid(_alienScene.ParentNode))
+            return;
+
+        Vector3 positionBefore = GlobalPosition;
+        _alienScene.RecenterContentOrigin();
+        LevelViewerView.FrameRuntimeCamera(_alienScene.ParentNode, this);
+        SyncAnglesFromTransform();
+        UpdatePositionHud(positionBefore);
+        _positionHudTimer = HudFadeSeconds;
+
+#if TOOLS
+        if (FrameEditorViewport && Engine.IsEditorHint())
+            LevelViewerView.TryFrameEditorOn(_alienScene.ParentNode);
+#endif
+    }
+
+    private void ApplyKeyboardMovement(float deltaSeconds)
+    {
+        float speed = MoveSpeed * deltaSeconds;
         if (Input.IsKeyPressed(Key.Shift))
             speed *= FastMoveMultiplier;
 
@@ -112,49 +246,6 @@ public partial class LevelViewerCamera : Camera3D
 
         if (move.LengthSquared() > 0f)
             GlobalPosition += move.Normalized() * speed;
-    }
-
-    [Export]
-    public float FocusDistanceScale = 1.35f;
-
-    [Export]
-    public float FocusMinDistance = 1.5f;
-
-    [Export]
-    public float FocusMaxDistance = 64f;
-
-    /// <summary>Sync internal yaw/pitch after external framing (LookAt, etc.).</summary>
-    public void SyncAnglesFromTransform()
-    {
-        Vector3 euler = GlobalRotation;
-        _pitch = euler.X;
-        _yaw = euler.Y;
-    }
-
-    public void FocusOnTarget(Node3D target)
-    {
-        if (target == null || !GodotObject.IsInstanceValid(target))
-            return;
-
-        LevelViewerView.FrameRuntimeCameraClose(
-            target,
-            this,
-            FocusDistanceScale,
-            FocusMinDistance,
-            FocusMaxDistance);
-    }
-
-    private void OnCompositeLoaded()
-    {
-        if (_alienScene?.ParentNode == null || !GodotObject.IsInstanceValid(_alienScene.ParentNode))
-            return;
-
-        Callable.From(() =>
-        {
-            _alienScene.RecenterContentOrigin();
-            LevelViewerView.FrameAll(_alienScene.ParentNode, this, FrameEditorViewport);
-            SyncAnglesFromTransform();
-        }).CallDeferred();
     }
 
     private void HandleMouseButtonPressed(InputEventMouseButton mouseButton)
@@ -205,12 +296,22 @@ public partial class LevelViewerCamera : Camera3D
 
         if (_panning)
         {
+            Vector3 positionBefore = GlobalPosition;
+            float deltaSeconds = (float)GetProcessDeltaTime();
+            if (deltaSeconds <= 0f)
+                deltaSeconds = 1f / 60f;
+
             Basis basis = GlobalTransform.Basis;
             Vector3 right = basis.X;
             Vector3 up = basis.Y;
-            float scale = Mathf.Max(MoveSpeed * PanSensitivity, 0.05f);
-            GlobalPosition += (-right * motion.Relative.X + up * motion.Relative.Y) * scale;
+            Vector2 velocity = motion.Velocity;
+            if (velocity.LengthSquared() < 0.01f)
+                velocity = motion.Relative / deltaSeconds;
+
+            Vector3 pan = -right * velocity.X + up * velocity.Y;
+            GlobalPosition += pan * MoveSpeed * PanSensitivity * deltaSeconds;
             SyncAnglesFromTransform();
+            UpdatePositionHud(positionBefore);
         }
     }
 
@@ -218,6 +319,140 @@ public partial class LevelViewerCamera : Camera3D
     {
         float scale = faster ? ScrollSpeedScale : 1f / ScrollSpeedScale;
         MoveSpeed = Mathf.Clamp(MoveSpeed * scale, MinMoveSpeed, MaxMoveSpeed);
+        ShowSpeedHud();
+    }
+
+    private void SetupHud()
+    {
+        if (_hudLayer != null && GodotObject.IsInstanceValid(_hudLayer))
+            return;
+
+        _hudLayer = new CanvasLayer
+        {
+            Name = "CameraHud",
+            Layer = 100,
+        };
+
+        // Parent to scene root so the HUD always uses the main viewport (not tied to Camera3D node).
+        Node hudHost = GetTree().CurrentScene ?? GetParent() ?? this;
+        if (hudHost == null || !GodotObject.IsInstanceValid(hudHost))
+            return;
+
+        hudHost.AddChild(_hudLayer);
+
+        var hudRoot = new Control
+        {
+            Name = "HudRoot",
+            MouseFilter = Control.MouseFilterEnum.Ignore,
+        };
+        hudRoot.SetAnchorsAndOffsetsPreset(Control.LayoutPreset.FullRect);
+        _hudLayer.AddChild(hudRoot);
+
+        _speedLabel = CreateHudLabel();
+        _speedPanel = WrapHudPanel(_speedLabel);
+        _speedPanel.MouseFilter = Control.MouseFilterEnum.Ignore;
+        _speedPanel.SetAnchorsPreset(Control.LayoutPreset.CenterTop);
+        _speedPanel.OffsetTop = 10f;
+        _speedPanel.OffsetBottom = 42f;
+        _speedPanel.OffsetLeft = -160f;
+        _speedPanel.OffsetRight = 160f;
+        _speedPanel.Visible = false;
+        hudRoot.AddChild(_speedPanel);
+
+        _positionLabel = CreateHudLabel();
+        _positionLabel.HorizontalAlignment = HorizontalAlignment.Left;
+        _positionPanel = WrapHudPanel(_positionLabel);
+        _positionPanel.MouseFilter = Control.MouseFilterEnum.Ignore;
+        _positionPanel.SetAnchorsPreset(Control.LayoutPreset.BottomLeft);
+        _positionPanel.OffsetLeft = 12f;
+        _positionPanel.OffsetBottom = -12f;
+        _positionPanel.OffsetTop = -48f;
+        _positionPanel.OffsetRight = 360f;
+        _positionPanel.Visible = false;
+        hudRoot.AddChild(_positionPanel);
+    }
+
+    private static Label CreateHudLabel()
+    {
+        var label = new Label
+        {
+            HorizontalAlignment = HorizontalAlignment.Center,
+        };
+        label.AddThemeColorOverride("font_color", new Color(0.92f, 0.94f, 0.98f));
+        label.AddThemeFontSizeOverride("font_size", 14);
+        return label;
+    }
+
+    private static PanelContainer WrapHudPanel(Label label)
+    {
+        var style = new StyleBoxFlat
+        {
+            BgColor = new Color(0.07f, 0.08f, 0.1f, 0.85f),
+            CornerRadiusTopLeft = 4,
+            CornerRadiusTopRight = 4,
+            CornerRadiusBottomLeft = 4,
+            CornerRadiusBottomRight = 4,
+            ContentMarginLeft = 10,
+            ContentMarginRight = 10,
+            ContentMarginTop = 6,
+            ContentMarginBottom = 6,
+        };
+
+        var panel = new PanelContainer();
+        panel.AddThemeStyleboxOverride("panel", style);
+        panel.AddChild(label);
+        return panel;
+    }
+
+    private void ShowSpeedHud()
+    {
+        if (_speedLabel == null || _speedPanel == null)
+            return;
+
+        _speedLabel.Text = $"Camera speed: {MoveSpeed:0.##} u/s";
+        _speedHudTimer = HudFadeSeconds;
+        _speedPanel.Visible = true;
+        _speedPanel.Modulate = Colors.White;
+    }
+
+    private void UpdatePositionHud(Vector3 positionBefore)
+    {
+        if (_positionLabel == null)
+            return;
+
+        Vector3 position = GlobalPosition;
+        if (_hasDisplayedPosition && position.DistanceSquaredTo(_lastDisplayedPosition) < PositionDisplayEpsilon * PositionDisplayEpsilon
+            && position.DistanceSquaredTo(positionBefore) < PositionDisplayEpsilon * PositionDisplayEpsilon)
+            return;
+
+        _lastDisplayedPosition = position;
+        _hasDisplayedPosition = true;
+        _positionLabel.Text = $"X {position.X:0.##}   Y {position.Y:0.##}   Z {position.Z:0.##}";
+        _positionHudTimer = HudFadeSeconds;
+        if (_positionPanel != null)
+        {
+            _positionPanel.Visible = true;
+            _positionPanel.Modulate = Colors.White;
+        }
+    }
+
+    private void UpdateHudFade(float deltaSeconds)
+    {
+        if (_speedHudTimer > 0f && _speedPanel != null)
+        {
+            _speedHudTimer -= deltaSeconds;
+            _speedPanel.Modulate = new Color(1f, 1f, 1f, Mathf.Clamp(_speedHudTimer / HudFadeSeconds, 0f, 1f));
+            if (_speedHudTimer <= 0f)
+                _speedPanel.Visible = false;
+        }
+
+        if (_positionHudTimer > 0f && _positionPanel != null)
+        {
+            _positionHudTimer -= deltaSeconds;
+            _positionPanel.Modulate = new Color(1f, 1f, 1f, Mathf.Clamp(_positionHudTimer / HudFadeSeconds, 0f, 1f));
+            if (_positionHudTimer <= 0f)
+                _positionPanel.Visible = false;
+        }
     }
 
     private static void CaptureMouse()

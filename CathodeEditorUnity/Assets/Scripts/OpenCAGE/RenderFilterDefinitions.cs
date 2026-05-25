@@ -25,16 +25,14 @@ namespace OpenCAGE
         public readonly struct Definition
         {
             public readonly FunctionType FunctionType;
-            public readonly string DisplayName;
             public readonly RenderPreviewKind PreviewKind;
             public readonly float R;
             public readonly float G;
             public readonly float B;
 
-            public Definition(FunctionType functionType, string displayName, RenderPreviewKind previewKind, float r, float g, float b)
+            public Definition(FunctionType functionType, RenderPreviewKind previewKind, float r, float g, float b)
             {
                 FunctionType = functionType;
-                DisplayName = displayName;
                 PreviewKind = previewKind;
                 R = r;
                 G = g;
@@ -63,36 +61,36 @@ namespace OpenCAGE
         public static readonly Definition[] All = new Definition[]
         {
             // Box volumes
-            new Definition(FunctionType.Box, "Box", RenderPreviewKind.Box, 0.85f, 0.85f, 0.85f),
-            new Definition(FunctionType.CameraCollisionBox, "Camera Collision Box", RenderPreviewKind.Box, 0.6f, 0.75f, 0.9f),
-            new Definition(FunctionType.CollisionBarrier, "Collision Barrier", RenderPreviewKind.Box, 0.95f, 0.4f, 0.3f),
-            new Definition(FunctionType.CoverExclusionArea, "Cover Exclusion Area", RenderPreviewKind.Box, 1f, 0.6f, 0.2f),
-            new Definition(FunctionType.FogBox, "Fog Box", RenderPreviewKind.Box, 0.7f, 0.65f, 0.85f),
-            new Definition(FunctionType.NPC_AreaBox, "NPC Area Box", RenderPreviewKind.Box, 1f, 0.95f, 0.3f),
-            new Definition(FunctionType.NavMeshArea, "Nav Mesh Area", RenderPreviewKind.Box, 0.25f, 0.55f, 1f),
-            new Definition(FunctionType.NavMeshBarrier, "Nav Mesh Barrier", RenderPreviewKind.Box, 0.2f, 0.4f, 0.85f),
-            new Definition(FunctionType.NavMeshExclusionArea, "Nav Mesh Exclusion Area", RenderPreviewKind.Box, 0.85f, 0.25f, 0.35f),
-            new Definition(FunctionType.NavMeshWalkablePlatform, "Nav Mesh Walkable Platform", RenderPreviewKind.Box, 0.45f, 1f, 0.55f),
-            new Definition(FunctionType.PlayerTriggerBox, "Player Trigger Box", RenderPreviewKind.Box, 0.25f, 0.85f, 1f),
-            new Definition(FunctionType.PlayerUseTriggerBox, "Player Use Trigger Box", RenderPreviewKind.Box, 0.3f, 1f, 0.45f),
-            new Definition(FunctionType.ProjectiveDecal, "Projective Decal", RenderPreviewKind.Box, 0.85f, 0.4f, 0.75f),
-            new Definition(FunctionType.SimpleRefraction, "Simple Refraction", RenderPreviewKind.Box, 0.35f, 0.85f, 0.8f),
-            new Definition(FunctionType.SimpleWater, "Simple Water", RenderPreviewKind.Box, 0.3f, 0.6f, 1f),
-            new Definition(FunctionType.SoundBarrier, "Sound Barrier", RenderPreviewKind.Box, 0.75f, 0.35f, 1f),
-            new Definition(FunctionType.SoundEnvironmentZone, "Sound Environment Zone", RenderPreviewKind.Box, 0.55f, 0.45f, 0.95f),
-            new Definition(FunctionType.SpottingExclusionArea, "Spotting Exclusion Area", RenderPreviewKind.Box, 1f, 0.35f, 0.35f),
-            new Definition(FunctionType.SurfaceEffectBox, "Surface Effect Box", RenderPreviewKind.Box, 0.5f, 0.9f, 0.4f),
-            new Definition(FunctionType.UiSelectionBox, "UI Selection Box", RenderPreviewKind.Box, 0.95f, 0.9f, 0.5f),
+            new Definition(FunctionType.Box, RenderPreviewKind.Box, 0.85f, 0.85f, 0.85f),
+            new Definition(FunctionType.CameraCollisionBox, RenderPreviewKind.Box, 0.6f, 0.75f, 0.9f),
+            new Definition(FunctionType.CollisionBarrier, RenderPreviewKind.Box, 0.95f, 0.4f, 0.3f),
+            new Definition(FunctionType.CoverExclusionArea, RenderPreviewKind.Box, 1f, 0.6f, 0.2f),
+            new Definition(FunctionType.FogBox, RenderPreviewKind.Box, 0.7f, 0.65f, 0.85f),
+            new Definition(FunctionType.NPC_AreaBox, RenderPreviewKind.Box, 1f, 0.95f, 0.3f),
+            new Definition(FunctionType.NavMeshArea, RenderPreviewKind.Box, 0.25f, 0.55f, 1f),
+            new Definition(FunctionType.NavMeshBarrier, RenderPreviewKind.Box, 0.2f, 0.4f, 0.85f),
+            new Definition(FunctionType.NavMeshExclusionArea, RenderPreviewKind.Box, 0.85f, 0.25f, 0.35f),
+            new Definition(FunctionType.NavMeshWalkablePlatform, RenderPreviewKind.Box, 0.45f, 1f, 0.55f),
+            new Definition(FunctionType.PlayerTriggerBox, RenderPreviewKind.Box, 0.25f, 0.85f, 1f),
+            new Definition(FunctionType.PlayerUseTriggerBox, RenderPreviewKind.Box, 0.3f, 1f, 0.45f),
+            new Definition(FunctionType.ProjectiveDecal, RenderPreviewKind.Box, 0.85f, 0.4f, 0.75f),
+            new Definition(FunctionType.SimpleRefraction, RenderPreviewKind.Box, 0.35f, 0.85f, 0.8f),
+            new Definition(FunctionType.SimpleWater, RenderPreviewKind.Box, 0.3f, 0.6f, 1f),
+            new Definition(FunctionType.SoundBarrier, RenderPreviewKind.Box, 0.75f, 0.35f, 1f),
+            new Definition(FunctionType.SoundEnvironmentZone, RenderPreviewKind.Box, 0.55f, 0.45f, 0.95f),
+            new Definition(FunctionType.SpottingExclusionArea, RenderPreviewKind.Box, 1f, 0.35f, 0.35f),
+            new Definition(FunctionType.SurfaceEffectBox, RenderPreviewKind.Box, 0.5f, 0.9f, 0.4f),
+            new Definition(FunctionType.UiSelectionBox, RenderPreviewKind.Box, 0.95f, 0.9f, 0.5f),
 
             // Other previews
-            new Definition(FunctionType.Sound, "Sound", RenderPreviewKind.Sound, 0.2f, 0.45f, 1f),
-            new Definition(FunctionType.PositionMarker, "Position Marker", RenderPreviewKind.PositionMarker, 1f, 0.55f, 0.1f),
-            new Definition(FunctionType.SoundEnvironmentMarker, "Sound Environment Marker", RenderPreviewKind.SoundEnvironmentMarker, 0.12f, 0.22f, 0.65f),
-            new Definition(FunctionType.LightReference, "Light Reference", RenderPreviewKind.LightReference, 1f, 0.92f, 0.35f),
-            new Definition(FunctionType.Character, "Character", RenderPreviewKind.Character, 0.25f, 0.85f, 0.35f),
-            new Definition(FunctionType.ParticleEmitterReference, "Particle Emitter Reference", RenderPreviewKind.ParticleEmitter, 0.35f, 0.75f, 1f),
-            new Definition(FunctionType.RibbonEmitterReference, "Ribbon Emitter Reference", RenderPreviewKind.ParticleEmitter, 0.75f, 0.35f, 1f),
-            new Definition(FunctionType.GPU_PFXEmitterReference, "GPU PFX Emitter Reference", RenderPreviewKind.ParticleEmitter, 1f, 0.4f, 0.75f),
+            new Definition(FunctionType.Sound, RenderPreviewKind.Sound, 0.2f, 0.45f, 1f),
+            new Definition(FunctionType.PositionMarker, RenderPreviewKind.PositionMarker, 1f, 0.55f, 0.1f),
+            new Definition(FunctionType.SoundEnvironmentMarker, RenderPreviewKind.SoundEnvironmentMarker, 0.12f, 0.22f, 0.65f),
+            new Definition(FunctionType.LightReference, RenderPreviewKind.LightReference, 1f, 0.92f, 0.35f),
+            new Definition(FunctionType.Character, RenderPreviewKind.Character, 0.25f, 0.85f, 0.35f),
+            new Definition(FunctionType.ParticleEmitterReference, RenderPreviewKind.ParticleEmitter, 0.35f, 0.75f, 1f),
+            new Definition(FunctionType.RibbonEmitterReference, RenderPreviewKind.ParticleEmitter, 0.75f, 0.35f, 1f),
+            new Definition(FunctionType.GPU_PFXEmitterReference, RenderPreviewKind.ParticleEmitter, 1f, 0.4f, 0.75f),
         };
 
         private static readonly HashSet<FunctionType> SupportedTypes = BuildSupportedTypes();

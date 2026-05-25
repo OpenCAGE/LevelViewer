@@ -86,6 +86,7 @@ public class AlienScene : MonoBehaviour
     {
         RegisterParameterVisualHandler(DataType.TRANSFORM, ApplyTransformVisual);
         RegisterParameterVisualHandler(DataType.VECTOR, ApplyVectorVisual);
+        RegisterParameterVisualHandler(DataType.SPLINE, ApplySplineVisual);
     }
 
 #if UNITY_EDITOR
@@ -428,7 +429,7 @@ public class AlienScene : MonoBehaviour
 
             if (_parameterVisualHandlers.TryGetValue(syncDataType, out ParameterVisualHandler handler))
                 handler(context);
-            else if (syncDataType != DataType.VECTOR)
+            else if (syncDataType != DataType.VECTOR && syncDataType != DataType.SPLINE)
                 RefreshFunctionEntityPreviews(entityGO);
         }
     }
@@ -579,6 +580,21 @@ public class AlienScene : MonoBehaviour
         BoxPreview[] boxPreviews = entityGO.GetComponents<BoxPreview>();
         for (int i = 0; i < boxPreviews.Length; i++)
             boxPreviews[i].RefreshDimensions();
+    }
+
+    private void ApplySplineVisual(ParameterVisualContext context)
+    {
+        RefreshSplinePathPreviews(context.EntityGameObject);
+    }
+
+    private static void RefreshSplinePathPreviews(GameObject entityGO)
+    {
+        if (entityGO == null)
+            return;
+
+        SplinePathPreview[] previews = entityGO.GetComponents<SplinePathPreview>();
+        for (int i = 0; i < previews.Length; i++)
+            previews[i].Refresh();
     }
 
     private static ulong MakeEntityCacheKey(ShortGuid compositeId, ShortGuid entityId)

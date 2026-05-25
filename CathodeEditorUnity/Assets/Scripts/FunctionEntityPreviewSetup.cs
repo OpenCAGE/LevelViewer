@@ -44,6 +44,9 @@ public static class FunctionEntityPreviewSetup
             case RenderPreviewKind.ParticleEmitter:
                 entityGO.AddComponent<IconBillboardPreview>().Setup(function, IconBillboardPreview.IconKind.Particle, ownerCompositeId);
                 return true;
+            case RenderPreviewKind.SplinePath:
+                entityGO.AddComponent<SplinePathPreview>().Setup(function, ownerCompositeId);
+                return true;
             default:
                 return false;
         }

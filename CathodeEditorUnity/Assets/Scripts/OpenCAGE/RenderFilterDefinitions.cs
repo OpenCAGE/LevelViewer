@@ -12,6 +12,7 @@ namespace OpenCAGE
         LightReference,
         Character,
         ParticleEmitter,
+        SplinePath,
     }
 
     /// <summary>
@@ -91,6 +92,7 @@ namespace OpenCAGE
             new Definition(FunctionType.ParticleEmitterReference, RenderPreviewKind.ParticleEmitter, 0.35f, 0.75f, 1f),
             new Definition(FunctionType.RibbonEmitterReference, RenderPreviewKind.ParticleEmitter, 0.75f, 0.35f, 1f),
             new Definition(FunctionType.GPU_PFXEmitterReference, RenderPreviewKind.ParticleEmitter, 1f, 0.4f, 0.75f),
+            new Definition(FunctionType.SplinePath, RenderPreviewKind.SplinePath, 0.55f, 0.28f, 0.95f),
         };
 
         private static readonly HashSet<FunctionType> SupportedTypes = BuildSupportedTypes();

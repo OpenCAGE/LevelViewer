@@ -191,6 +191,128 @@ public static class PreviewVisualUtility
         return gameObject;
     }
 
+    private static readonly Color PositionMarkerAxisX = Color.red;
+    private static readonly Color PositionMarkerAxisY = Color.green;
+    private static readonly Color PositionMarkerAxisZ = Color.blue;
+
+    /// <summary>
+    /// Torus ring plus RGB axis stubs (same visual language as PositionMarkerPreview).
+    /// </summary>
+    public static GameObject CreatePositionStyleMarker(
+        string name,
+        Transform parent,
+        Color torusColor,
+        float torusRadius,
+        float tubeRadius,
+        float axisLength,
+        float axisWidth,
+        ref MaterialPropertyBlock propertyBlock)
+    {
+        GameObject root = new GameObject(name);
+        root.transform.SetParent(parent, false);
+#if UNITY_EDITOR && !LOCAL_DEV
+        root.hideFlags = HideFlags.HideInHierarchy | HideFlags.DontSave;
+#endif
+
+        Mesh torusMesh = CreateTorusMesh(torusRadius, tubeRadius);
+        CreateMeshPreview("Torus", root.transform, torusMesh, torusColor, ref propertyBlock, opaque: true);
+        CreateAxisStub("AxisX", root.transform, Vector3.right, axisLength, axisWidth, PositionMarkerAxisX, ref propertyBlock);
+        CreateAxisStub("AxisY", root.transform, Vector3.up, axisLength, axisWidth, PositionMarkerAxisY, ref propertyBlock);
+        CreateAxisStub("AxisZ", root.transform, Vector3.forward, axisLength, axisWidth, PositionMarkerAxisZ, ref propertyBlock);
+        return root;
+    }
+
+    private static void CreateAxisStub(string name, Transform parent, Vector3 direction, float length, float width, Color color, ref MaterialPropertyBlock propertyBlock)
+    {
+        Vector3 axis = direction.normalized;
+        GameObject axisObject = CreatePrimitivePreview(name, parent, PrimitiveType.Cylinder, color, ref propertyBlock, opaque: true);
+        axisObject.transform.localRotation = Quaternion.FromToRotation(Vector3.up, axis);
+        axisObject.transform.localPosition = axis * (length * 0.5f);
+        axisObject.transform.localScale = new Vector3(width, length * 0.5f, width);
+    }
+
+    private static Material _sharedLineMaterial;
+
+    public static void ConfigureLineRenderer(LineRenderer lineRenderer, Color color, float width = 0.025f)
+    {
+        if (lineRenderer == null)
+            return;
+
+        if (_sharedLineMaterial == null)
+        {
+            Shader shader = Shader.Find("Hidden/Internal-Colored");
+            if (shader == null)
+                shader = Shader.Find("Unlit/Color");
+            if (shader == null)
+                shader = Shader.Find("Sprites/Default");
+            _sharedLineMaterial = new Material(shader);
+            _sharedLineMaterial.renderQueue = OpaqueRenderQueue;
+            if (_sharedLineMaterial.HasProperty("_ZWrite"))
+                _sharedLineMaterial.SetInt("_ZWrite", 0);
+        }
+
+        lineRenderer.sharedMaterial = _sharedLineMaterial;
+        lineRenderer.useWorldSpace = false;
+        lineRenderer.loop = false;
+        lineRenderer.startWidth = width;
+        lineRenderer.endWidth = width;
+        lineRenderer.startColor = color;
+        lineRenderer.endColor = color;
+        lineRenderer.numCornerVertices = 2;
+        lineRenderer.numCapVertices = 2;
+        lineRenderer.shadowCastingMode = ShadowCastingMode.Off;
+        lineRenderer.receiveShadows = false;
+        lineRenderer.lightProbeUsage = UnityEngine.Rendering.LightProbeUsage.Off;
+        lineRenderer.textureMode = LineTextureMode.Stretch;
+    }
+
+    public static GameObject CreateDirectionArrow(
+        string name,
+        Transform parent,
+        Vector3 localPosition,
+        Vector3 localDirection,
+        Color color,
+        float headLength,
+        float headWidth,
+        ref MaterialPropertyBlock propertyBlock)
+    {
+        GameObject arrowRoot = new GameObject(name);
+        arrowRoot.transform.SetParent(parent, false);
+        arrowRoot.transform.localPosition = localPosition;
+
+        Vector3 direction = localDirection.normalized;
+        if (direction.sqrMagnitude < 0.0001f)
+            direction = Vector3.forward;
+
+        arrowRoot.transform.localRotation = Quaternion.LookRotation(direction, Mathf.Abs(direction.y) > 0.95f ? Vector3.forward : Vector3.up);
+
+        float wingBack = headLength * 0.35f;
+        Vector3 tip = Vector3.forward * headLength;
+        Vector3 wingA = Vector3.forward * wingBack + Vector3.right * headWidth;
+        Vector3 wingB = Vector3.forward * wingBack - Vector3.right * headWidth;
+
+        CreateArrowLine("ArrowShaft", arrowRoot.transform, Vector3.zero, tip, headWidth * 0.35f, color, ref propertyBlock);
+        CreateArrowLine("ArrowWingA", arrowRoot.transform, tip, wingA, headWidth * 0.3f, color, ref propertyBlock);
+        CreateArrowLine("ArrowWingB", arrowRoot.transform, tip, wingB, headWidth * 0.3f, color, ref propertyBlock);
+#if UNITY_EDITOR && !LOCAL_DEV
+        arrowRoot.hideFlags = HideFlags.HideInHierarchy | HideFlags.DontSave;
+#endif
+        return arrowRoot;
+    }
+
+    private static void CreateArrowLine(string name, Transform parent, Vector3 localStart, Vector3 localEnd, float width, Color color, ref MaterialPropertyBlock propertyBlock)
+    {
+        Vector3 delta = localEnd - localStart;
+        float length = delta.magnitude;
+        if (length < 0.001f)
+            return;
+
+        GameObject line = CreatePrimitivePreview(name, parent, PrimitiveType.Cylinder, color, ref propertyBlock, opaque: true);
+        line.transform.localPosition = localStart + delta * 0.5f;
+        line.transform.localRotation = Quaternion.FromToRotation(Vector3.up, delta.normalized);
+        line.transform.localScale = new Vector3(width, length * 0.5f, width);
+    }
+
     public static Mesh CreateTorusMesh(float outerRadius, float tubeRadius, int segments = 24, int tubeSegments = 12)
     {
         Mesh mesh = new Mesh();

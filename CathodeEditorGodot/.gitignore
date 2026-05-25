@@ -1,0 +1,28 @@
+# Godot 4+ C# project
+.godot/
+.import/
+export.cfg
+export_presets.cfg
+*.translation
+
+# Mono-specific
+.mono/
+data_*/
+mono_crash.*
+
+# Build results
+bin/
+obj/
+
+# IDE
+.vs/
+.idea/
+*.user
+*.suo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# OpenCAGE packaging exclusions (same as Unity Level Viewer workflow)
+OPENCAGE_EXCEPTIONS

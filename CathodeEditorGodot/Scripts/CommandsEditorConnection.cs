@@ -120,6 +120,20 @@ public partial class CommandsEditorConnection : Node3D
         FlushPendingParameterSyncs();
     }
 
+    public override void _UnhandledKeyInput(InputEvent @event)
+    {
+        if (@event is InputEventKey keyEvent
+            && keyEvent.Pressed
+            && !keyEvent.Echo
+            && keyEvent.Keycode == Key.F1)
+        {
+            bool wireframe = !ModelReferenceRenderSettings.WireframeEnabled;
+            _scene.SetModelReferenceWireframe(wireframe);
+            GD.Print("Model reference wireframe: " + (wireframe ? "on" : "off"));
+            GetViewport().SetInputAsHandled();
+        }
+    }
+
     public override void _PhysicsProcess(double delta)
     {
         while (_incomingMessages.TryDequeue(out string message))
@@ -570,6 +584,10 @@ public partial class CommandsEditorConnection : Node3D
         bool hideNestedChanged = _hideNestedScriptEntities != packet.hide_nested_script_entities;
         _hideNestedScriptEntities = packet.hide_nested_script_entities;
         PreviewVisibilitySettings.HideNestedScriptEntities = _hideNestedScriptEntities;
+
+        if (packet.model_reference_wireframe != ModelReferenceRenderSettings.WireframeEnabled)
+            _scene.SetModelReferenceWireframe(packet.model_reference_wireframe);
+
         return hideNestedChanged;
     }
 

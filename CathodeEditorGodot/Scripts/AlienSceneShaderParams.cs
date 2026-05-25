@@ -3,7 +3,7 @@ using CATHODE.ShaderTypes;
 using Godot;
 
 /// <summary>
-/// Reads Cathode pixel shader constants for simplified Godot materials (matches Unity OpenCAGE shader tints).
+/// Reads Cathode pixel shader constants for simplified opaque Godot materials.
 /// </summary>
 public static class AlienSceneShaderParams
 {
@@ -55,7 +55,7 @@ public static class AlienSceneShaderParams
 	public static Color GetDiffuseTint(Materials.Material material, Shaders.Shader shader, MaterialParams parameters)
 	{
 		Vector4 tint = GetVector4(shader, material, parameters.DiffuseTintIndex, Vector4.One);
-		return new Color(tint.X, tint.Y, tint.Z, tint.W);
+		return new Color(tint.X, tint.Y, tint.Z, 1f);
 	}
 
 	public static Vector2 GetUvScale(Materials.Material material, Shaders.Shader shader, MaterialParams parameters)

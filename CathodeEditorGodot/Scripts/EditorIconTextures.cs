@@ -74,7 +74,8 @@ internal static class EditorIconTextures
 #if TOOLS
     private static Texture2D TryLoadGodotEditorIcons(string[] iconNames)
     {
-        if (!OS.HasFeature("editor"))
+        // Running the scene (F5 / exported game) is not the editor — EditorInterface is unavailable.
+        if (!Engine.IsEditorHint())
             return null;
 
         EditorInterface editor = EditorInterface.Singleton;

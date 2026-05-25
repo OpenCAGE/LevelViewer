@@ -1,26 +1,25 @@
-using System;
 using CATHODE;
 using CATHODE.ShaderTypes;
 using Godot;
 
 /// <summary>
-/// Simplified level materials — everything uses the opaque render path (no transparent queue / alpha blend).
-/// Alpha-tested content uses AlphaScissor, which still draws in the opaque pass with depth write.
+/// Simplified opaque level materials (diffuse texture + tint + UV scale).
 /// </summary>
 public static class AlienSceneMaterials
 {
+	private static Shader _wireframeShader;
+	private static Shader _wireframeShaderDoubleSided;
+
 	public readonly struct MaterialResult
 	{
-		public MaterialResult(StandardMaterial3D material, bool supported, bool alphaScissor)
+		public MaterialResult(StandardMaterial3D material, bool supported)
 		{
 			Material = material;
 			Supported = supported;
-			AlphaScissor = alphaScissor;
 		}
 
 		public StandardMaterial3D Material { get; }
 		public bool Supported { get; }
-		public bool AlphaScissor { get; }
 	}
 
 	public static MaterialResult GetMaterial(Materials.Material material, AlienScene scene)
@@ -30,70 +29,99 @@ public static class AlienSceneMaterials
 
 		Shaders.Shader shader = material.Shader;
 		string baseName = material.Name + " " + shader.Ubershader;
-		AlienSceneShaderParams.MaterialParams shaderParams = AlienSceneShaderParams.GetParams(shader.Ubershader);
 		int diffuseSampler = GetDiffuseSamplerIndex(shader);
 
 		if (diffuseSampler < 0)
 			return Unsupported(material, baseName + " (NO DIFFUSE SAMPLER)");
 
-		bool alphaScissor = NeedsAlphaScissor(shader);
-		return CreateDiffuseMaterial(material, shader, scene, shaderParams, baseName, diffuseSampler, alphaScissor);
+		return CreateOpaqueMaterial(material, shader, scene, baseName, diffuseSampler);
 	}
 
 	private static MaterialResult Unsupported(Materials.Material material, string name)
 	{
 		StandardMaterial3D mat = new StandardMaterial3D { ResourceName = name };
-		return new MaterialResult(mat, false, false);
+		return new MaterialResult(mat, false);
 	}
 
-	private static MaterialResult CreateDiffuseMaterial(
+	private static MaterialResult CreateOpaqueMaterial(
 		Materials.Material material,
 		Shaders.Shader shader,
 		AlienScene scene,
-		AlienSceneShaderParams.MaterialParams shaderParams,
 		string name,
-		int diffuseSamplerIndex,
-		bool alphaScissor)
+		int diffuseSamplerIndex)
 	{
+		AlienSceneShaderParams.MaterialParams shaderParams = AlienSceneShaderParams.GetParams(shader.Ubershader);
+
 		StandardMaterial3D godotMaterial = new StandardMaterial3D
 		{
 			ResourceName = name,
-			ShadingMode = BaseMaterial3D.ShadingModeEnum.PerPixel,
+			ShadingMode = BaseMaterial3D.ShadingModeEnum.Unshaded,
 			SpecularMode = BaseMaterial3D.SpecularModeEnum.Disabled,
 			Roughness = 1f,
 			Metallic = 0f,
-			VertexColorUseAsAlbedo = false,
+			Transparency = BaseMaterial3D.TransparencyEnum.Disabled,
 			TextureFilter = BaseMaterial3D.TextureFilterEnum.LinearWithMipmapsAnisotropic,
 			CullMode = BaseMaterial3D.CullModeEnum.Back,
-			DepthDrawMode = BaseMaterial3D.DepthDrawModeEnum.OpaqueOnly,
-			RenderPriority = 0,
-			Transparency = BaseMaterial3D.TransparencyEnum.Disabled,
 		};
 
-		Color tint = AlienSceneShaderParams.GetDiffuseTint(material, shader, shaderParams);
-		tint.A = 1f;
-		godotMaterial.AlbedoColor = tint;
+		godotMaterial.AlbedoColor = AlienSceneShaderParams.GetDiffuseTint(material, shader, shaderParams);
 
 		Vector2 uvScale = AlienSceneShaderParams.GetUvScale(material, shader, shaderParams);
 		godotMaterial.Uv1Scale = new Vector3(uvScale.X, uvScale.Y, 1f);
 
-		if (alphaScissor)
-		{
-			godotMaterial.Transparency = BaseMaterial3D.TransparencyEnum.AlphaScissor;
-			godotMaterial.AlphaScissorThreshold = 0.5f;
-		}
-
 		if (IsDoubleSided(shader))
 			godotMaterial.CullMode = BaseMaterial3D.CullModeEnum.Disabled;
 
-		Texture2D diffuse = scene.GetDiffuseTexture(material, shader, diffuseSamplerIndex);
+		Texture2D diffuse = scene.GetSamplerTexture(material, shader, diffuseSamplerIndex);
 		if (diffuse != null)
 			godotMaterial.AlbedoTexture = diffuse;
 
-		return new MaterialResult(godotMaterial, true, alphaScissor);
+		return new MaterialResult(godotMaterial, true);
 	}
 
-	private static int GetDiffuseSamplerIndex(Shaders.Shader shader)
+	public static ShaderMaterial CreateWireframeMaterial(
+		Materials.Material material,
+		Shaders.Shader shader,
+		AlienScene scene,
+		string name,
+		int diffuseSamplerIndex)
+	{
+		AlienSceneShaderParams.MaterialParams shaderParams = AlienSceneShaderParams.GetParams(shader.Ubershader);
+
+		bool doubleSided = IsDoubleSided(shader);
+		ShaderMaterial godotMaterial = new ShaderMaterial
+		{
+			ResourceName = name + " (wireframe)",
+			Shader = GetWireframeShader(doubleSided),
+			RenderPriority = 1,
+		};
+
+		godotMaterial.SetShaderParameter("diffuse_tint", AlienSceneShaderParams.GetDiffuseTint(material, shader, shaderParams));
+		godotMaterial.SetShaderParameter("diffuse_uv_mult", AlienSceneShaderParams.GetUvScale(material, shader, shaderParams));
+
+		Texture2D diffuse = scene.GetSamplerTexture(material, shader, diffuseSamplerIndex);
+		godotMaterial.SetShaderParameter("use_diffuse_map", diffuse != null);
+		if (diffuse != null)
+			godotMaterial.SetShaderParameter("diffuse_map", diffuse);
+
+		return godotMaterial;
+	}
+
+	private static Shader GetWireframeShader(bool doubleSided)
+	{
+		if (doubleSided)
+		{
+			if (_wireframeShaderDoubleSided == null)
+				_wireframeShaderDoubleSided = GD.Load<Shader>("res://shaders/model_reference_wireframe_double_sided.gdshader");
+			return _wireframeShaderDoubleSided;
+		}
+
+		if (_wireframeShader == null)
+			_wireframeShader = GD.Load<Shader>("res://shaders/model_reference_wireframe.gdshader");
+		return _wireframeShader;
+	}
+
+	public static int GetDiffuseSamplerIndex(Shaders.Shader shader)
 	{
 		switch (shader.Ubershader)
 		{
@@ -138,69 +166,6 @@ public static class AlienSceneMaterials
 			default:
 				return -1;
 		}
-	}
-
-	/// <summary>
-	/// Any alpha-related ubershader feature → scissor in the opaque pass (never alpha blend / transparent queue).
-	/// </summary>
-	private static bool NeedsAlphaScissor(Shaders.Shader shader)
-	{
-		switch (shader.Ubershader)
-		{
-			case SHADER_LIST.CA_DECAL_ENVIRONMENT:
-			case SHADER_LIST.CA_EFFECT_OVERLAY:
-			case SHADER_LIST.CA_NONINTERACTIVE_WATER:
-			case SHADER_LIST.CA_SIMPLEWATER:
-			case SHADER_LIST.CA_SPACESUIT_VISOR:
-				return true;
-			case SHADER_LIST.CA_ENVIRONMENT:
-				return HasAnyFeature(shader,
-					CA_ENVIRONMENT.FEATURES.ALPHA_TEST,
-					CA_ENVIRONMENT.FEATURES.FORCE_TO_ALPHA,
-					CA_ENVIRONMENT.FEATURES.GLASS,
-					CA_ENVIRONMENT.FEATURES.ALPHABLEND_NOISE,
-					CA_ENVIRONMENT.FEATURES.SEPARATE_ALPHA);
-			case SHADER_LIST.CA_CHARACTER:
-				return HasAnyFeature(shader,
-					CA_CHARACTER.FEATURES.ALPHA_TEST,
-					CA_CHARACTER.FEATURES.FORCE_TO_ALPHA,
-					CA_CHARACTER.FEATURES.ALPHABLEND_NOISE,
-					CA_CHARACTER.FEATURES.SEPARATE_ALPHA);
-			case SHADER_LIST.CA_SURFACE_EFFECTS:
-				return HasAnyFeature(shader,
-					CA_SURFACE_EFFECTS.FEATURES.ALPHA_TEST,
-					CA_SURFACE_EFFECTS.FEATURES.FORCE_TO_ALPHA,
-					CA_SURFACE_EFFECTS.FEATURES.ALPHA_LIGHTING);
-			case SHADER_LIST.CA_LIGHTMAP_ENVIRONMENT:
-				return HasAnyFeature(shader,
-					CA_LIGHTMAP_ENVIRONMENT.FEATURES.ALPHA_TEST,
-					CA_LIGHTMAP_ENVIRONMENT.FEATURES.FORCE_TO_ALPHA,
-					CA_LIGHTMAP_ENVIRONMENT.FEATURES.ALPHABLEND_NOISE,
-					CA_LIGHTMAP_ENVIRONMENT.FEATURES.SEPARATE_ALPHA);
-			case SHADER_LIST.CA_STREAMER:
-				return HasAnyFeature(shader,
-					CA_STREAMER.FEATURES.ALPHA_TEST,
-					CA_STREAMER.FEATURES.FORCE_TO_ALPHA,
-					CA_STREAMER.FEATURES.ALPHABLEND_NOISE,
-					CA_STREAMER.FEATURES.SEPARATE_ALPHA);
-			case SHADER_LIST.CA_LOW_LOD_CHARACTER:
-				return HasAnyFeature(shader,
-					CA_LOW_LOD_CHARACTER.FEATURES.ALPHA_TEST,
-					CA_LOW_LOD_CHARACTER.FEATURES.FORCE_TO_ALPHA);
-			default:
-				return false;
-		}
-	}
-
-	private static bool HasAnyFeature(Shaders.Shader shader, params Enum[] features)
-	{
-		for (int i = 0; i < features.Length; i++)
-		{
-			if ((shader.UbershaderFeatureFlags & (1L << Convert.ToInt32(features[i]))) != 0)
-				return true;
-		}
-
-		return false;
 	}
 
 	private static bool IsDoubleSided(Shaders.Shader shader)

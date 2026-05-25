@@ -60,15 +60,25 @@ public static class LevelViewerSelection
             return;
 
         Material current = meshInstance.MaterialOverride ?? meshInstance.GetActiveMaterial(0);
-        if (current is not StandardMaterial3D source)
+        if (current == null)
             return;
 
         _savedMaterialOverrides[meshInstance] = meshInstance.MaterialOverride;
 
-        StandardMaterial3D tinted = (StandardMaterial3D)source.Duplicate();
-        tinted.EmissionEnabled = true;
-        tinted.Emission = MeshEmissionColor;
-        tinted.EmissionEnergyMultiplier = 1.25f;
+        Material tinted = (Material)current.Duplicate();
+        if (tinted is StandardMaterial3D standard)
+        {
+            standard.EmissionEnabled = true;
+            standard.Emission = MeshEmissionColor;
+            standard.EmissionEnergyMultiplier = 1.25f;
+        }
+        else if (tinted is ShaderMaterial shaderMaterial)
+        {
+            shaderMaterial.SetShaderParameter("emission_enabled", true);
+            shaderMaterial.SetShaderParameter("emission", MeshEmissionColor);
+            shaderMaterial.SetShaderParameter("emission_energy", 1.25f);
+        }
+
         meshInstance.MaterialOverride = tinted;
     }
 

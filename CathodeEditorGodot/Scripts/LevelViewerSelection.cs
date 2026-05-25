@@ -56,6 +56,9 @@ public static class LevelViewerSelection
         if (meshInstance == null || !GodotObject.IsInstanceValid(meshInstance))
             return;
 
+        if (meshInstance.IsInGroup("model_reference_wireframe_overlay"))
+            return;
+
         if (_savedMaterialOverrides.ContainsKey(meshInstance))
             return;
 

@@ -26,9 +26,9 @@ public partial class AlienScene : Node3D
 
 	private Dictionary<Textures.TEX4, TexOrCube> _texturesGlobal = new Dictionary<Textures.TEX4, TexOrCube>();
 	private Dictionary<Textures.TEX4, TexOrCube> _texturesLevel = new Dictionary<Textures.TEX4, TexOrCube>();
-	private Dictionary<Materials.Material, StandardMaterial3D> _materials = new Dictionary<Materials.Material, StandardMaterial3D>();
+	private Dictionary<Materials.Material, ShaderMaterial> _materials = new Dictionary<Materials.Material, ShaderMaterial>();
 	private Dictionary<Materials.Material, ShaderMaterial> _wireframeMaterials = new Dictionary<Materials.Material, ShaderMaterial>();
-	private Dictionary<StandardMaterial3D, bool> _materialSupport = new Dictionary<StandardMaterial3D, bool>();
+	private Dictionary<ShaderMaterial, bool> _materialSupport = new Dictionary<ShaderMaterial, bool>();
 	private Dictionary<MeshInstance3D, Materials.Material> _modelReferenceMeshes = new Dictionary<MeshInstance3D, Materials.Material>();
 	private Dictionary<Models.CS2.Component.LOD.Submesh, MeshHolder> _modelMeshes = new Dictionary<Models.CS2.Component.LOD.Submesh, MeshHolder>();
 
@@ -714,6 +714,8 @@ public partial class AlienScene : Node3D
 	public void SetModelReferenceWireframe(bool enabled)
 	{
 		ModelReferenceRenderSettings.SetWireframe(enabled);
+		if (!enabled)
+			HideAllWireframeOverlays();
 		ApplyModelReferenceWireframeToMeshes();
 	}
 
@@ -871,7 +873,7 @@ public partial class AlienScene : Node3D
 		return _materialSupport[_materials[material]];
 	}
 
-	private StandardMaterial3D GetSolidMaterial(Materials.Material material)
+	private ShaderMaterial GetSolidMaterial(Materials.Material material)
 	{
 		EnsureSolidMaterial(material);
 		return _materials[material];
@@ -907,7 +909,8 @@ public partial class AlienScene : Node3D
 		_materials.Add(material, result.Material);
 	}
 
-	private const string WireframeOverlaySuffix = " WireframeOverlay";
+	private const string WireframeOverlayNodeName = "WireframeOverlay";
+	private const string LegacyWireframeOverlaySuffix = " WireframeOverlay";
 
 	private void ApplyModelReferenceMaterial(MeshInstance3D solidMesh, Materials.Material material)
 	{
@@ -917,6 +920,8 @@ public partial class AlienScene : Node3D
 
 	private void UpdateWireframeOverlay(MeshInstance3D solidMesh, Materials.Material material)
 	{
+		RemoveLegacySiblingWireframeOverlay(solidMesh);
+
 		MeshInstance3D overlay = FindWireframeOverlay(solidMesh);
 		if (!ModelReferenceRenderSettings.WireframeEnabled)
 		{
@@ -942,12 +947,19 @@ public partial class AlienScene : Node3D
 		if (solidMesh == null || !GodotObject.IsInstanceValid(solidMesh))
 			return null;
 
-		Node parent = solidMesh.GetParent();
-		if (parent == null)
-			return null;
+		return solidMesh.GetNodeOrNull<MeshInstance3D>(WireframeOverlayNodeName);
+	}
 
-		string overlayName = solidMesh.Name + WireframeOverlaySuffix;
-		return parent.GetNodeOrNull<MeshInstance3D>(overlayName);
+	private void RemoveLegacySiblingWireframeOverlay(MeshInstance3D solidMesh)
+	{
+		Node parent = solidMesh?.GetParent();
+		if (parent == null)
+			return;
+
+		string legacyName = solidMesh.Name + LegacyWireframeOverlaySuffix;
+		MeshInstance3D legacy = parent.GetNodeOrNull<MeshInstance3D>(legacyName);
+		if (legacy != null && GodotObject.IsInstanceValid(legacy))
+			legacy.QueueFree();
 	}
 
 	private MeshInstance3D CreateWireframeOverlay(MeshInstance3D solidMesh, Materials.Material material)
@@ -955,22 +967,34 @@ public partial class AlienScene : Node3D
 		if (solidMesh?.Mesh == null)
 			return null;
 
-		Node parent = solidMesh.GetParent();
-		if (parent == null)
-			return null;
+		MeshInstance3D existing = FindWireframeOverlay(solidMesh);
+		if (existing != null)
+			return existing;
 
 		MeshInstance3D overlay = new MeshInstance3D
 		{
-			Name = solidMesh.Name + WireframeOverlaySuffix,
+			Name = WireframeOverlayNodeName,
 			Mesh = solidMesh.Mesh,
 			CastShadow = GeometryInstance3D.ShadowCastingSetting.Off,
 			Visible = true,
 		};
 		LevelViewerMeshUtil.ConfigureMeshInstance(overlay);
 		overlay.AddToGroup("model_reference_wireframe_overlay");
-		parent.AddChild(overlay);
-		parent.MoveChild(overlay, solidMesh.GetIndex() + 1);
+		solidMesh.AddChild(overlay);
 		return overlay;
+	}
+
+	private void HideAllWireframeOverlays()
+	{
+		SceneTree tree = GetTree();
+		if (tree == null)
+			return;
+
+		foreach (Node node in tree.GetNodesInGroup("model_reference_wireframe_overlay"))
+		{
+			if (node is MeshInstance3D meshInstance && GodotObject.IsInstanceValid(meshInstance))
+				meshInstance.Visible = false;
+		}
 	}
 
 	private void ApplyModelReferenceWireframeToMeshes()

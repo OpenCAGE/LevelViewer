@@ -3,22 +3,24 @@ using CATHODE.ShaderTypes;
 using Godot;
 
 /// <summary>
-/// Simplified opaque level materials (diffuse texture + tint + UV scale).
+/// ModelReference materials: soft shaded solid + optional wireframe overlay.
 /// </summary>
 public static class AlienSceneMaterials
 {
+	private static Shader _shadedShader;
+	private static Shader _shadedShaderDoubleSided;
 	private static Shader _wireframeShader;
 	private static Shader _wireframeShaderDoubleSided;
 
 	public readonly struct MaterialResult
 	{
-		public MaterialResult(StandardMaterial3D material, bool supported)
+		public MaterialResult(ShaderMaterial material, bool supported)
 		{
 			Material = material;
 			Supported = supported;
 		}
 
-		public StandardMaterial3D Material { get; }
+		public ShaderMaterial Material { get; }
 		public bool Supported { get; }
 	}
 
@@ -34,48 +36,30 @@ public static class AlienSceneMaterials
 		if (diffuseSampler < 0)
 			return Unsupported(material, baseName + " (NO DIFFUSE SAMPLER)");
 
-		return CreateOpaqueMaterial(material, shader, scene, baseName, diffuseSampler);
+		return CreateShadedMaterial(material, shader, scene, baseName, diffuseSampler);
 	}
 
 	private static MaterialResult Unsupported(Materials.Material material, string name)
 	{
-		StandardMaterial3D mat = new StandardMaterial3D { ResourceName = name };
+		ShaderMaterial mat = new ShaderMaterial { ResourceName = name };
 		return new MaterialResult(mat, false);
 	}
 
-	private static MaterialResult CreateOpaqueMaterial(
+	private static MaterialResult CreateShadedMaterial(
 		Materials.Material material,
 		Shaders.Shader shader,
 		AlienScene scene,
 		string name,
 		int diffuseSamplerIndex)
 	{
-		AlienSceneShaderParams.MaterialParams shaderParams = AlienSceneShaderParams.GetParams(shader.Ubershader);
-
-		StandardMaterial3D godotMaterial = new StandardMaterial3D
+		bool doubleSided = IsDoubleSided(shader);
+		ShaderMaterial godotMaterial = new ShaderMaterial
 		{
 			ResourceName = name,
-			ShadingMode = BaseMaterial3D.ShadingModeEnum.Unshaded,
-			SpecularMode = BaseMaterial3D.SpecularModeEnum.Disabled,
-			Roughness = 1f,
-			Metallic = 0f,
-			Transparency = BaseMaterial3D.TransparencyEnum.Disabled,
-			TextureFilter = BaseMaterial3D.TextureFilterEnum.LinearWithMipmapsAnisotropic,
-			CullMode = BaseMaterial3D.CullModeEnum.Back,
+			Shader = GetShadedShader(doubleSided),
 		};
 
-		godotMaterial.AlbedoColor = AlienSceneShaderParams.GetDiffuseTint(material, shader, shaderParams);
-
-		Vector2 uvScale = AlienSceneShaderParams.GetUvScale(material, shader, shaderParams);
-		godotMaterial.Uv1Scale = new Vector3(uvScale.X, uvScale.Y, 1f);
-
-		if (IsDoubleSided(shader))
-			godotMaterial.CullMode = BaseMaterial3D.CullModeEnum.Disabled;
-
-		Texture2D diffuse = scene.GetSamplerTexture(material, shader, diffuseSamplerIndex);
-		if (diffuse != null)
-			godotMaterial.AlbedoTexture = diffuse;
-
+		ApplyDiffuseParameters(godotMaterial, material, shader, scene, shaderParams: AlienSceneShaderParams.GetParams(shader.Ubershader), diffuseSamplerIndex);
 		return new MaterialResult(godotMaterial, true);
 	}
 
@@ -86,8 +70,6 @@ public static class AlienSceneMaterials
 		string name,
 		int diffuseSamplerIndex)
 	{
-		AlienSceneShaderParams.MaterialParams shaderParams = AlienSceneShaderParams.GetParams(shader.Ubershader);
-
 		bool doubleSided = IsDoubleSided(shader);
 		ShaderMaterial godotMaterial = new ShaderMaterial
 		{
@@ -96,6 +78,18 @@ public static class AlienSceneMaterials
 			RenderPriority = 1,
 		};
 
+		ApplyDiffuseParameters(godotMaterial, material, shader, scene, AlienSceneShaderParams.GetParams(shader.Ubershader), diffuseSamplerIndex);
+		return godotMaterial;
+	}
+
+	private static void ApplyDiffuseParameters(
+		ShaderMaterial godotMaterial,
+		Materials.Material material,
+		Shaders.Shader shader,
+		AlienScene scene,
+		AlienSceneShaderParams.MaterialParams shaderParams,
+		int diffuseSamplerIndex)
+	{
 		godotMaterial.SetShaderParameter("diffuse_tint", AlienSceneShaderParams.GetDiffuseTint(material, shader, shaderParams));
 		godotMaterial.SetShaderParameter("diffuse_uv_mult", AlienSceneShaderParams.GetUvScale(material, shader, shaderParams));
 
@@ -103,8 +97,20 @@ public static class AlienSceneMaterials
 		godotMaterial.SetShaderParameter("use_diffuse_map", diffuse != null);
 		if (diffuse != null)
 			godotMaterial.SetShaderParameter("diffuse_map", diffuse);
+	}
 
-		return godotMaterial;
+	private static Shader GetShadedShader(bool doubleSided)
+	{
+		if (doubleSided)
+		{
+			if (_shadedShaderDoubleSided == null)
+				_shadedShaderDoubleSided = GD.Load<Shader>("res://shaders/model_reference_shaded_double_sided.gdshader");
+			return _shadedShaderDoubleSided;
+		}
+
+		if (_shadedShader == null)
+			_shadedShader = GD.Load<Shader>("res://shaders/model_reference_shaded.gdshader");
+		return _shadedShader;
 	}
 
 	private static Shader GetWireframeShader(bool doubleSided)

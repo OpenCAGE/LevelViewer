@@ -2,9 +2,23 @@ using CATHODE.Scripting;
 using OpenCAGE;
 using UnityEngine;
 using UnityEngine.Rendering;
+#if UNITY_EDITOR
+using UnityEditor;
+#endif
 
 public static class PreviewVisualUtility
 {
+#if UNITY_EDITOR
+    [InitializeOnLoadMethod]
+    private static void ResetSharedMaterialsOnDomainReload()
+    {
+        _sharedBoxMaterial = null;
+        _sharedOpaqueMaterial = null;
+        _sharedIconBillboardMaterial = null;
+        _sharedOverlayLineMaterial = null;
+    }
+#endif
+
     private static Material _sharedBoxMaterial;
     private static Material _sharedOpaqueMaterial;
     private static Material _sharedIconBillboardMaterial;
@@ -32,22 +46,52 @@ public static class PreviewVisualUtility
         }
     }
 
+    private const string PreviewOpaqueShaderName = "CathodeEditor/PreviewOpaque";
+#if UNITY_EDITOR
+    private const string PreviewOpaqueShaderAssetPath = "Assets/Shaders/PreviewOpaque.shader";
+#endif
+
     /// <summary>Opaque mesh previews (markers, characters, etc.).</summary>
     public static Material SharedOpaqueMaterial
     {
         get
         {
-            if (_sharedOpaqueMaterial == null)
-            {
-                Shader shader = Shader.Find("Unlit/Color");
-                if (shader == null)
-                    shader = Shader.Find("Legacy Shaders/Diffuse");
-
-                _sharedOpaqueMaterial = new Material(shader);
-                ConfigureOpaqueMaterial(_sharedOpaqueMaterial);
-            }
+            EnsureSharedOpaqueMaterial();
             return _sharedOpaqueMaterial;
         }
+    }
+
+    private static void EnsureSharedOpaqueMaterial()
+    {
+        Shader shader = FindPreviewOpaqueShader();
+        if (_sharedOpaqueMaterial != null && _sharedOpaqueMaterial.shader != shader)
+        {
+            DestroyObject(_sharedOpaqueMaterial);
+            _sharedOpaqueMaterial = null;
+        }
+
+        if (_sharedOpaqueMaterial != null)
+            return;
+
+        _sharedOpaqueMaterial = new Material(shader);
+        ConfigureOpaqueMaterial(_sharedOpaqueMaterial);
+    }
+
+    private static Shader FindPreviewOpaqueShader()
+    {
+        Shader shader = Shader.Find(PreviewOpaqueShaderName);
+#if UNITY_EDITOR
+        if (shader == null)
+            shader = AssetDatabase.LoadAssetAtPath<Shader>(PreviewOpaqueShaderAssetPath);
+#endif
+        if (shader != null)
+            return shader;
+
+        shader = Shader.Find("Unlit/Color");
+        if (shader != null)
+            return shader;
+
+        return Shader.Find("Legacy Shaders/Diffuse");
     }
 
     public static Color GetPreviewColor(FunctionEntity entity)
@@ -79,9 +123,24 @@ public static class PreviewVisualUtility
 
         material.renderQueue = OpaqueRenderQueue;
         material.SetOverrideTag("RenderType", "Opaque");
-        material.SetInt("_ZWrite", 1);
-        material.SetInt("_SrcBlend", (int)BlendMode.One);
-        material.SetInt("_DstBlend", (int)BlendMode.Zero);
+
+        if (material.HasProperty("_ZWrite"))
+            material.SetInt("_ZWrite", 1);
+        if (material.HasProperty("_SrcBlend"))
+            material.SetInt("_SrcBlend", (int)BlendMode.One);
+        if (material.HasProperty("_DstBlend"))
+            material.SetInt("_DstBlend", (int)BlendMode.Zero);
+
+        // Legacy/Standard shaders: force opaque mode so previews never pick up fade/transparent state.
+        if (material.HasProperty("_Mode"))
+            material.SetFloat("_Mode", 0f);
+        material.DisableKeyword("_ALPHABLEND_ON");
+        material.DisableKeyword("_ALPHAPREMULTIPLY_ON");
+        material.DisableKeyword("_ALPHATEST_ON");
+
+        // Standard/Legacy: 0 = Off (double-sided). Custom PreviewOpaque sets Cull Off in the pass.
+        if (material.HasProperty("_Cull"))
+            material.SetInt("_Cull", 0);
     }
 
     public static bool IsVisible(FunctionEntity entity)
@@ -139,7 +198,7 @@ public static class PreviewVisualUtility
             return;
 
         if (opaque)
-            ApplyOpaqueColor(renderer, color);
+            ApplyOpaqueColor(renderer, color, ref propertyBlock);
         else
             ApplyTransparentColor(renderer, color, ref propertyBlock);
     }
@@ -157,17 +216,20 @@ public static class PreviewVisualUtility
         renderer.SetPropertyBlock(propertyBlock);
     }
 
-    public static void ApplyOpaqueColor(MeshRenderer renderer, Color color)
+    public static void ApplyOpaqueColor(MeshRenderer renderer, Color color, ref MaterialPropertyBlock propertyBlock)
     {
         if (renderer == null)
             return;
 
+        EnsureSharedOpaqueMaterial();
         renderer.sharedMaterial = SharedOpaqueMaterial;
-        Material instance = renderer.material;
+
+        // Per-renderer block so torus/axis colours cannot share one live property block instance.
+        var block = new MaterialPropertyBlock();
         color.a = 1f;
-        instance.SetColor(ColorPropertyId, color);
-        ConfigureOpaqueMaterial(instance);
-        renderer.SetPropertyBlock(null);
+        block.SetColor(ColorPropertyId, color);
+        renderer.SetPropertyBlock(block);
+        propertyBlock = block;
     }
 
     public static GameObject CreateMeshPreview(string name, Transform parent, Mesh mesh, Color color, ref MaterialPropertyBlock propertyBlock, bool opaque = false)
@@ -357,12 +419,13 @@ public static class PreviewVisualUtility
                 int b = segNext * tubeSegments + tube;
                 int c = segNext * tubeSegments + tubeNext;
                 int d = seg * tubeSegments + tubeNext;
+                // Winding flipped vs Godot copy: Unity is left-handed so the shared strip order faces inward with Cull Back.
                 triangles[tri++] = a;
+                triangles[tri++] = c;
                 triangles[tri++] = b;
-                triangles[tri++] = c;
                 triangles[tri++] = a;
-                triangles[tri++] = c;
                 triangles[tri++] = d;
+                triangles[tri++] = c;
             }
         }
 

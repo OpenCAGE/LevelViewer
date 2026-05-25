@@ -91,7 +91,7 @@ public static class ParameterSync
 
     public static ParameterData Unpack(SyncedParameter sync, LevelContent content = null)
     {
-        DataType dataType = (DataType)sync.data_type;
+        DataType dataType = GetDataType(sync);
         switch (dataType)
         {
             case DataType.TRANSFORM:

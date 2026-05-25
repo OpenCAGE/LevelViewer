@@ -40,13 +40,36 @@ public class BoxPreview : FunctionEntityPreview
             return;
 
         bool visible = PreviewVisualUtility.IsPreviewVisible(Entity, OwnerCompositeId);
-        if (SyncVisibility(visible, _volume))
+        if (_volume != null)
+            _volume.SetActive(visible);
+        if (!visible)
             return;
 
         EnsureVolume();
         ApplyPreviewColor();
+        ApplyDimensions(GetHalfDimensions(Entity));
+    }
 
-        Vector3 halfDimensions = GetHalfDimensions(Entity);
+    /// <summary>
+    /// Lightweight update for live half_dimensions sync — skips visibility and material work.
+    /// </summary>
+    public void RefreshDimensions()
+    {
+        if (Entity == null)
+            return;
+
+        bool visible = PreviewVisualUtility.IsPreviewVisible(Entity, OwnerCompositeId);
+        if (_volume != null)
+            _volume.SetActive(visible);
+        if (!visible)
+            return;
+
+        EnsureVolume();
+        ApplyDimensions(GetHalfDimensions(Entity));
+    }
+
+    private void ApplyDimensions(Vector3 halfDimensions)
+    {
         halfDimensions.x = Mathf.Max(halfDimensions.x, 0.01f);
         halfDimensions.y = Mathf.Max(halfDimensions.y, 0.01f);
         halfDimensions.z = Mathf.Max(halfDimensions.z, 0.01f);

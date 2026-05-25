@@ -43,6 +43,7 @@ public class AlienScene : MonoBehaviour
     
     private Dictionary<ShortGuid, List<GameObject>> _compositeGameObjects = new Dictionary<ShortGuid, List<GameObject>>();
     private Dictionary<GameObject, Entity> _gameObjectEntities = new Dictionary<GameObject, Entity>();
+    private readonly Dictionary<ulong, List<GameObject>> _entityGameObjectsByKey = new Dictionary<ulong, List<GameObject>>();
 
     private FunctionEntityPreview[] _cachedFunctionEntityPreviews = System.Array.Empty<FunctionEntityPreview>();
     private readonly Dictionary<uint, List<FunctionEntityPreview>> _previewsByOwnerComposite = new Dictionary<uint, List<FunctionEntityPreview>>();
@@ -138,6 +139,7 @@ public class AlienScene : MonoBehaviour
         //        if (kvp.Key != null)
         //            Destroy(kvp.Key);
         _gameObjectEntities.Clear();
+        ClearEntityGameObjectCache();
 
         _content.Reset();
     }
@@ -163,6 +165,7 @@ public class AlienScene : MonoBehaviour
 
         _compositeGameObjects.Clear();
         _gameObjectEntities.Clear();
+        ClearEntityGameObjectCache();
 
         if (_parentGameObject != null)
             Destroy(_parentGameObject);
@@ -260,6 +263,7 @@ public class AlienScene : MonoBehaviour
 #endif
         entityGO.isStatic = true;
         _gameObjectEntities.Add(entityGO, entity);
+        TrackEntityGameObject(composite.shortGUID, entity.shortGUID, entityGO);
 
         switch (entity.variant)
         {
@@ -377,28 +381,41 @@ public class AlienScene : MonoBehaviour
 
         ParameterSync.ApplyToEntity(dataEntity, sync, _content);
 
-        FunctionEntity remapEntity = ModelReferencePreview.ResolveModelReferenceEntity(
-            dataEntity, dataComposite, _content.Level.Commands);
         DataType syncDataType = ParameterSync.GetDataType(sync);
-        if (sync.removed && syncDataType == DataType.RESOURCE)
+        if (syncDataType == DataType.RESOURCE)
         {
-            if (remapEntity != null)
-                _content.RemappedResources.Remove(remapEntity);
+            FunctionEntity remapEntity = ModelReferencePreview.ResolveModelReferenceEntity(
+                dataEntity, dataComposite, _content.Level.Commands);
+            if (sync.removed)
+            {
+                if (remapEntity != null)
+                    _content.RemappedResources.Remove(remapEntity);
+            }
+            else
+            {
+                List<Tuple<int, int>> renderables = ParameterSync.ToRenderableIndexList(sync, _content);
+                if (renderables.Count > 0 && remapEntity != null)
+                    _content.RemappedResources[remapEntity] = renderables;
+            }
         }
-        else if (syncDataType == DataType.RESOURCE)
-        {
-            List<Tuple<int, int>> renderables = ParameterSync.ToRenderableIndexList(sync, _content);
-            if (renderables.Count > 0 && remapEntity != null)
-                _content.RemappedResources[remapEntity] = renderables;
-        }
+
+        if (!ShouldSyncVisualForOwnerComposite(visualCompositeID))
+            return;
 
         Composite visualComposite = _content.Level.Commands.Entries.FirstOrDefault(o => o.shortGUID == visualCompositeID);
         Entity visualEntity = visualComposite?.GetEntityByID(visualEntityID);
         if (visualComposite == null || visualEntity == null)
             return;
 
-        foreach (GameObject entityGO in GetEntityGameObjects(visualCompositeID, visualEntityID))
+        if (!TryGetCachedEntityGameObjects(visualCompositeID, visualEntityID, out List<GameObject> entityGOs))
+            return;
+
+        for (int i = 0; i < entityGOs.Count; i++)
         {
+            GameObject entityGO = entityGOs[i];
+            if (entityGO == null)
+                continue;
+
             ParameterVisualContext context = new ParameterVisualContext()
             {
                 Composite = visualComposite,
@@ -411,8 +428,8 @@ public class AlienScene : MonoBehaviour
 
             if (_parameterVisualHandlers.TryGetValue(syncDataType, out ParameterVisualHandler handler))
                 handler(context);
-
-            RefreshFunctionEntityPreviews(entityGO);
+            else if (syncDataType != DataType.VECTOR)
+                RefreshFunctionEntityPreviews(entityGO);
         }
     }
 
@@ -521,6 +538,9 @@ public class AlienScene : MonoBehaviour
 
     private List<GameObject> GetEntityGameObjects(ShortGuid compositeID, ShortGuid entityID)
     {
+        if (TryGetCachedEntityGameObjects(compositeID, entityID, out List<GameObject> cached))
+            return cached;
+
         List<GameObject> results = new List<GameObject>();
         string entityGameObjectName = entityID.AsUInt32.ToString();
         if (!_compositeGameObjects.ContainsKey(compositeID))
@@ -548,7 +568,61 @@ public class AlienScene : MonoBehaviour
 
     private void ApplyVectorVisual(ParameterVisualContext context)
     {
-        RefreshFunctionEntityPreviews(context.EntityGameObject);
+        RefreshBoxPreviews(context.EntityGameObject);
+    }
+
+    private static void RefreshBoxPreviews(GameObject entityGO)
+    {
+        if (entityGO == null)
+            return;
+
+        BoxPreview[] boxPreviews = entityGO.GetComponents<BoxPreview>();
+        for (int i = 0; i < boxPreviews.Length; i++)
+            boxPreviews[i].RefreshDimensions();
+    }
+
+    private static ulong MakeEntityCacheKey(ShortGuid compositeId, ShortGuid entityId)
+    {
+        return ((ulong)compositeId.AsUInt32 << 32) | entityId.AsUInt32;
+    }
+
+    private void TrackEntityGameObject(ShortGuid compositeId, ShortGuid entityId, GameObject entityGO)
+    {
+        ulong key = MakeEntityCacheKey(compositeId, entityId);
+        if (!_entityGameObjectsByKey.TryGetValue(key, out List<GameObject> entityGOs))
+        {
+            entityGOs = new List<GameObject>();
+            _entityGameObjectsByKey.Add(key, entityGOs);
+        }
+
+        entityGOs.Add(entityGO);
+    }
+
+    private void UntrackEntityGameObject(ShortGuid compositeId, ShortGuid entityId, GameObject entityGO)
+    {
+        ulong key = MakeEntityCacheKey(compositeId, entityId);
+        if (_entityGameObjectsByKey.TryGetValue(key, out List<GameObject> entityGOs))
+            entityGOs.Remove(entityGO);
+    }
+
+    private void ClearEntityGameObjectCache()
+    {
+        _entityGameObjectsByKey.Clear();
+    }
+
+    private bool TryGetCachedEntityGameObjects(ShortGuid compositeId, ShortGuid entityId, out List<GameObject> entityGOs)
+    {
+        return _entityGameObjectsByKey.TryGetValue(MakeEntityCacheKey(compositeId, entityId), out entityGOs)
+            && entityGOs != null
+            && entityGOs.Count > 0;
+    }
+
+    private static bool ShouldSyncVisualForOwnerComposite(ShortGuid ownerCompositeId)
+    {
+        if (!PreviewVisibilitySettings.HideNestedScriptEntities)
+            return true;
+
+        return ownerCompositeId.AsUInt32 == PreviewVisibilitySettings.ActiveCompositeId;
     }
 
     private void ApplyTransformVisual(ParameterVisualContext context)
@@ -638,6 +712,7 @@ public class AlienScene : MonoBehaviour
                                 o.PointedEntity.transform.SetLocalPositionAndRotation(position, Quaternion.Euler(rotation));
                                 o.PointedEntity.tag = "Untagged";
                             }
+                            UntrackEntityGameObject(composite, entity, child.gameObject);
                             Destroy(child.gameObject);
                             _gameObjectEntities.Remove(child.gameObject);
                             _functionEntityPreviewsCacheDirty = true;

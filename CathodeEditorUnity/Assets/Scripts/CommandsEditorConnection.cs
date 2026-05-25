@@ -34,6 +34,36 @@ public class CommandsEditorConnection : MonoBehaviour
 
     private bool _didLoadLevel = true;
 
+    private struct ParameterSyncKey : System.IEquatable<ParameterSyncKey>
+    {
+        public uint CompositeId;
+        public uint EntityId;
+        public uint ParameterName;
+
+        public bool Equals(ParameterSyncKey other)
+        {
+            return CompositeId == other.CompositeId
+                && EntityId == other.EntityId
+                && ParameterName == other.ParameterName;
+        }
+
+        public override bool Equals(object obj)
+        {
+            return obj is ParameterSyncKey other && Equals(other);
+        }
+
+        public override int GetHashCode()
+        {
+            unchecked
+            {
+                int hash = (int)CompositeId;
+                hash = (hash * 397) ^ (int)EntityId;
+                hash = (hash * 397) ^ (int)ParameterName;
+                return hash;
+            }
+        }
+    }
+
     private class PendingParameterSync
     {
         public ShortGuid DataCompositeID;
@@ -44,7 +74,7 @@ public class CommandsEditorConnection : MonoBehaviour
         public bool FromPointer;
         public bool PointedOverride;
     }
-    private readonly List<PendingParameterSync> _pendingParameterSyncs = new List<PendingParameterSync>();
+    private readonly Dictionary<ParameterSyncKey, PendingParameterSync> _pendingParameterSyncs = new Dictionary<ParameterSyncKey, PendingParameterSync>();
 
     private Tuple<ShortGuid, ShortGuid> _addedEntity = null;
     private Tuple<ShortGuid, ShortGuid> _removedEntity = null;
@@ -101,6 +131,17 @@ public class CommandsEditorConnection : MonoBehaviour
             return;
         }
 
+        if (packet.packet_event == PacketEvent.ENTITY_PARAMETER_MODIFIED
+            || packet.packet_event == PacketEvent.ENTITY_MOVED
+            || packet.packet_event == PacketEvent.ENTITY_RESOURCE_MODIFIED)
+        {
+            lock (_lock)
+            {
+                QueueParameterSync(packet);
+            }
+            return;
+        }
+
         //if (packet.dirty)
         //{
         //    Debug.LogError("Content has been modified inside the Commands editor without saving before opening Unity. Please save inside the Commands editor and re-play Unity to sync changes.");
@@ -147,16 +188,6 @@ public class CommandsEditorConnection : MonoBehaviour
 
         switch (packet.packet_event)
         {
-            case PacketEvent.ENTITY_PARAMETER_MODIFIED:
-            case PacketEvent.ENTITY_MOVED:
-            case PacketEvent.ENTITY_RESOURCE_MODIFIED:
-                {
-                    lock (_lock)
-                    {
-                        QueueParameterSync(packet);
-                    }
-                    break;
-                }
             case PacketEvent.ENTITY_ADDED:
                 {
                     lock (_lock)
@@ -303,7 +334,14 @@ public class CommandsEditorConnection : MonoBehaviour
                 }
             }
 
-            _pendingParameterSyncs.Add(new PendingParameterSync()
+            ParameterSyncKey key = new ParameterSyncKey()
+            {
+                CompositeId = compositeID.AsUInt32,
+                EntityId = entityID.AsUInt32,
+                ParameterName = sync.name,
+            };
+
+            _pendingParameterSyncs[key] = new PendingParameterSync()
             {
                 DataCompositeID = compositeID,
                 DataEntityID = entityID,
@@ -312,8 +350,42 @@ public class CommandsEditorConnection : MonoBehaviour
                 Sync = sync,
                 FromPointer = fromPointer,
                 PointedOverride = pointedOverride,
-            });
+            };
         }
+    }
+
+    private void FlushPendingParameterSyncs()
+    {
+        if (_scene == null)
+            return;
+
+        List<PendingParameterSync> pendingParameterSyncs = null;
+        lock (_lock)
+        {
+            if (_pendingParameterSyncs.Count == 0)
+                return;
+
+            pendingParameterSyncs = new List<PendingParameterSync>(_pendingParameterSyncs.Values);
+            _pendingParameterSyncs.Clear();
+        }
+
+        for (int i = 0; i < pendingParameterSyncs.Count; i++)
+        {
+            PendingParameterSync pending = pendingParameterSyncs[i];
+            _scene.ApplyEntityParameter(
+                pending.DataCompositeID,
+                pending.DataEntityID,
+                pending.Sync,
+                pending.VisualCompositeID,
+                pending.VisualEntityID,
+                pending.FromPointer,
+                pending.PointedOverride);
+        }
+    }
+
+    private void Update()
+    {
+        FlushPendingParameterSyncs();
     }
 
     private List<SyncedParameter> BuildLegacySyncedParameters(Packet packet, Entity entity)
@@ -424,24 +496,6 @@ public class CommandsEditorConnection : MonoBehaviour
             Debug.Log("Removing composite: " + _removedComposite.AsUInt32);
             _scene.RemoveComposite(_removedComposite);
             _removedComposite = ShortGuid.Invalid;
-        }
-
-        List<PendingParameterSync> pendingParameterSyncs = null;
-        lock (_lock)
-        {
-            if (_pendingParameterSyncs.Count > 0)
-            {
-                pendingParameterSyncs = new List<PendingParameterSync>(_pendingParameterSyncs);
-                _pendingParameterSyncs.Clear();
-            }
-        }
-
-        if (pendingParameterSyncs != null)
-        {
-            foreach (PendingParameterSync pending in pendingParameterSyncs)
-            {
-                _scene.ApplyEntityParameter(pending.DataCompositeID, pending.DataEntityID, pending.Sync, pending.VisualCompositeID, pending.VisualEntityID, pending.FromPointer, pending.PointedOverride);
-            }
         }
 
         int renderFiltersGeneration = -1;

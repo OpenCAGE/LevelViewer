@@ -5,11 +5,15 @@ uniform vec4 albedo_color : source_color = vec4(1.0, 1.0, 1.0, 1.0);
 uniform sampler2D albedo_texture : source_color, filter_linear_mipmap, repeat_enable;
 
 void vertex() {
-	// Full camera-facing billboard (same as BaseMaterial3D billboard on Sprite3D).
+	// Camera-facing billboard while preserving node scale (MODEL_MATRIX column lengths).
+	vec3 scale = vec3(
+		length(MODEL_MATRIX[0].xyz),
+		length(MODEL_MATRIX[1].xyz),
+		length(MODEL_MATRIX[2].xyz));
 	MODELVIEW_MATRIX = VIEW_MATRIX * mat4(
-		INV_VIEW_MATRIX[0],
-		INV_VIEW_MATRIX[1],
-		INV_VIEW_MATRIX[2],
+		INV_VIEW_MATRIX[0] * scale.x,
+		INV_VIEW_MATRIX[1] * scale.y,
+		INV_VIEW_MATRIX[2] * scale.z,
 		MODEL_MATRIX[3]);
 }
 

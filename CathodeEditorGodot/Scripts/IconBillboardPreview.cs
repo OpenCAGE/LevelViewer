@@ -49,14 +49,22 @@ public partial class IconBillboardPreview : FunctionEntityPreview
 
     private void EnsureBillboard()
     {
-        if (_billboard != null)
+        if (_billboard != null && GodotObject.IsInstanceValid(_billboard))
+        {
+            _billboard.Scale = Vector3.One * PreviewVisualUtility.IconBillboardWorldSize;
             return;
+        }
 
         Texture2D icon = EditorIconTextures.Get(_iconKind);
         if (icon == null)
             return;
 
         // Unity uses full-color editor icons (white material tint), not the render-filter colour.
-        _billboard = PreviewVisualUtility.CreateIconBillboard("IconBillboard", this, icon, Colors.White);
+        _billboard = PreviewVisualUtility.CreateIconBillboard(
+            "IconBillboard",
+            this,
+            icon,
+            Colors.White,
+            PreviewVisualUtility.IconBillboardWorldSize);
     }
 }

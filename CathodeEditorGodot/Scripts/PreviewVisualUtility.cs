@@ -11,6 +11,9 @@ public static class PreviewVisualUtility
     private static ShaderMaterial _sharedOverlayLineMaterial;
     private static ArrayMesh _billboardQuadMesh;
 
+    /// <summary>World-space width/height of icon billboard quads (see preview_icon_billboard.gdshader).</summary>
+    public const float IconBillboardWorldSize = 0.25f;
+
     private const int OpaqueRenderPriority = 0;
     private const int TransparentRenderPriority = 1;
     private const float LookParallelEpsilon = 0.99f;
@@ -402,7 +405,7 @@ public static class PreviewVisualUtility
         }
     }
 
-    public static Node3D CreateIconBillboard(string name, Node3D parent, Texture2D icon, Color tint, float size = 0.75f)
+    public static Node3D CreateIconBillboard(string name, Node3D parent, Texture2D icon, Color tint, float size = IconBillboardWorldSize)
     {
         if (icon == null || parent == null)
             return null;

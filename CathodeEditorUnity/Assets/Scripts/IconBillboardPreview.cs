@@ -9,6 +9,7 @@ public class IconBillboardPreview : FunctionEntityPreview
     public enum IconKind
     {
         Sound,
+        SoundObject,
         Light,
         Particle,
         Camera,
@@ -60,10 +61,13 @@ public class IconBillboardPreview : FunctionEntityPreview
 internal static class EditorIconTextures
 {
     private static Texture2D _sound;
+    private static Texture2D _soundObject;
     private static Texture2D _light;
     private static Texture2D _particle;
     private static Texture2D _camera;
     private static bool _loaded;
+
+    private const string PreviewIconsFolder = "Assets/Textures/preview_icons/";
 
     public static Texture2D Get(IconBillboardPreview.IconKind kind)
     {
@@ -72,6 +76,8 @@ internal static class EditorIconTextures
         {
             case IconBillboardPreview.IconKind.Sound:
                 return _sound;
+            case IconBillboardPreview.IconKind.SoundObject:
+                return _soundObject;
             case IconBillboardPreview.IconKind.Light:
                 return _light;
             case IconBillboardPreview.IconKind.Particle:
@@ -90,12 +96,20 @@ internal static class EditorIconTextures
 
 #if UNITY_EDITOR
         _sound = LoadComponentIcon(typeof(UnityEngine.AudioSource));
+        _soundObject = LoadPreviewIconPng("sound_object.png") ?? _sound;
         _light = LoadComponentIcon(typeof(UnityEngine.Light));
         _particle = LoadComponentIcon(typeof(UnityEngine.ParticleSystem));
         _camera = LoadComponentIcon(typeof(UnityEngine.Camera));
 #endif
         _loaded = true;
     }
+
+#if UNITY_EDITOR
+    private static Texture2D LoadPreviewIconPng(string fileName)
+    {
+        return UnityEditor.AssetDatabase.LoadAssetAtPath<Texture2D>(PreviewIconsFolder + fileName);
+    }
+#endif
 
 #if UNITY_EDITOR
     private static Texture2D LoadComponentIcon(System.Type componentType)

@@ -54,7 +54,7 @@ public static class FunctionEntityPreviewSetup
                 entityGO.AddComponent<SoundNetworkNodePreview>().Setup(function, ownerCompositeId);
                 return true;
             case RenderPreviewKind.SoundObject:
-                entityGO.AddComponent<IconBillboardPreview>().Setup(function, IconBillboardPreview.IconKind.Sound, ownerCompositeId);
+                entityGO.AddComponent<IconBillboardPreview>().Setup(function, IconBillboardPreview.IconKind.SoundObject, ownerCompositeId);
                 return true;
             case RenderPreviewKind.CameraResource:
                 entityGO.AddComponent<IconBillboardPreview>().Setup(function, IconBillboardPreview.IconKind.Camera, ownerCompositeId);

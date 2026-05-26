@@ -100,7 +100,7 @@ public static class FunctionEntityPreviewSetup
             {
                 IconBillboardPreview preview = new IconBillboardPreview();
                 entityNode.AddChild(preview);
-                preview.Setup(function, IconBillboardPreview.IconKind.Sound, ownerCompositeId);
+                preview.Setup(function, IconBillboardPreview.IconKind.SoundObject, ownerCompositeId);
                 return true;
             }
             case RenderPreviewKind.CameraResource:

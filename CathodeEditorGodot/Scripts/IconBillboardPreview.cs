@@ -9,6 +9,7 @@ public partial class IconBillboardPreview : FunctionEntityPreview
     public enum IconKind
     {
         Sound,
+        SoundObject,
         Light,
         Particle,
         Camera,

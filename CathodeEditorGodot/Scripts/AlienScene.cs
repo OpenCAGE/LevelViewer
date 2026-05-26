@@ -67,9 +67,35 @@ public partial class AlienScene : Node3D
 		public Texture2D Cubemap = null;
 	}
 
+	private LevelViewerLoadingScreen _loadingScreen;
+
+	private enum LoadPipelineStep
+	{
+		None,
+		WaitUiBeforeLevelLoad,
+		LoadLevel,
+		WaitUiBeforeCompositePopulate,
+		PopulateComposite,
+	}
+
+	private const int LoadUiRedrawFrameCount = 2;
+
+	private LoadPipelineStep _loadStep = LoadPipelineStep.None;
+	private int _loadUiFrameCounter;
+	private string _queuedLevelName = "";
+	private string _queuedLevelPath = "";
+	private ShortGuid _queuedCompositeGuid = ShortGuid.Invalid;
+	private Composite _queuedComposite;
+
 	public override void _Ready()
 	{
 		RegisterDefaultParameterVisualHandlers();
+		Callable.From(EnsureLoadingScreen).CallDeferred();
+	}
+
+	public override void _Process(double delta)
+	{
+		AdvanceLoadPipeline();
 	}
 
 	public void RegisterParameterVisualHandler(DataType dataType, ParameterVisualHandler handler)
@@ -91,7 +117,68 @@ public partial class AlienScene : Node3D
 			_parentNode.QueueFree();
 
 		_parentNode = null;
+
+		if (_loadingScreen != null && GodotObject.IsInstanceValid(_loadingScreen))
+			_loadingScreen.QueueFree();
+		_loadingScreen = null;
+
 		base._ExitTree();
+	}
+
+	private bool TryEnsureLoadingScreenAttached()
+	{
+		if (_loadingScreen != null && GodotObject.IsInstanceValid(_loadingScreen) && _loadingScreen.IsUiReady)
+			return true;
+
+		Node host = GetTree()?.CurrentScene ?? this;
+		if (host == null || !GodotObject.IsInstanceValid(host))
+			return false;
+
+		if (_loadingScreen == null || !GodotObject.IsInstanceValid(_loadingScreen))
+			_loadingScreen = new LevelViewerLoadingScreen();
+
+		if (!_loadingScreen.IsInsideTree())
+			_loadingScreen.AttachTo(host);
+
+		return _loadingScreen.IsUiReady;
+	}
+
+	private void EnsureLoadingScreen()
+	{
+		TryEnsureLoadingScreenAttached();
+	}
+
+	private void RequestShowLoading(string message)
+	{
+		Callable.From(() =>
+		{
+			if (TryEnsureLoadingScreenAttached())
+				_loadingScreen.ShowMessage(message);
+		}).CallDeferred();
+	}
+
+	private void ShowLoading(string message)
+	{
+		if (TryEnsureLoadingScreenAttached())
+			_loadingScreen.ShowMessage(message);
+		else
+			RequestShowLoading(message);
+	}
+
+	private void HideLoading()
+	{
+		if (_loadingScreen != null && GodotObject.IsInstanceValid(_loadingScreen))
+			_loadingScreen.HideScreen();
+	}
+
+	public void ShowLoadingMessage(string message)
+	{
+		ShowLoading(message);
+	}
+
+	public void HideLoadingMessage()
+	{
+		HideLoading();
 	}
 
 	public bool TryGetSelectedEntity(out Node3D entity)
@@ -139,26 +226,138 @@ public partial class AlienScene : Node3D
 		ClearEntityNodeCache();
 
 		_contentOrigin = Vector3.Zero;
+		_loadedComposite = null;
 		_content.Reset();
 	}
 
-	public void LoadLevel(string level, string pathToAI)
+	/// <summary>Shows the loading overlay, waits for UI redraw, then loads Cathode level data.</summary>
+	public void QueueLoadLevel(string level, string pathToAI)
 	{
 		if (level == null || level == "" || pathToAI == "")
 			return;
 
-		GD.Print("Loading level " + level + "...");
+		_queuedLevelName = level;
+		_queuedLevelPath = pathToAI;
 
-		ResetLevel();
+		if (_loadStep != LoadPipelineStep.None)
+			return;
 
-		_levelName = level;
-		_content.Load(pathToAI, level);
+		BeginWaitUiBeforeLevelLoad("Loading level " + level + "...");
 	}
 
-	public void PopulateComposite(ShortGuid guid)
+	/// <summary>Shows the loading overlay, waits for UI redraw, then builds the composite scene.</summary>
+	public void QueuePopulateComposite(ShortGuid guid)
 	{
-		if (!_content.Loaded) return;
+		_queuedCompositeGuid = guid;
 
+		if (_loadStep == LoadPipelineStep.WaitUiBeforeLevelLoad || _loadStep == LoadPipelineStep.LoadLevel)
+			return;
+
+		if (!_content.Loaded)
+			return;
+
+		Composite comp = _content.Level.Commands.GetComposite(guid);
+		if (comp == null)
+			return;
+		if (_loadedComposite != null && _loadedComposite.shortGUID == guid)
+			return;
+		if (_loadStep != LoadPipelineStep.None)
+			return;
+
+		string compositeLabel = string.IsNullOrWhiteSpace(comp.name) ? "composite" : comp.name;
+		BeginWaitUiBeforeCompositePopulate("Loading " + compositeLabel + "...", comp);
+	}
+
+	private void BeginWaitUiBeforeLevelLoad(string message)
+	{
+		_loadStep = LoadPipelineStep.WaitUiBeforeLevelLoad;
+		_loadUiFrameCounter = 0;
+		RequestShowLoading(message);
+	}
+
+	private void BeginWaitUiBeforeCompositePopulate(string message, Composite comp)
+	{
+		_queuedComposite = comp;
+		_loadStep = LoadPipelineStep.WaitUiBeforeCompositePopulate;
+		_loadUiFrameCounter = 0;
+		RequestShowLoading(message);
+	}
+
+	private void AdvanceLoadPipeline()
+	{
+		switch (_loadStep)
+		{
+			case LoadPipelineStep.WaitUiBeforeLevelLoad:
+				if (!TryEnsureLoadingScreenAttached())
+					return;
+				if (++_loadUiFrameCounter < LoadUiRedrawFrameCount)
+					return;
+
+				_loadStep = LoadPipelineStep.LoadLevel;
+				Callable.From(ExecuteLoadLevel).CallDeferred();
+				break;
+
+			case LoadPipelineStep.WaitUiBeforeCompositePopulate:
+				if (!TryEnsureLoadingScreenAttached())
+					return;
+				if (++_loadUiFrameCounter < LoadUiRedrawFrameCount)
+					return;
+
+				_loadStep = LoadPipelineStep.PopulateComposite;
+				Callable.From(ExecutePopulateComposite).CallDeferred();
+				break;
+		}
+	}
+
+	private void ExecuteLoadLevel()
+	{
+		if (_loadStep != LoadPipelineStep.LoadLevel)
+			return;
+
+		if (string.IsNullOrEmpty(_queuedLevelName) || string.IsNullOrEmpty(_queuedLevelPath))
+		{
+			_loadStep = LoadPipelineStep.None;
+			return;
+		}
+
+		GD.Print("Loading level " + _queuedLevelName + "...");
+		ResetLevel();
+		_levelName = _queuedLevelName;
+		_content.Load(_queuedLevelPath, _queuedLevelName);
+
+		if (_queuedCompositeGuid != ShortGuid.Invalid && _content.Loaded)
+		{
+			Composite comp = _content.Level.Commands.GetComposite(_queuedCompositeGuid);
+			if (comp != null && (_loadedComposite == null || _loadedComposite.shortGUID != _queuedCompositeGuid))
+			{
+				string compositeLabel = string.IsNullOrWhiteSpace(comp.name) ? "composite" : comp.name;
+				BeginWaitUiBeforeCompositePopulate("Loading " + compositeLabel + "...", comp);
+				return;
+			}
+		}
+
+		_loadStep = LoadPipelineStep.None;
+	}
+
+	private void ExecutePopulateComposite()
+	{
+		if (_loadStep != LoadPipelineStep.PopulateComposite || _queuedComposite == null)
+		{
+			_loadStep = LoadPipelineStep.None;
+			return;
+		}
+
+		PopulateCompositeInternal(_queuedComposite);
+		_queuedComposite = null;
+		_queuedCompositeGuid = ShortGuid.Invalid;
+		_loadStep = LoadPipelineStep.None;
+
+		OnLoaded?.Invoke();
+		Callable.From(HideLoading).CallDeferred();
+	}
+
+	private void PopulateCompositeInternal(Composite comp)
+	{
 		_compositeNodes.Clear();
 		_nodeEntities.Clear();
 		ClearEntityNodeCache();
@@ -174,14 +373,12 @@ public partial class AlienScene : Node3D
 		_parentNode.AddToGroup(LevelViewerView.ContentGroup);
 		AddChild(_parentNode);
 
-		Composite comp = _content.Level.Commands.GetComposite(guid);
 		GD.Print("Loading composite " + comp?.name + "...");
 		_loadedComposite = comp;
 		AddCompositeInstance(comp, _parentNode, null);
 
 		InvalidateFunctionEntityPreviewCache();
 		RefreshRenderFilters();
-		OnLoaded?.Invoke();
 	}
 
 	/// <summary>Moves level root so loaded content is centered near the origin for stable rendering.</summary>

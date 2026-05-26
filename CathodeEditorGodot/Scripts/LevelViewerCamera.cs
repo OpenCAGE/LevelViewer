@@ -49,7 +49,11 @@ public partial class LevelViewerCamera : Camera3D
     [Export]
     public float PositionDisplayEpsilon = 0.01f;
 
+    [Export]
+    public NodePath CommandsEditorConnectionPath = new NodePath("../CommandsEditorConnection");
+
     private AlienScene _alienScene;
+    private CommandsEditorConnection _commandsEditorConnection;
     private float _yaw;
     private float _pitch;
     private bool _mouseLookActive;
@@ -77,6 +81,7 @@ public partial class LevelViewerCamera : Camera3D
         Callable.From(SetupHud).CallDeferred();
 
         _alienScene = GetNodeOrNull<AlienScene>(AlienScenePath);
+        _commandsEditorConnection = GetNodeOrNull<CommandsEditorConnection>(CommandsEditorConnectionPath);
         if (_alienScene != null)
             _alienScene.OnLoaded += OnCompositeLoaded;
     }
@@ -207,6 +212,9 @@ public partial class LevelViewerCamera : Camera3D
         if (_alienScene.ParentNode == null || !GodotObject.IsInstanceValid(_alienScene.ParentNode))
             return;
 
+        if (!ShouldAutoFrameLoadedContent())
+            return;
+
         Vector3 positionBefore = GlobalPosition;
         _alienScene.RecenterContentOrigin();
         LevelViewerView.FrameRuntimeCamera(_alienScene.ParentNode, this);
@@ -218,6 +226,17 @@ public partial class LevelViewerCamera : Camera3D
         if (FrameEditorViewport && Engine.IsEditorHint())
             LevelViewerView.TryFrameEditorOn(_alienScene.ParentNode);
 #endif
+    }
+
+    private bool ShouldAutoFrameLoadedContent()
+    {
+        if (_commandsEditorConnection == null || !GodotObject.IsInstanceValid(_commandsEditorConnection))
+            _commandsEditorConnection = GetNodeOrNull<CommandsEditorConnection>(CommandsEditorConnectionPath);
+
+        if (_commandsEditorConnection == null)
+            return true;
+
+        return !_commandsEditorConnection.HasEntitySelection && !_commandsEditorConnection.FocusSelected;
     }
 
     private void ApplyKeyboardMovement(float deltaSeconds)
@@ -351,23 +370,22 @@ public partial class LevelViewerCamera : Camera3D
         _speedLabel = CreateHudLabel();
         _speedPanel = WrapHudPanel(_speedLabel);
         _speedPanel.MouseFilter = Control.MouseFilterEnum.Ignore;
-        _speedPanel.SetAnchorsPreset(Control.LayoutPreset.CenterTop);
-        _speedPanel.OffsetTop = 10f;
-        _speedPanel.OffsetBottom = 42f;
-        _speedPanel.OffsetLeft = -160f;
-        _speedPanel.OffsetRight = 160f;
+        _speedPanel.SetAnchorsPreset(Control.LayoutPreset.BottomRight);
+        _speedPanel.OffsetRight = -12f;
+        _speedPanel.OffsetBottom = -12f;
+        _speedPanel.OffsetLeft = -280f;
+        _speedPanel.OffsetTop = -48f;
         _speedPanel.Visible = false;
         hudRoot.AddChild(_speedPanel);
 
         _positionLabel = CreateHudLabel();
-        _positionLabel.HorizontalAlignment = HorizontalAlignment.Left;
         _positionPanel = WrapHudPanel(_positionLabel);
         _positionPanel.MouseFilter = Control.MouseFilterEnum.Ignore;
         _positionPanel.SetAnchorsPreset(Control.LayoutPreset.BottomLeft);
         _positionPanel.OffsetLeft = 12f;
         _positionPanel.OffsetBottom = -12f;
         _positionPanel.OffsetTop = -48f;
-        _positionPanel.OffsetRight = 360f;
+        _positionPanel.OffsetRight = 280f;
         _positionPanel.Visible = false;
         hudRoot.AddChild(_positionPanel);
     }

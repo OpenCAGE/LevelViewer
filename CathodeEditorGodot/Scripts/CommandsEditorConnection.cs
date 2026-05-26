@@ -82,8 +82,9 @@ public partial class CommandsEditorConnection : Node3D
     private Tuple<ShortGuid, ShortGuid> _removedEntity = null;
     private ShortGuid _removedComposite = ShortGuid.Invalid;
 
-    public bool FocusSelected => _focusSelected;
-    private bool _focusSelected = false;
+	public bool FocusSelected => _focusSelected;
+	public bool HasEntitySelection => _entitySelected;
+	private bool _focusSelected = false;
     private bool _hideNestedScriptEntities = false;
     private bool _renderFiltersDirty = false;
     private bool _nestedVisibilityDirty = false;
@@ -91,10 +92,13 @@ public partial class CommandsEditorConnection : Node3D
     private int _renderFiltersGeneration = 0;
     private HashSet<uint> _renderFiltersChangedFunctionTypes = null;
 
+    private LevelViewerConnectionHud _connectionHud;
+
     public override void _Ready()
     {
         _scene = GetNode<AlienScene>("../AlienScene");
         _connectionCts = new CancellationTokenSource();
+        Callable.From(EnsureConnectionHud).CallDeferred();
         _ = ReconnectLoopAsync(_connectionCts.Token);
     }
 
@@ -103,6 +107,10 @@ public partial class CommandsEditorConnection : Node3D
         _connectionCts?.Cancel();
         _connectionCts?.Dispose();
         _connectionCts = null;
+
+        if (_connectionHud != null && GodotObject.IsInstanceValid(_connectionHud))
+            _connectionHud.QueueFree();
+        _connectionHud = null;
 
         if (_scene == null)
             return;
@@ -118,6 +126,7 @@ public partial class CommandsEditorConnection : Node3D
     public override void _Process(double delta)
     {
         FlushPendingParameterSyncs();
+        _connectionHud?.UpdateFade((float)delta);
     }
 
     public override void _UnhandledKeyInput(InputEvent @event)
@@ -141,17 +150,19 @@ public partial class CommandsEditorConnection : Node3D
 
         if (_levelName != "" && _didLoadLevel)
         {
-            if (_scene.ParentNode != null && GodotObject.IsInstanceValid(_scene.ParentNode))
-                _scene.ParentNode.QueueFree();
-
-            _scene.LoadLevel(_levelName, _pathToAI);
+            string level = _levelName;
+            string pathToAi = _pathToAI;
             _didLoadLevel = false;
+            Callable.From(() => _scene.QueueLoadLevel(level, pathToAi)).CallDeferred();
         }
 
         if (_compositeLoaded && _scene.Content.Loaded)
         {
             if (_scene.CompositeID != _pathComposites[0])
-                _scene.PopulateComposite(new ShortGuid(_pathComposites[0]));
+            {
+                uint compositeId = _pathComposites[0];
+                Callable.From(() => _scene.QueuePopulateComposite(new ShortGuid(compositeId))).CallDeferred();
+            }
         }
 
         if (_addedEntity != null)
@@ -397,6 +408,12 @@ public partial class CommandsEditorConnection : Node3D
                 {
                     _didLoadLevel = true;
                 }
+
+                Callable.From(() =>
+                {
+                    string label = string.IsNullOrWhiteSpace(_levelName) ? "level" : _levelName;
+                    _scene.ShowLoadingMessage("Loading level " + label + "...");
+                }).CallDeferred();
                 break;
             }
         }
@@ -625,6 +642,35 @@ public partial class CommandsEditorConnection : Node3D
         _renderFiltersGeneration++;
     }
 
+    private void EnsureConnectionHud()
+    {
+        if (_connectionHud != null && GodotObject.IsInstanceValid(_connectionHud))
+            return;
+
+        Node host = GetTree().CurrentScene ?? this;
+        if (host == null || !GodotObject.IsInstanceValid(host))
+            return;
+
+        _connectionHud = new LevelViewerConnectionHud();
+        _connectionHud.AttachTo(host);
+        _connectionHud.ShowWaiting();
+    }
+
+    private void NotifyConnectionWaiting()
+    {
+        Callable.From(() => _connectionHud?.ShowWaiting()).CallDeferred();
+    }
+
+    private void NotifyConnectionConnected()
+    {
+        Callable.From(() => _connectionHud?.ShowConnected()).CallDeferred();
+    }
+
+    private void NotifyConnectionDisconnected()
+    {
+        Callable.From(() => _connectionHud?.ShowDisconnected()).CallDeferred();
+    }
+
     private async Task ReconnectLoopAsync(CancellationToken cancellationToken)
     {
         await Task.Yield();
@@ -640,6 +686,7 @@ public partial class CommandsEditorConnection : Node3D
             {
                 await _client.ConnectAsync(new Uri("ws://localhost:1702/commands_editor"), cancellationToken);
                 GD.Print("Connected to Commands Editor!");
+                NotifyConnectionConnected();
 
                 await ReceiveLoopAsync(_client, cancellationToken);
             }
@@ -656,6 +703,8 @@ public partial class CommandsEditorConnection : Node3D
                 break;
 
             GD.Print("Disconnected from Commands Editor!");
+            NotifyConnectionDisconnected();
+
             try
             {
                 await Task.Delay(1500, cancellationToken);
@@ -664,6 +713,8 @@ public partial class CommandsEditorConnection : Node3D
             {
                 break;
             }
+
+            NotifyConnectionWaiting();
         }
     }
 

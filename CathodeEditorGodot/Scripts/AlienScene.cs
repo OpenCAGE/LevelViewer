@@ -21,6 +21,7 @@ public partial class AlienScene : Node3D
 
 	private Composite _loadedComposite = null;
 	private Node3D _selectedEntity;
+	private LevelViewerSelectionHud _selectionHud;
 	public uint CompositeID => _loadedComposite == null ? 0 : _loadedComposite.shortGUID.AsUInt32;
 	public string CompositeIDString => _loadedComposite == null || _loadedComposite.shortGUID == ShortGuid.Invalid ? "" : _loadedComposite.shortGUID.ToByteString();
 	public string CompositeName => _loadedComposite == null ? "" : _loadedComposite.name;
@@ -96,6 +97,7 @@ public partial class AlienScene : Node3D
 	public override void _Process(double delta)
 	{
 		AdvanceLoadPipeline();
+		_selectionHud?.UpdateFade((float)delta);
 	}
 
 	public void RegisterParameterVisualHandler(DataType dataType, ParameterVisualHandler handler)
@@ -121,6 +123,10 @@ public partial class AlienScene : Node3D
 		if (_loadingScreen != null && GodotObject.IsInstanceValid(_loadingScreen))
 			_loadingScreen.QueueFree();
 		_loadingScreen = null;
+
+		if (_selectionHud != null && GodotObject.IsInstanceValid(_selectionHud))
+			_selectionHud.QueueFree();
+		_selectionHud = null;
 
 		base._ExitTree();
 	}
@@ -190,6 +196,7 @@ public partial class AlienScene : Node3D
 	private void ClearSelectedEntity()
 	{
 		_selectedEntity = null;
+		_selectionHud?.Hide();
 	}
 
 	private void ResetLevel()
@@ -534,9 +541,9 @@ public partial class AlienScene : Node3D
 		}
 	}
 
-	public void SelectEntity(List<uint> path, bool focusSelected)
+	public void SelectEntity(List<uint> entityPath, List<uint> compositePath, bool entitySelected, bool focusSelected)
 	{
-		Node3D entityNode = GetEntityNode(path, ParentNode);
+		Node3D entityNode = GetEntityNode(entityPath, ParentNode);
 		if (entityNode != null)
 		{
 			EntityOverride entityOverride = entityNode as EntityOverride;
@@ -548,10 +555,74 @@ public partial class AlienScene : Node3D
 		LevelViewerSelection.Apply(entityNode);
 
 		if (entityNode != null)
-			GD.Print("SelectEntity: " + string.Join("/", path) + " -> " + entityNode.Name);
+			GD.Print("SelectEntity: " + string.Join("/", entityPath) + " -> " + entityNode.Name);
+
+		if (entitySelected)
+			ShowEntitySelectionHud(entityPath, compositePath);
+		else
+			_selectionHud?.Hide();
 
 		if (focusSelected && entityNode != null)
 			Callable.From(() => FocusSelectedEntity(entityNode)).CallDeferred();
+	}
+
+	private void EnsureSelectionHud()
+	{
+		if (_selectionHud != null && GodotObject.IsInstanceValid(_selectionHud))
+			return;
+
+		Node host = GetTree()?.CurrentScene ?? this;
+		if (host == null || !GodotObject.IsInstanceValid(host))
+			return;
+
+		_selectionHud = new LevelViewerSelectionHud();
+		_selectionHud.AttachTo(host);
+	}
+
+	private void ShowEntitySelectionHud(List<uint> entityPath, List<uint> compositePath)
+	{
+		string displayText = TryGetEntitySelectionDisplayText(entityPath, compositePath);
+		if (string.IsNullOrWhiteSpace(displayText))
+			return;
+
+		EnsureSelectionHud();
+		_selectionHud?.ShowEntity(displayText);
+	}
+
+	private string TryGetEntitySelectionDisplayText(List<uint> entityPath, List<uint> compositePath, bool includeGuids = false)
+	{
+		if (!_content.Loaded || entityPath == null || entityPath.Count == 0 || compositePath == null || compositePath.Count == 0)
+			return null;
+
+		int last = Math.Min(entityPath.Count, compositePath.Count) - 1;
+		Commands commands = _content.Level.Commands;
+		CommandsUtils utils = commands.Utils;
+
+		Composite composite = commands.GetComposite(new ShortGuid(compositePath[last]));
+		Entity entity = composite?.GetEntityByID(new ShortGuid(entityPath[last]));
+		if (composite == null || entity == null)
+			return null;
+
+		switch (entity.variant)
+		{
+			case EntityVariant.ALIAS:
+			case EntityVariant.PROXY:
+			{
+				List<Tuple<Composite, Entity>> resolvedHierarchy = utils.ResolveAliasOrProxy(entity, composite);
+				(Composite targetComposite, Entity targetEntity) = utils.GetResolvedTarget(resolvedHierarchy);
+				if (targetComposite != null && targetEntity != null)
+				{
+					string targetName = utils.GetEntityName(targetComposite, targetEntity);
+					string hierarchy = utils.GetResolvedAsString(resolvedHierarchy, includeGuids);
+					if (!string.IsNullOrEmpty(hierarchy))
+						return "Selected " + targetName + "\n" + hierarchy;
+					return "Selected " + targetName;
+				}
+				break;
+			}
+		}
+
+		return "Selected " + utils.GetEntityName(composite, entity);
 	}
 
 	private void FocusSelectedEntity(Node3D target)

@@ -233,7 +233,7 @@ public partial class CommandsEditorConnection : Node3D
         if (_currentEntityGOID != _currentEntity)
         {
             GD.Print("Selecting entity: " + _currentEntity);
-            _scene.SelectEntity(_pathEntities, _focusSelected);
+            _scene.SelectEntity(_pathEntities, _pathComposites, _entitySelected, _focusSelected);
             _currentEntityGOID = _currentEntity;
         }
     }

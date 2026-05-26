@@ -21,7 +21,7 @@ namespace OpenCAGE
 
     /// <summary>
     /// Hardcoded function types with Level Viewer previews and their filter colours.
-    /// Canonical copy lives in the Unity project; OpenCAGE links this file in the .csproj.
+    /// Canonical copy for Level Viewer and OpenCAGE (linked in OpenCAGE.csproj).
     /// </summary>
     public static class RenderFilterDefinitions
     {

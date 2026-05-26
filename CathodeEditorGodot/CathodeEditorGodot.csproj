@@ -9,7 +9,6 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>disable</Nullable>
     <CathodeLibResourcesPath>$(MSBuildProjectDirectory)\..\..\..\CathodeLib\CathodeLib\Resources</CathodeLibResourcesPath>
-    <UnityStreamingAssetsPath>$(MSBuildProjectDirectory)\..\CathodeEditorUnity\Assets\StreamingAssets</UnityStreamingAssetsPath>
     <GodotStreamingAssetsPath>$(MSBuildProjectDirectory)\streaming_assets</GodotStreamingAssetsPath>
   </PropertyGroup>
 
@@ -27,7 +26,7 @@
     </EmbeddedResource>
   </ItemGroup>
 
-  <!-- Populate project streaming_assets/ from CathodeLib or Unity when the files are not checked in here. -->
+  <!-- Populate project streaming_assets/ from CathodeLib when the files are not checked in here. -->
   <Target Name="EnsureGodotStreamingAssets" BeforeTargets="BeforeBuild;Publish">
     <MakeDir Directories="$(GodotStreamingAssetsPath)" Condition="!Exists('$(GodotStreamingAssetsPath)')" />
     <Copy SourceFiles="$(CathodeLibResourcesPath)\info.dat"
@@ -38,14 +37,6 @@
           DestinationFiles="$(GodotStreamingAssetsPath)\sound_names.bin"
           SkipUnchangedFiles="true"
           Condition="Exists('$(CathodeLibResourcesPath)\sound_names.bin') And !Exists('$(GodotStreamingAssetsPath)\sound_names.bin')" />
-    <Copy SourceFiles="$(UnityStreamingAssetsPath)\info.dat"
-          DestinationFiles="$(GodotStreamingAssetsPath)\info.dat"
-          SkipUnchangedFiles="true"
-          Condition="Exists('$(UnityStreamingAssetsPath)\info.dat') And !Exists('$(GodotStreamingAssetsPath)\info.dat')" />
-    <Copy SourceFiles="$(UnityStreamingAssetsPath)\sound_names.bin"
-          DestinationFiles="$(GodotStreamingAssetsPath)\sound_names.bin"
-          SkipUnchangedFiles="true"
-          Condition="Exists('$(UnityStreamingAssetsPath)\sound_names.bin') And !Exists('$(GodotStreamingAssetsPath)\sound_names.bin')" />
   </Target>
 
   <ItemGroup>

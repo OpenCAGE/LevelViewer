@@ -88,7 +88,6 @@ public partial class StreamingAssetsExportPlugin : EditorExportPlugin
 		{
 			candidates.Add(Path.Combine(projectDirectory, "streaming_assets"));
 			candidates.Add(Path.GetFullPath(Path.Combine(projectDirectory, "..", "..", "..", "CathodeLib", "CathodeLib", "Resources")));
-			candidates.Add(Path.GetFullPath(Path.Combine(projectDirectory, "..", "CathodeEditorUnity", "Assets", "StreamingAssets")));
 		}
 
 		for (int i = 0; i < candidates.Count; i++)

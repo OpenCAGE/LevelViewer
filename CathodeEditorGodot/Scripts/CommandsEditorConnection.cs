@@ -83,8 +83,12 @@ public partial class CommandsEditorConnection : Node3D
     private ShortGuid _removedComposite = ShortGuid.Invalid;
 
 	public bool FocusSelected => _focusSelected;
+	public bool ShowCameraPosition => _showCameraPosition;
 	public bool HasEntitySelection => _entitySelected;
+	/// <summary>True when the editor path includes a nested composite (not just the loaded root).</summary>
+	public bool HasChildCompositeInPath => _pathComposites != null && _pathComposites.Count > 1;
 	private bool _focusSelected = false;
+	private bool _showCameraPosition = true;
     private bool _hideNestedScriptEntities = false;
     private bool _renderFiltersDirty = false;
     private bool _nestedVisibilityDirty = false;
@@ -259,6 +263,7 @@ public partial class CommandsEditorConnection : Node3D
             lock (_lock)
             {
                 _focusSelected = packet.focus_object;
+                _showCameraPosition = packet.show_camera_position;
                 ApplyViewerSettings(packet);
                 ApplyActiveComposite(packet);
                 if (packet.box_render_filters != null)
@@ -294,6 +299,7 @@ public partial class CommandsEditorConnection : Node3D
             _currentEntity = _entitySelected ? _pathEntities[_pathEntities.Count - 1] : 0;
 
             _focusSelected = packet.focus_object;
+            _showCameraPosition = packet.show_camera_position;
             uint previousActiveCompositeId = PreviewVisibilitySettings.ActiveCompositeId;
             bool hideNestedChanged = ApplyViewerSettings(packet);
             bool activeCompositeChanged = ApplyActiveComposite(packet);

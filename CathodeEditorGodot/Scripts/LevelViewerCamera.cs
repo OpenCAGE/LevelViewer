@@ -159,7 +159,10 @@ public partial class LevelViewerCamera : Camera3D
         Vector3 positionBefore = GlobalPosition;
 
         ApplyKeyboardMovement(deltaSeconds);
-        UpdatePositionHud(positionBefore);
+        if (ShouldShowCameraPosition())
+            UpdatePositionHud(positionBefore);
+        else
+            HidePositionHud();
         UpdateHudFade(deltaSeconds);
     }
 
@@ -184,8 +187,9 @@ public partial class LevelViewerCamera : Camera3D
             FocusMinDistance,
             FocusMaxDistance);
         SyncAnglesFromTransform();
-        UpdatePositionHud(positionBefore);
-        _positionHudTimer = HudFadeSeconds;
+        if (ShouldShowCameraPosition())
+            UpdatePositionHud(positionBefore);
+        _positionHudTimer = ShouldShowCameraPosition() ? HudFadeSeconds : 0f;
     }
 
     private void FocusSelectedEntity()
@@ -206,8 +210,20 @@ public partial class LevelViewerCamera : Camera3D
         if (_alienScene == null)
             return;
 
-        await ToSignal(GetTree(), SceneTree.SignalName.ProcessFrame);
-        await ToSignal(GetTree(), SceneTree.SignalName.ProcessFrame);
+        const int maxFrames = 60;
+        for (int i = 0; i < maxFrames; i++)
+        {
+            await ToSignal(GetTree(), SceneTree.SignalName.ProcessFrame);
+
+            if (_alienScene.ParentNode == null || !GodotObject.IsInstanceValid(_alienScene.ParentNode))
+                return;
+
+            if (!ShouldAutoFrameLoadedContent())
+                return;
+
+            if (LevelViewerView.TryComputeGlobalAabb(_alienScene.ParentNode, out Aabb bounds) && bounds.HasVolume())
+                break;
+        }
 
         if (_alienScene.ParentNode == null || !GodotObject.IsInstanceValid(_alienScene.ParentNode))
             return;
@@ -215,12 +231,15 @@ public partial class LevelViewerCamera : Camera3D
         if (!ShouldAutoFrameLoadedContent())
             return;
 
+        if (!LevelViewerView.TryComputeGlobalAabb(_alienScene.ParentNode, out Aabb contentBounds) || !contentBounds.HasVolume())
+            return;
+
         Vector3 positionBefore = GlobalPosition;
         _alienScene.RecenterContentOrigin();
         LevelViewerView.FrameRuntimeCamera(_alienScene.ParentNode, this);
         SyncAnglesFromTransform();
-        UpdatePositionHud(positionBefore);
-        _positionHudTimer = HudFadeSeconds;
+        if (ShouldShowCameraPosition())
+            UpdatePositionHud(positionBefore);
 
 #if TOOLS
         if (FrameEditorViewport && Engine.IsEditorHint())
@@ -228,6 +247,10 @@ public partial class LevelViewerCamera : Camera3D
 #endif
     }
 
+    /// <summary>
+    /// Frame the full loaded composite when focus-on-selected will not drive the camera
+    /// (no nested composite path, or focus disabled; entity focus is handled separately).
+    /// </summary>
     private bool ShouldAutoFrameLoadedContent()
     {
         if (_commandsEditorConnection == null || !GodotObject.IsInstanceValid(_commandsEditorConnection))
@@ -236,7 +259,16 @@ public partial class LevelViewerCamera : Camera3D
         if (_commandsEditorConnection == null)
             return true;
 
-        return !_commandsEditorConnection.HasEntitySelection && !_commandsEditorConnection.FocusSelected;
+        if (!_commandsEditorConnection.FocusSelected)
+            return true;
+
+        if (_commandsEditorConnection.HasEntitySelection)
+            return false;
+
+        if (_commandsEditorConnection.HasChildCompositeInPath)
+            return false;
+
+        return true;
     }
 
     private void ApplyKeyboardMovement(float deltaSeconds)
@@ -330,7 +362,8 @@ public partial class LevelViewerCamera : Camera3D
             Vector3 pan = -right * velocity.X + up * velocity.Y;
             GlobalPosition += pan * MoveSpeed * PanSensitivity * deltaSeconds;
             SyncAnglesFromTransform();
-            UpdatePositionHud(positionBefore);
+            if (ShouldShowCameraPosition())
+                UpdatePositionHud(positionBefore);
         }
     }
 
@@ -433,9 +466,24 @@ public partial class LevelViewerCamera : Camera3D
         _speedPanel.Modulate = Colors.White;
     }
 
+    private bool ShouldShowCameraPosition()
+    {
+        if (_commandsEditorConnection == null || !GodotObject.IsInstanceValid(_commandsEditorConnection))
+            _commandsEditorConnection = GetNodeOrNull<CommandsEditorConnection>(CommandsEditorConnectionPath);
+
+        return _commandsEditorConnection == null || _commandsEditorConnection.ShowCameraPosition;
+    }
+
+    private void HidePositionHud()
+    {
+        _positionHudTimer = 0f;
+        if (_positionPanel != null)
+            _positionPanel.Visible = false;
+    }
+
     private void UpdatePositionHud(Vector3 positionBefore)
     {
-        if (_positionLabel == null)
+        if (!ShouldShowCameraPosition() || _positionLabel == null)
             return;
 
         Vector3 position = GlobalPosition;
@@ -462,6 +510,12 @@ public partial class LevelViewerCamera : Camera3D
             _speedPanel.Modulate = new Color(1f, 1f, 1f, Mathf.Clamp(_speedHudTimer / HudFadeSeconds, 0f, 1f));
             if (_speedHudTimer <= 0f)
                 _speedPanel.Visible = false;
+        }
+
+        if (!ShouldShowCameraPosition())
+        {
+            HidePositionHud();
+            return;
         }
 
         if (_positionHudTimer > 0f && _positionPanel != null)

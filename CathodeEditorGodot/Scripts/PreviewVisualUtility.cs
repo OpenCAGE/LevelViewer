@@ -402,12 +402,12 @@ public static class PreviewVisualUtility
         }
     }
 
-    public static IconBillboardBehaviour CreateIconBillboard(string name, Node3D parent, Texture2D icon, Color tint, float size = 0.75f)
+    public static Node3D CreateIconBillboard(string name, Node3D parent, Texture2D icon, Color tint, float size = 0.75f)
     {
         if (icon == null || parent == null)
             return null;
 
-        IconBillboardBehaviour root = new IconBillboardBehaviour
+        var root = new Node3D
         {
             Name = name,
             Scale = Vector3.One * size,

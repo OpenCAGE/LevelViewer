@@ -15,7 +15,7 @@ public partial class IconBillboardPreview : FunctionEntityPreview
     }
 
     private IconKind _iconKind;
-    private IconBillboardBehaviour _billboard;
+    private Node3D _billboard;
 
     public void Setup(FunctionEntity entity, IconKind iconKind, uint ownerCompositeId = 0)
     {

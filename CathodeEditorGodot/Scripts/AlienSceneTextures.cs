@@ -116,6 +116,23 @@ public static class AlienSceneTextures
 		return baseOnly;
 	}
 
+	/// <summary>
+	/// Picks streamed mips when loaded, otherwise persistent (matches OpenCAGE CathodeLibExtensions.ToDDS).
+	/// </summary>
+	public static Textures.TEX4.Texture GetTextureDataPart(Textures.TEX4 texture)
+	{
+		if (texture == null)
+			return null;
+
+		if (texture.TextureStreamed?.Content != null && texture.TextureStreamed.Content.Length > 0)
+			return texture.TextureStreamed;
+
+		if (texture.TexturePersistent?.Content != null && texture.TexturePersistent.Content.Length > 0)
+			return texture.TexturePersistent;
+
+		return null;
+	}
+
 	public static Texture2D CreateTextureFromTexPart(Textures.TEX4.Texture texPart, Textures.TextureFormat sourceFormat, string name)
 	{
 		if (texPart?.Content == null || texPart.Content.Length == 0)
@@ -184,10 +201,14 @@ public static class AlienSceneTextures
 
 		Image.Format godotAstc = MapImageFormat(sourceFormat);
 		Image image = Image.CreateFromData(width, height, false, godotAstc, baseMip);
-		if (image != null && !image.IsEmpty() && image.Decompress() == Error.Ok && image.GetFormat() == Image.Format.Rgba8)
+		if (image != null && !image.IsEmpty())
 		{
-			image.GenerateMipmaps();
-			return image;
+			image.Decompress();
+			if (image.GetFormat() == Image.Format.Rgba8)
+			{
+				image.GenerateMipmaps();
+				return image;
+			}
 		}
 
 		return CreateImageFromAstcCpuDecode(baseMip, width, height, sourceFormat, name);
@@ -218,6 +239,60 @@ public static class AlienSceneTextures
 		int blocksW = (width + 3) / 4;
 		int blocksH = (height + 3) / 4;
 		return blocksW * blocksH * bytesPerBlock;
+	}
+
+	/// <summary>
+	/// Sparse scan for non-opaque pixels (matches OpenCAGE MaterialApplier.ImageSourceHasTransparency).
+	/// </summary>
+	public static bool HasTransparency(Texture2D texture)
+	{
+		if (texture == null)
+			return false;
+
+		Image image = texture.GetImage();
+		if (image == null || image.IsEmpty())
+			return false;
+
+		Image.Format format = image.GetFormat();
+		if (format == Image.Format.Rgb8 || format == Image.Format.L8 || format == Image.Format.Rf)
+			return false;
+
+		if (IsBlockCompressed(format))
+			image.Decompress();
+
+		if (image.GetFormat() != Image.Format.Rgba8)
+			image.Convert(Image.Format.Rgba8);
+
+		return ImageDataHasTransparency(image);
+	}
+
+	private static bool ImageDataHasTransparency(Image image)
+	{
+		byte[] pixels = image.GetData();
+		if (pixels == null || pixels.Length < 4)
+			return false;
+
+		int tested = 0;
+		int alphaPixels = 0;
+		byte minAlpha = byte.MaxValue;
+
+		for (int i = 3; i < pixels.Length; i += 16)
+		{
+			tested++;
+			byte a = pixels[i];
+			if (a < minAlpha)
+				minAlpha = a;
+			if (a < 250)
+				alphaPixels++;
+		}
+
+		if (tested == 0)
+			return false;
+
+		if (minAlpha <= 16)
+			return true;
+
+		return alphaPixels * 200 >= tested;
 	}
 
 	private static void SwizzleBgraToRgba(Image image)

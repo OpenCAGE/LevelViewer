@@ -1300,15 +1300,22 @@ public partial class AlienScene : Node3D
 			return null;
 
 		int diffuseMapIndex = shader.SamplerRemaps[samplerIndex];
-		if (diffuseMapIndex == 255)
+		if (diffuseMapIndex == 255 || diffuseMapIndex >= material.TextureReferences.Count)
 			return null;
 
-		TexOrCube texture = GetTexOrCube(material.TextureReferences[diffuseMapIndex]);
+		TexturePtr texturePtr = material.TextureReferences[diffuseMapIndex];
+		if (texturePtr == null || texturePtr.Location == TexturePtr.Source.NONE || texturePtr.Texture == null)
+			return null;
+
+		TexOrCube texture = GetTexOrCube(texturePtr);
 		return texture?.Texture;
 	}
 
 	private TexOrCube GetTexOrCube(TexturePtr ptr)
 	{
+		if (ptr == null || ptr.Location == TexturePtr.Source.NONE || ptr.Texture == null)
+			return null;
+
 		if (!((ptr.Location == TexturePtr.Source.GLOBAL && !_texturesGlobal.ContainsKey(ptr.Texture)) ||
 			  (ptr.Location == TexturePtr.Source.LEVEL && !_texturesLevel.ContainsKey(ptr.Texture))))
 		{
@@ -1318,9 +1325,8 @@ public partial class AlienScene : Node3D
 		}
 
 		if (ptr.Texture == null) return null;
-		Textures.TEX4.Texture texPart = ptr.Texture.TextureStreamed == null ? ptr.Texture.TexturePersistent : ptr.Texture.TextureStreamed;
-
-		if (texPart.Content == null || texPart.Content.Length == 0)
+		Textures.TEX4.Texture texPart = AlienSceneTextures.GetTextureDataPart(ptr.Texture);
+		if (texPart == null)
 			return null;
 
 		TexOrCube tex = new TexOrCube();

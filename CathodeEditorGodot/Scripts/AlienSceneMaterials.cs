@@ -377,27 +377,33 @@ public static class AlienSceneMaterials
 		if (shader == null)
 			return false;
 
-		if (HasShaderFeature(shader, "ALPHA_TEST"))
-			return true;
-
-		// Lightmapped environment geometry is opaque in-game unless a blend feature is enabled.
-		// Do not promote to transparent based on bound SEPARATE_ALPHA maps, requirement flags
-		// (EARLY_ALPHA etc.), or diffuse/lightmap texture alpha-channel noise.
 		if (shader.Ubershader == SHADER_LIST.CA_LIGHTMAP_ENVIRONMENT)
-			return HasAlphaBlendingFeatureFlags(shader);
+			return ShouldUseAlphaLightmapEnvironment(shader);
+
+		if (separateAlphaMap != null)
+			return true;
 
 		if (HasAlphaBlendingEnabled(shader))
 			return true;
 
-		if (separateAlphaMap != null && HasShaderFeature(shader, "SEPARATE_ALPHA")
-			&& AlienSceneTextures.HasTransparency(separateAlphaMap))
-		{
+		if (HasShaderFeature(shader, "ALPHA_TEST"))
 			return true;
-		}
 
 		return diffuse != null
 			&& UbershaderCanSupportAlpha(shader.Ubershader)
 			&& AlienSceneTextures.HasTransparency(diffuse);
+	}
+
+	/// <summary>
+	/// CA_LIGHTMAP_ENVIRONMENT: opaque unless cutout or a per-instance blend feature is enabled.
+	/// Ignores bound separate-alpha maps, pipeline requirement flags, and diffuse alpha noise.
+	/// </summary>
+	private static bool ShouldUseAlphaLightmapEnvironment(Shaders.Shader shader)
+	{
+		if (HasShaderFeature(shader, "ALPHA_TEST"))
+			return true;
+
+		return HasAlphaBlendingFeatureFlags(shader);
 	}
 
 	/// <summary>

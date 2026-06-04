@@ -2,6 +2,7 @@ shader_type spatial;
 render_mode blend_mix, depth_draw_opaque, cull_disabled, unshaded, specular_disabled;
 
 #include "res://shaders/model_reference_alpha.gdshaderinc"
+#include "res://shaders/model_reference_shading.gdshaderinc"
 
 uniform sampler2D diffuse_map : source_color, filter_linear_mipmap_anisotropic;
 uniform bool use_diffuse_map = false;
@@ -29,14 +30,12 @@ void fragment() {
 	}
 
 	vec3 normal = normalize(NORMAL);
-	vec3 light_dir = normalize(vec3(0.45, 0.82, 0.35));
-	float ndl = max(dot(normal, light_dir), 0.0);
-	float shade = 0.48 + 0.52 * ndl;
+	float ndl = max(dot(normal, MODEL_REFERENCE_PREVIEW_LIGHT_DIR), 0.0);
 
 	float alpha = model_reference_blend_alpha(tex, separate_sample, diffuse_tint.a);
 	model_reference_finish_alpha(alpha);
 
-	ALBEDO = color.rgb * shade;
+	ALBEDO = model_reference_apply_preview_shading(color.rgb, ndl);
 	ALPHA = alpha;
 
 	if (emission_enabled) {

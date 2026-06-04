@@ -1,7 +1,7 @@
 shader_type spatial;
 render_mode cull_back, unshaded, specular_disabled;
 
-// Readable preview shading: fixed ambient + directional (not full scene lighting).
+#include "res://shaders/model_reference_shading.gdshaderinc"
 
 uniform sampler2D diffuse_map : source_color, filter_linear_mipmap_anisotropic;
 uniform bool use_diffuse_map = false;
@@ -19,11 +19,8 @@ void fragment() {
 	}
 
 	vec3 normal = normalize(NORMAL);
-	vec3 light_dir = normalize(vec3(0.45, 0.82, 0.35));
-	float ndl = max(dot(normal, light_dir), 0.0);
-	float shade = 0.48 + 0.52 * ndl;
-
-	ALBEDO = color.rgb * shade;
+	float ndl = max(dot(normal, MODEL_REFERENCE_PREVIEW_LIGHT_DIR), 0.0);
+	ALBEDO = model_reference_apply_preview_shading(color.rgb, ndl);
 
 	if (emission_enabled) {
 		EMISSION = emission * emission_energy;

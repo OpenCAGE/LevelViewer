@@ -14,7 +14,18 @@ public static class LevelViewerPick
 	private const string WireframeOverlayGroup = "model_reference_wireframe_overlay";
 	private const float RayEpsilon = 0.000001f;
 
-	private static readonly MeshDataTool _meshDataTool = new MeshDataTool();
+	private sealed class CachedMeshSurface
+	{
+		public Vector3[] Vertices;
+		public int[] Indices = System.Array.Empty<int>();
+	}
+
+	private static readonly Dictionary<ulong, CachedMeshSurface[]> _meshGeometryCache = new();
+	private static readonly Dictionary<Node3D, List<MeshInstance3D>> _pickablesByOwner = new();
+	private static readonly Dictionary<Node3D, Aabb> _ownerGlobalBounds = new();
+	private static readonly List<Node3D> _scopedPickOwners = new();
+	private static readonly HashSet<MeshInstance3D> _registeredPickables = new();
+	private static bool _scopedPickablesDirty = true;
 
 	public readonly struct PickHit
 	{
@@ -42,6 +53,21 @@ public static class LevelViewerPick
 		public uint LeafEntityId { get; }
 	}
 
+	public static void ClearRegistry()
+	{
+		_meshGeometryCache.Clear();
+		_pickablesByOwner.Clear();
+		_ownerGlobalBounds.Clear();
+		_scopedPickOwners.Clear();
+		_registeredPickables.Clear();
+		_scopedPickablesDirty = true;
+	}
+
+	public static void InvalidateScopedPickables()
+	{
+		_scopedPickablesDirty = true;
+	}
+
 	public static void RegisterPickableSubtree(Node3D ownerEntityNode)
 	{
 		if (ownerEntityNode == null)
@@ -51,21 +77,43 @@ public static class LevelViewerPick
 		RegisterPickableRecursive(ownerEntityNode, ownerEntityNode);
 	}
 
+	public static void RegisterPickableMesh(MeshInstance3D meshInstance, Node3D ownerNode)
+	{
+		if (meshInstance == null || ownerNode == null || !GodotObject.IsInstanceValid(meshInstance))
+			return;
+
+		if (meshInstance.IsInGroup(WireframeOverlayGroup))
+			return;
+
+		Mesh mesh = meshInstance.Mesh;
+		if (mesh == null || mesh.GetSurfaceCount() == 0)
+			return;
+
+		if (!_registeredPickables.Add(meshInstance))
+			return;
+
+		if (!meshInstance.IsInGroup(PickableGroup))
+			meshInstance.AddToGroup(PickableGroup);
+		meshInstance.SetMeta(OwnerEntityMetaKey, ownerNode);
+
+		if (!_pickablesByOwner.TryGetValue(ownerNode, out List<MeshInstance3D> meshes))
+		{
+			meshes = new List<MeshInstance3D>();
+			_pickablesByOwner.Add(ownerNode, meshes);
+		}
+
+		meshes.Add(meshInstance);
+		_ownerGlobalBounds.Remove(ownerNode);
+		_scopedPickablesDirty = true;
+	}
+
 	private static void RegisterPickableRecursive(Node node, Node3D ownerEntityNode)
 	{
 		if (node.IsInGroup(WireframeOverlayGroup))
 			goto children;
 
 		if (node is MeshInstance3D meshInstance)
-		{
-			Mesh mesh = meshInstance.Mesh;
-			if (mesh != null && mesh.GetSurfaceCount() > 0)
-			{
-				if (!meshInstance.IsInGroup(PickableGroup))
-					meshInstance.AddToGroup(PickableGroup);
-				meshInstance.SetMeta(OwnerEntityMetaKey, ownerEntityNode);
-			}
-		}
+			RegisterPickableMesh(meshInstance, ownerEntityNode);
 		else if (node is VisualInstance3D visual)
 		{
 			Aabb bounds = visual.GetAabb();
@@ -82,52 +130,107 @@ public static class LevelViewerPick
 			RegisterPickableRecursive(child, ownerEntityNode);
 	}
 
-
-	private static void CollectHits(
-		Node node,
-		Vector3 origin,
-		Vector3 direction,
-		Node contentRoot,
-		Commands commands,
-		ref PickHit? best)
+	private static void EnsureScopedPickOwners(Node contentRoot, Commands commands)
 	{
-		if (node.IsInGroup(WireframeOverlayGroup))
-			goto children;
+		if (!_scopedPickablesDirty)
+			return;
 
-		if (node is VisualInstance3D visual && visual.IsInGroup(PickableGroup))
+		_scopedPickOwners.Clear();
+		foreach (KeyValuePair<Node3D, List<MeshInstance3D>> entry in _pickablesByOwner)
 		{
-			if (!LevelViewerCompositeFocus.IsNodeInScope(visual, contentRoot, commands))
-				goto children;
+			Node3D owner = entry.Key;
+			if (owner == null || !GodotObject.IsInstanceValid(owner))
+				continue;
 
-			Aabb local = visual.GetAabb();
-			if (local.Size.LengthSquared() <= RayEpsilon)
-				goto children;
+			List<MeshInstance3D> meshes = entry.Value;
+			if (meshes == null || meshes.Count == 0)
+				continue;
 
-			Aabb global = visual.GlobalTransform * local;
-			if (!TryRayIntersectAabb(origin, direction, global, out float aabbDistance))
-				goto children;
+			MeshInstance3D probe = meshes[0];
+			if (probe == null || !GodotObject.IsInstanceValid(probe))
+				continue;
 
-			if (best.HasValue && aabbDistance > best.Value.Distance)
-				goto children;
+			if (!LevelViewerCompositeFocus.IsNodeInScope(probe, contentRoot, commands))
+				continue;
 
-			float distance;
-			if (visual is MeshInstance3D meshInstance)
-			{
-				if (!TryRayIntersectMeshInstance(meshInstance, origin, direction, out distance))
-					goto children;
-			}
-			else if (!TryRayIntersectAabb(origin, direction, global, out distance))
-			{
-				goto children;
-			}
-
-			if (!best.HasValue || distance < best.Value.Distance)
-				best = new PickHit(visual, distance);
+			_scopedPickOwners.Add(owner);
 		}
 
-		children:
-		foreach (Node child in node.GetChildren())
-			CollectHits(child, origin, direction, contentRoot, commands, ref best);
+		_scopedPickablesDirty = false;
+	}
+
+	private static Aabb GetOwnerGlobalBounds(Node3D owner)
+	{
+		if (owner != null && GodotObject.IsInstanceValid(owner) && _ownerGlobalBounds.TryGetValue(owner, out Aabb cached) && cached.HasVolume())
+			return cached;
+
+		Aabb merged = new Aabb();
+		bool hasBounds = false;
+		if (_pickablesByOwner.TryGetValue(owner, out List<MeshInstance3D> meshes))
+		{
+			for (int i = 0; i < meshes.Count; i++)
+			{
+				MeshInstance3D mesh = meshes[i];
+				if (mesh == null || !GodotObject.IsInstanceValid(mesh))
+					continue;
+
+				Aabb local = mesh.GetAabb();
+				if (local.Size.LengthSquared() <= RayEpsilon)
+					continue;
+
+				Aabb global = mesh.GlobalTransform * local;
+				if (!hasBounds)
+				{
+					merged = global;
+					hasBounds = true;
+				}
+				else
+				{
+					merged = merged.Merge(global);
+				}
+			}
+		}
+
+		if (owner != null && GodotObject.IsInstanceValid(owner))
+			_ownerGlobalBounds[owner] = merged;
+
+		return merged;
+	}
+
+	private static bool TryPickOwner(
+		Node3D owner,
+		Vector3 origin,
+		Vector3 direction,
+		ref PickHit? best)
+	{
+		if (!_pickablesByOwner.TryGetValue(owner, out List<MeshInstance3D> meshes) || meshes.Count == 0)
+			return false;
+
+		Aabb ownerBounds = GetOwnerGlobalBounds(owner);
+		if (!ownerBounds.HasVolume() || !TryRayIntersectAabb(origin, direction, ownerBounds, out float ownerDistance))
+			return false;
+
+		if (best.HasValue && ownerDistance > best.Value.Distance)
+			return false;
+
+		bool anyHit = false;
+		for (int i = 0; i < meshes.Count; i++)
+		{
+			MeshInstance3D meshInstance = meshes[i];
+			if (meshInstance == null || !GodotObject.IsInstanceValid(meshInstance))
+				continue;
+
+			if (!TryRayIntersectMeshInstance(meshInstance, origin, direction, out float distance))
+				continue;
+
+			if (best.HasValue && distance >= best.Value.Distance)
+				continue;
+
+			best = new PickHit(meshInstance, distance);
+			anyHit = true;
+		}
+
+		return anyHit;
 	}
 
 	public static PickHit? PickClosest(
@@ -150,8 +253,12 @@ public static class LevelViewerPick
 		if (LevelViewerCompositeFocus.HasActiveComposite && commands != null)
 			LevelViewerCompositeFocus.RebuildScopeCache(commands);
 
+		EnsureScopedPickOwners(contentRoot, commands);
+
 		PickHit? best = null;
-		CollectHits(searchRoot, origin, direction, contentRoot, commands, ref best);
+		for (int i = 0; i < _scopedPickOwners.Count; i++)
+			TryPickOwner(_scopedPickOwners[i], origin, direction, ref best);
+
 		return best;
 	}
 
@@ -458,13 +565,44 @@ public static class LevelViewerPick
 		float closestLocalT = float.MaxValue;
 		bool anyHit = false;
 		bool doubleSided = IsDoubleSidedMesh(meshInstance);
+		CachedMeshSurface[] surfaces = GetCachedMeshSurfaces(mesh);
 
-		for (int surfaceIndex = 0; surfaceIndex < mesh.GetSurfaceCount(); surfaceIndex++)
+		for (int surfaceIndex = 0; surfaceIndex < surfaces.Length; surfaceIndex++)
 		{
-			if (mesh is ArrayMesh arrayMesh)
-				CollectMeshDataToolSurfaceHits(arrayMesh, surfaceIndex, localOrigin, localDirection, doubleSided, ref closestLocalT, ref anyHit);
+			CachedMeshSurface surface = surfaces[surfaceIndex];
+			if (surface.Indices.Length > 0)
+			{
+				int[] indices = surface.Indices;
+				Vector3[] vertices = surface.Vertices;
+				for (int i = 0; i + 2 < indices.Length; i += 3)
+				{
+					TryUpdateClosestTriangleHit(
+						localOrigin,
+						localDirection,
+						vertices[indices[i]],
+						vertices[indices[i + 1]],
+						vertices[indices[i + 2]],
+						doubleSided,
+						ref closestLocalT,
+						ref anyHit);
+				}
+			}
 			else
-				CollectTriangleListSurfaceHits(mesh, surfaceIndex, localOrigin, localDirection, doubleSided, ref closestLocalT, ref anyHit);
+			{
+				Vector3[] vertices = surface.Vertices;
+				for (int i = 0; i + 2 < vertices.Length; i += 3)
+				{
+					TryUpdateClosestTriangleHit(
+						localOrigin,
+						localDirection,
+						vertices[i],
+						vertices[i + 1],
+						vertices[i + 2],
+						doubleSided,
+						ref closestLocalT,
+						ref anyHit);
+				}
+			}
 		}
 
 		if (!anyHit)
@@ -475,86 +613,38 @@ public static class LevelViewerPick
 		return true;
 	}
 
-	private static void CollectTriangleListSurfaceHits(
-		Mesh mesh,
-		int surfaceIndex,
-		Vector3 localOrigin,
-		Vector3 localDirection,
-		bool doubleSided,
-		ref float closestLocalT,
-		ref bool anyHit)
+	private static CachedMeshSurface[] GetCachedMeshSurfaces(Mesh mesh)
 	{
+		ulong meshId = mesh.GetRid().Id;
+		if (_meshGeometryCache.TryGetValue(meshId, out CachedMeshSurface[] cached))
+			return cached;
+
+		int surfaceCount = mesh.GetSurfaceCount();
+		CachedMeshSurface[] surfaces = new CachedMeshSurface[surfaceCount];
+		for (int surfaceIndex = 0; surfaceIndex < surfaceCount; surfaceIndex++)
+			surfaces[surfaceIndex] = BuildCachedMeshSurface(mesh, surfaceIndex);
+
+		_meshGeometryCache[meshId] = surfaces;
+		return surfaces;
+	}
+
+	private static CachedMeshSurface BuildCachedMeshSurface(Mesh mesh, int surfaceIndex)
+	{
+		CachedMeshSurface surface = new CachedMeshSurface { Vertices = System.Array.Empty<Vector3>() };
 		Godot.Collections.Array arrays = mesh.SurfaceGetArrays(surfaceIndex);
 		if (arrays == null || arrays.Count == 0)
-			return;
+			return surface;
 
 		Variant verticesVariant = arrays[(int)Mesh.ArrayType.Vertex];
 		if (verticesVariant.VariantType != Variant.Type.PackedVector3Array)
-			return;
+			return surface;
 
-		Vector3[] vertices = verticesVariant.AsVector3Array();
-		if (vertices.Length < 3)
-			return;
-
+		surface.Vertices = verticesVariant.AsVector3Array();
 		Variant indexVariant = arrays[(int)Mesh.ArrayType.Index];
 		if (indexVariant.VariantType == Variant.Type.PackedInt32Array)
-		{
-			int[] indices = indexVariant.AsInt32Array();
-			for (int i = 0; i + 2 < indices.Length; i += 3)
-			{
-				TryUpdateClosestTriangleHit(
-					localOrigin,
-					localDirection,
-					vertices[indices[i]],
-					vertices[indices[i + 1]],
-					vertices[indices[i + 2]],
-					doubleSided,
-					ref closestLocalT,
-					ref anyHit);
-			}
+			surface.Indices = indexVariant.AsInt32Array();
 
-			return;
-		}
-
-		for (int i = 0; i + 2 < vertices.Length; i += 3)
-		{
-			TryUpdateClosestTriangleHit(
-				localOrigin,
-				localDirection,
-				vertices[i],
-				vertices[i + 1],
-				vertices[i + 2],
-				doubleSided,
-				ref closestLocalT,
-				ref anyHit);
-		}
-	}
-
-	private static void CollectMeshDataToolSurfaceHits(
-		ArrayMesh mesh,
-		int surfaceIndex,
-		Vector3 localOrigin,
-		Vector3 localDirection,
-		bool doubleSided,
-		ref float closestLocalT,
-		ref bool anyHit)
-	{
-		if (_meshDataTool.CreateFromSurface(mesh, surfaceIndex) != Error.Ok)
-			return;
-
-		int faceCount = _meshDataTool.GetFaceCount();
-		for (int faceIndex = 0; faceIndex < faceCount; faceIndex++)
-		{
-			TryUpdateClosestTriangleHit(
-				localOrigin,
-				localDirection,
-				_meshDataTool.GetVertex(_meshDataTool.GetFaceVertex(faceIndex, 0)),
-				_meshDataTool.GetVertex(_meshDataTool.GetFaceVertex(faceIndex, 1)),
-				_meshDataTool.GetVertex(_meshDataTool.GetFaceVertex(faceIndex, 2)),
-				doubleSided,
-				ref closestLocalT,
-				ref anyHit);
-		}
+		return surface;
 	}
 
 	private static void TryUpdateClosestTriangleHit(

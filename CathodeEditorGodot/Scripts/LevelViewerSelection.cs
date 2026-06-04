@@ -21,20 +21,25 @@ public static class LevelViewerSelection
         if (selected != null && GodotObject.IsInstanceValid(selected) && selected == _selectionRoot)
             return;
 
-        Clear();
-        _selectionRoot = selected;
+		Clear();
+		_selectionRoot = selected;
 
-        if (selected == null || !GodotObject.IsInstanceValid(selected))
-            return;
+		if (selected == null || !GodotObject.IsInstanceValid(selected))
+			return;
 
-        ApplyMeshHighlight(selected);
-    }
+		CollectSelectionMeshes(selected);
+		for (int i = 0; i < _selectionMeshes.Count; i++)
+			TintMeshInstance(_selectionMeshes[i]);
+	}
 
-    public static void Clear()
-    {
-        RestoreMeshHighlights();
-        _selectionRoot = null;
-    }
+	public static void Clear()
+	{
+		RestoreMeshHighlights();
+		_selectionRoot = null;
+		_selectionMeshes.Clear();
+	}
+
+	private static readonly List<MeshInstance3D> _selectionMeshes = new();
 
     public static bool IsUnderSelection(Node node)
     {
@@ -53,25 +58,40 @@ public static class LevelViewerSelection
         return false;
     }
 
-    public static void ReapplyIfSelectionActive()
-    {
-        if (_selectionRoot == null || !GodotObject.IsInstanceValid(_selectionRoot))
-            return;
+	public static void ReapplyIfSelectionActive()
+	{
+		if (_selectionRoot == null || !GodotObject.IsInstanceValid(_selectionRoot))
+			return;
 
-        ApplyMeshHighlight(_selectionRoot);
-    }
+		for (int i = 0; i < _selectionMeshes.Count; i++)
+		{
+			MeshInstance3D mesh = _selectionMeshes[i];
+			if (mesh != null && GodotObject.IsInstanceValid(mesh) && !_savedMaterialOverrides.ContainsKey(mesh))
+				TintMeshInstance(mesh);
+		}
+	}
 
-    private static void ApplyMeshHighlight(Node3D root)
-    {
-        if (root is MeshInstance3D meshInstance)
-            TintMeshInstance(meshInstance);
+	private static void CollectSelectionMeshes(Node3D root)
+	{
+		_selectionMeshes.Clear();
+		CollectSelectionMeshesRecursive(root);
+	}
 
-        foreach (Node child in root.GetChildren())
-        {
-            if (child is Node3D child3D)
-                ApplyMeshHighlight(child3D);
-        }
-    }
+	private static void CollectSelectionMeshesRecursive(Node node)
+	{
+		if (node is MeshInstance3D meshInstance)
+			_selectionMeshes.Add(meshInstance);
+
+		foreach (Node child in node.GetChildren())
+			CollectSelectionMeshesRecursive(child);
+	}
+
+	private static void ApplyMeshHighlight(Node3D root)
+	{
+		CollectSelectionMeshes(root);
+		for (int i = 0; i < _selectionMeshes.Count; i++)
+			TintMeshInstance(_selectionMeshes[i]);
+	}
 
     private static Color BlendHighlightColor(Color color)
     {

@@ -136,6 +136,7 @@ public static class LevelViewerCompositeFocus
 
 		RebuildScopeCache(commands);
 		_scopeAnchorNode = ResolveScopeAnchorNode(contentRoot, instancePath);
+		LevelViewerPick.InvalidateScopedPickables();
 		ApplyRecursive(sceneRoot, contentRoot, commands);
 	}
 

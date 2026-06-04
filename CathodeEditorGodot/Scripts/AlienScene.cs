@@ -207,6 +207,7 @@ public partial class AlienScene : Node3D
 		PreviewVisualUtility.CleanupAllFunctionEntityPreviews(this);
 		ClearSelectedEntity();
 		LevelViewerSelection.Clear();
+		LevelViewerPick.ClearRegistry();
 		LevelViewerCompositeFocus.Clear();
 
 		if (_parentNode != null && GodotObject.IsInstanceValid(_parentNode))
@@ -375,6 +376,7 @@ public partial class AlienScene : Node3D
 		PreviewVisualUtility.CleanupAllFunctionEntityPreviews(this);
 		ClearSelectedEntity();
 		LevelViewerSelection.Clear();
+		LevelViewerPick.ClearRegistry();
 
 		if (_parentNode != null && GodotObject.IsInstanceValid(_parentNode))
 			_parentNode.QueueFree();
@@ -1170,7 +1172,7 @@ public partial class AlienScene : Node3D
 		meshInstance.MaterialOverride = GetSolidMaterial(material);
 		parent.AddChild(meshInstance);
 		UpdateWireframeOverlay(meshInstance, material);
-		LevelViewerPick.RegisterPickableSubtree(parent);
+		LevelViewerPick.RegisterPickableMesh(meshInstance, parent);
 	}
 
 	private bool GetEntityTransform(Entity entity, out Vector3 position, out Vector3 rotation)

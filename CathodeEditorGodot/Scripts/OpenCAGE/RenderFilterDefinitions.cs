@@ -131,6 +131,19 @@ namespace OpenCAGE
             return RenderPreviewKind.Box;
         }
 
+        /// <summary>
+        /// Box volumes use the semi-transparent preview shader; all other mesh gizmos are fully opaque.
+        /// </summary>
+        public static bool UsesTransparentPreview(RenderPreviewKind previewKind)
+        {
+            return previewKind == RenderPreviewKind.Box;
+        }
+
+        public static bool UsesTransparentPreview(FunctionType functionType)
+        {
+            return UsesTransparentPreview(GetPreviewKind(functionType));
+        }
+
         public static RenderFilterColor GetColor(FunctionType functionType)
         {
             if (ColorsByType.TryGetValue(functionType, out RenderFilterColor color))

@@ -103,6 +103,6 @@ public partial class BoxPreview : FunctionEntityPreview
             return;
 
         BoxMesh box = new BoxMesh { Size = Vector3.One };
-        _volume = PreviewVisualUtility.CreateMeshPreview("BoxPreview", this, box, Colors.White);
+        _volume = PreviewVisualUtility.CreateMeshPreview("BoxPreview", this, box, Colors.White, opaque: false);
     }
 }

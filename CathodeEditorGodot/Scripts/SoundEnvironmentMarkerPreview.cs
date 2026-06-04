@@ -14,12 +14,12 @@ public partial class SoundEnvironmentMarkerPreview : PositionMarkerPreview
         AddChild(_root);
 
         ArrayMesh outerTorus = PreviewVisualUtility.CreateTorusMesh(TorusRadius, TubeRadius);
-        PreviewVisualUtility.CreateMeshPreview("OuterTorus", _root, outerTorus, Colors.White, opaque: true);
+        PreviewVisualUtility.CreateMeshPreview("OuterTorus", _root, outerTorus, Colors.White);
 
         ArrayMesh innerTorus = PreviewVisualUtility.CreateTorusMesh(TorusRadius * 0.55f, TubeRadius * 0.7f);
-        PreviewVisualUtility.CreateMeshPreview("InnerTorus", _root, innerTorus, Colors.White, opaque: true);
+        PreviewVisualUtility.CreateMeshPreview("InnerTorus", _root, innerTorus, Colors.White);
 
         SphereMesh coreMesh = new SphereMesh { Radius = 0.06f, Height = 0.12f };
-        Node3D core = PreviewVisualUtility.CreatePrimitivePreview("Core", _root, coreMesh, Colors.White, opaque: true);
+        PreviewVisualUtility.CreatePrimitivePreview("Core", _root, coreMesh, Colors.White);
     }
 }

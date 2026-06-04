@@ -31,12 +31,12 @@ public partial class PositionMarkerPreview : FunctionEntityPreview
             return;
 
         EnsureVisual();
-        ApplyColors(PreviewVisualUtility.GetOpaquePreviewColor(Entity));
+        ApplyColors();
     }
 
-    protected virtual void ApplyColors(Color torusColor)
+    protected virtual void ApplyColors()
     {
-        torusColor.A = 1f;
+        Color torusColor = PreviewVisualUtility.GetOpaquePreviewColor(Entity);
         foreach (Node child in _root.GetChildren())
         {
             if (child is MeshInstance3D renderer)
@@ -44,11 +44,11 @@ public partial class PositionMarkerPreview : FunctionEntityPreview
                 if (child.Name.ToString().StartsWith("Axis"))
                 {
                     Color axisColor = GetAxisColor(child.Name);
-                    PreviewVisualUtility.ApplyColor(renderer, axisColor, opaque: true);
+                    PreviewVisualUtility.ApplyColor(renderer, axisColor);
                 }
                 else
                 {
-                    PreviewVisualUtility.ApplyColor(renderer, torusColor, opaque: true);
+                    PreviewVisualUtility.ApplyColor(renderer, torusColor);
                 }
             }
         }
@@ -78,7 +78,7 @@ public partial class PositionMarkerPreview : FunctionEntityPreview
         AddChild(_root);
 
         ArrayMesh torusMesh = PreviewVisualUtility.CreateTorusMesh(TorusRadius, TubeRadius);
-        PreviewVisualUtility.CreateMeshPreview("Torus", _root, torusMesh, Colors.White, opaque: true);
+        PreviewVisualUtility.CreateMeshPreview("Torus", _root, torusMesh, Colors.White);
 
         CreateAxisLine("AxisX", Vector3.Right, AxisLength, AxisX);
         CreateAxisLine("AxisY", Vector3.Up, AxisLength, AxisY);
@@ -94,7 +94,7 @@ public partial class PositionMarkerPreview : FunctionEntityPreview
             BottomRadius = AxisWidth,
             Height = length,
         };
-        Node3D axisObject = PreviewVisualUtility.CreatePrimitivePreview(name, _root, cylinder, color, opaque: true);
+        Node3D axisObject = PreviewVisualUtility.CreatePrimitivePreview(name, _root, cylinder, color);
         axisObject.Rotation = PreviewVisualUtility.GetAxisStubEuler(axis);
         axisObject.Position = axis * (length * 0.5f);
     }

@@ -34,7 +34,7 @@ public partial class CharacterPreview : FunctionEntityPreview
         foreach (Node child in _root.GetChildren())
         {
             if (child is MeshInstance3D renderer)
-                PreviewVisualUtility.ApplyColor(renderer, CharacterColor, opaque: true);
+                PreviewVisualUtility.ApplyColor(renderer, CharacterColor);
         }
     }
 
@@ -51,7 +51,7 @@ public partial class CharacterPreview : FunctionEntityPreview
             Radius = BodyRadius,
             Height = BodyHeight,
         };
-        Node3D body = PreviewVisualUtility.CreatePrimitivePreview("Body", _root, bodyMesh, CharacterColor, opaque: true);
+        Node3D body = PreviewVisualUtility.CreatePrimitivePreview("Body", _root, bodyMesh, CharacterColor);
         body.Position = new Vector3(0f, BodyHeight * 0.5f, 0f);
 
         SphereMesh headMesh = new SphereMesh
@@ -59,7 +59,7 @@ public partial class CharacterPreview : FunctionEntityPreview
             Radius = HeadRadius,
             Height = HeadRadius * 2f,
         };
-        Node3D head = PreviewVisualUtility.CreatePrimitivePreview("Head", _root, headMesh, CharacterColor, opaque: true);
+        Node3D head = PreviewVisualUtility.CreatePrimitivePreview("Head", _root, headMesh, CharacterColor);
         head.Position = new Vector3(0f, HeadOffset, 0f);
     }
 }

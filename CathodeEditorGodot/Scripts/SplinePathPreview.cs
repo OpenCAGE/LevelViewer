@@ -204,11 +204,11 @@ public partial class SplinePathPreview : FunctionEntityPreview
                 if (child.Name.ToString().StartsWith("Axis"))
                 {
                     Color axisColor = GetAxisColor(child.Name);
-                    PreviewVisualUtility.ApplyColor(renderer, axisColor, opaque: true);
+                    PreviewVisualUtility.ApplyColor(renderer, axisColor);
                 }
                 else
                 {
-                    PreviewVisualUtility.ApplyColor(renderer, torusColor, opaque: true);
+                    PreviewVisualUtility.ApplyColor(renderer, torusColor);
                 }
             }
         }

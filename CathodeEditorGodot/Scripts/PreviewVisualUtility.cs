@@ -5,7 +5,7 @@ using System.Collections.Generic;
 
 public static class PreviewVisualUtility
 {
-    private static ShaderMaterial _sharedBoxMaterial;
+    private static ShaderMaterial _sharedTransparentMaterial;
     private static ShaderMaterial _sharedOpaqueMaterial;
     private static ShaderMaterial _sharedIconBillboardMaterial;
     private static ShaderMaterial _sharedOverlayLineMaterial;
@@ -69,18 +69,26 @@ public static class PreviewVisualUtility
         return new Quaternion(Vector3.Up, axis).GetEuler();
     }
 
-    public static ShaderMaterial SharedBoxMaterial
+    public static ShaderMaterial SharedTransparentMaterial
     {
         get
         {
-            if (_sharedBoxMaterial == null)
+            if (_sharedTransparentMaterial == null)
             {
                 Shader shader = GD.Load<Shader>("res://shaders/preview_transparent.gdshader");
-                _sharedBoxMaterial = new ShaderMaterial { Shader = shader };
-                ConfigureTransparentMaterial(_sharedBoxMaterial);
+                _sharedTransparentMaterial = new ShaderMaterial { Shader = shader };
+                ConfigureTransparentMaterial(_sharedTransparentMaterial);
             }
-            return _sharedBoxMaterial;
+            return _sharedTransparentMaterial;
         }
+    }
+
+    public static bool UsesTransparentPreview(FunctionEntity entity)
+    {
+        if (entity == null || !entity.function.IsFunctionType)
+            return false;
+
+        return RenderFilterDefinitions.UsesTransparentPreview(entity.function.AsFunctionType);
     }
 
     public static ShaderMaterial SharedOpaqueMaterial
@@ -154,7 +162,7 @@ public static class PreviewVisualUtility
         return true;
     }
 
-    public static void PreparePreviewObject(Node3D node, bool opaque = false)
+    public static void PreparePreviewObject(Node3D node, bool opaque = true)
     {
         MeshInstance3D meshInstance = node as MeshInstance3D;
         if (meshInstance == null)
@@ -163,11 +171,11 @@ public static class PreviewVisualUtility
         if (meshInstance != null)
         {
             meshInstance.CastShadow = GeometryInstance3D.ShadowCastingSetting.Off;
-            meshInstance.MaterialOverride = opaque ? SharedOpaqueMaterial : SharedBoxMaterial;
+            meshInstance.MaterialOverride = opaque ? SharedOpaqueMaterial : SharedTransparentMaterial;
         }
     }
 
-    public static void ApplyColor(MeshInstance3D meshInstance, Color color, bool opaque = false)
+    public static void ApplyColor(MeshInstance3D meshInstance, Color color, bool opaque = true)
     {
         if (meshInstance == null)
             return;
@@ -178,12 +186,22 @@ public static class PreviewVisualUtility
             ApplyTransparentColor(meshInstance, color);
     }
 
+    public static void ApplyFunctionPreviewColor(MeshInstance3D meshInstance, FunctionEntity entity)
+    {
+        if (meshInstance == null || entity == null)
+            return;
+
+        bool transparent = UsesTransparentPreview(entity);
+        Color color = transparent ? GetPreviewColor(entity) : GetOpaquePreviewColor(entity);
+        ApplyColor(meshInstance, color, opaque: !transparent);
+    }
+
     public static void ApplyTransparentColor(MeshInstance3D meshInstance, Color color)
     {
         if (meshInstance == null)
             return;
 
-        ShaderMaterial material = (ShaderMaterial)SharedBoxMaterial.Duplicate(true);
+        ShaderMaterial material = (ShaderMaterial)SharedTransparentMaterial.Duplicate(true);
         material.SetShaderParameter("albedo_color", color);
         meshInstance.MaterialOverride = material;
     }
@@ -199,7 +217,7 @@ public static class PreviewVisualUtility
         meshInstance.MaterialOverride = material;
     }
 
-    public static Node3D CreateMeshPreview(string name, Node3D parent, Mesh mesh, Color color, bool opaque = false)
+    public static Node3D CreateMeshPreview(string name, Node3D parent, Mesh mesh, Color color, bool opaque = true)
     {
         MeshInstance3D meshInstance = new MeshInstance3D
         {
@@ -212,7 +230,7 @@ public static class PreviewVisualUtility
         return meshInstance;
     }
 
-    public static Node3D CreatePrimitivePreview(string name, Node3D parent, PrimitiveMesh primitive, Color color, bool opaque = false)
+    public static Node3D CreatePrimitivePreview(string name, Node3D parent, PrimitiveMesh primitive, Color color, bool opaque = true)
     {
         MeshInstance3D meshInstance = new MeshInstance3D
         {
@@ -242,7 +260,7 @@ public static class PreviewVisualUtility
         parent.AddChild(root);
 
         ArrayMesh torusMesh = CreateTorusMesh(torusRadius, tubeRadius);
-        CreateMeshPreview("Torus", root, torusMesh, torusColor, opaque: true);
+        CreateMeshPreview("Torus", root, torusMesh, torusColor);
         CreateAxisStub("AxisX", root, Vector3.Right, axisLength, axisWidth, PositionMarkerAxisX);
         CreateAxisStub("AxisY", root, Vector3.Up, axisLength, axisWidth, PositionMarkerAxisY);
         CreateAxisStub("AxisZ", root, Vector3.Back, axisLength, axisWidth, PositionMarkerAxisZ);
@@ -258,7 +276,7 @@ public static class PreviewVisualUtility
             BottomRadius = width,
             Height = length,
         };
-        Node3D axisObject = CreatePrimitivePreview(name, parent, cylinder, color, opaque: true);
+        Node3D axisObject = CreatePrimitivePreview(name, parent, cylinder, color);
         axisObject.Rotation = GetAxisStubEuler(axis);
         axisObject.Position = axis * (length * 0.5f);
     }
@@ -294,7 +312,7 @@ public static class PreviewVisualUtility
             Height = length,
         };
 
-        Node3D line = CreatePrimitivePreview(name, parent, cylinder, color, opaque: true);
+        Node3D line = CreatePrimitivePreview(name, parent, cylinder, color);
         line.Position = localStart + delta * 0.5f;
         line.Rotation = GetLookEuler(delta, new Vector3(Mathf.Pi / 2f, 0f, 0f));
         MeshInstance3D meshInstance = line as MeshInstance3D;

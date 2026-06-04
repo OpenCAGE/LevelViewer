@@ -35,7 +35,7 @@ public partial class EnvironmentMapPreview : FunctionEntityPreview
 
         MeshInstance3D sphere = _root.GetNodeOrNull<MeshInstance3D>("Sphere");
         if (sphere != null)
-            PreviewVisualUtility.ApplyColor(sphere, PreviewVisualUtility.GetOpaquePreviewColor(Entity), opaque: true);
+            PreviewVisualUtility.ApplyFunctionPreviewColor(sphere, Entity);
     }
 
     private void EnsureVisual()
@@ -51,6 +51,6 @@ public partial class EnvironmentMapPreview : FunctionEntityPreview
             Radius = SphereRadius,
             Height = SphereRadius * 2f,
         };
-        PreviewVisualUtility.CreatePrimitivePreview("Sphere", _root, sphereMesh, Colors.White, opaque: true);
+        PreviewVisualUtility.CreatePrimitivePreview("Sphere", _root, sphereMesh, Colors.White);
     }
 }

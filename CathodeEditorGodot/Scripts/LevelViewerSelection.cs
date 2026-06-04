@@ -2,53 +2,80 @@ using Godot;
 using System.Collections.Generic;
 
 /// <summary>
-/// Runtime selection highlight in the Game viewport (wireframe bounds + emissive mesh tint).
+/// Runtime selection highlight in the Game viewport (green tint on mesh materials).
 /// </summary>
 public static class LevelViewerSelection
 {
-    public static readonly Color WireframeColor = new Color(1f, 0.55f, 0.05f, 1f);
-    public static readonly Color MeshEmissionColor = new Color(1f, 0.7f, 0.15f, 1f);
+    public static readonly Color HighlightGreen = new(0.35f, 1f, 0.45f, 1f);
+    private static readonly Color TintMultiply = new(0.55f, 1.45f, 0.65f, 1f);
+    private static readonly Color TintMixToward = new(0.3f, 0.95f, 0.4f, 1f);
+    private const float TintMixWeight = 0.5f;
 
-    private static Node3D _highlightRoot;
     private static readonly Dictionary<MeshInstance3D, Material> _savedMaterialOverrides = new();
+    private static Node3D _selectionRoot;
+
+    public static void SetSelectionRoot(Node3D root) => _selectionRoot = root;
 
     public static void Apply(Node3D selected)
     {
+        if (selected != null && GodotObject.IsInstanceValid(selected) && selected == _selectionRoot)
+            return;
+
         Clear();
+        _selectionRoot = selected;
 
         if (selected == null || !GodotObject.IsInstanceValid(selected))
             return;
 
-        _highlightRoot = new Node3D { Name = "SelectionHighlight" };
-        selected.AddChild(_highlightRoot);
-
-        ApplyMeshEmissionHighlight(selected);
-        BuildWireframeBounds(_highlightRoot, selected);
+        ApplyMeshHighlight(selected);
     }
 
     public static void Clear()
     {
-        RestoreMeshEmissionHighlight();
-
-        if (_highlightRoot != null && GodotObject.IsInstanceValid(_highlightRoot))
-            _highlightRoot.QueueFree();
-
-        _highlightRoot = null;
+        RestoreMeshHighlights();
+        _selectionRoot = null;
     }
 
-    private static void ApplyMeshEmissionHighlight(Node3D root)
+    public static bool IsUnderSelection(Node node)
     {
-        if (root == _highlightRoot)
+        if (_selectionRoot == null || node == null)
+            return false;
+
+        Node current = node;
+        while (current != null)
+        {
+            if (current == _selectionRoot)
+                return true;
+
+            current = current.GetParent();
+        }
+
+        return false;
+    }
+
+    public static void ReapplyIfSelectionActive()
+    {
+        if (_selectionRoot == null || !GodotObject.IsInstanceValid(_selectionRoot))
             return;
 
+        ApplyMeshHighlight(_selectionRoot);
+    }
+
+    private static void ApplyMeshHighlight(Node3D root)
+    {
         if (root is MeshInstance3D meshInstance)
             TintMeshInstance(meshInstance);
 
         foreach (Node child in root.GetChildren())
         {
             if (child is Node3D child3D)
-                ApplyMeshEmissionHighlight(child3D);
+                ApplyMeshHighlight(child3D);
         }
+    }
+
+    private static Color BlendHighlightColor(Color color)
+    {
+        return color * TintMultiply + TintMixToward * TintMixWeight;
     }
 
     private static void TintMeshInstance(MeshInstance3D meshInstance)
@@ -72,20 +99,36 @@ public static class LevelViewerSelection
         if (tinted is StandardMaterial3D standard)
         {
             standard.EmissionEnabled = true;
-            standard.Emission = MeshEmissionColor;
-            standard.EmissionEnergyMultiplier = 1.25f;
+            standard.Emission = HighlightGreen;
+            standard.EmissionEnergyMultiplier = 2f;
+            standard.AlbedoColor = BlendHighlightColor(standard.AlbedoColor);
         }
         else if (tinted is ShaderMaterial shaderMaterial)
         {
-            shaderMaterial.SetShaderParameter("emission_enabled", true);
-            shaderMaterial.SetShaderParameter("emission", MeshEmissionColor);
-            shaderMaterial.SetShaderParameter("emission_energy", 1.25f);
+            ApplyShaderHighlight(shaderMaterial);
         }
 
         meshInstance.MaterialOverride = tinted;
     }
 
-    private static void RestoreMeshEmissionHighlight()
+    private static void ApplyShaderHighlight(ShaderMaterial material)
+    {
+        material.SetShaderParameter("emission_enabled", true);
+        material.SetShaderParameter("emission", new Vector3(HighlightGreen.R, HighlightGreen.G, HighlightGreen.B));
+        material.SetShaderParameter("emission_energy", 2f);
+        TryTintShaderColor(material, "diffuse_tint");
+        TryTintShaderColor(material, "albedo_color");
+        TryTintShaderColor(material, "albedo");
+    }
+
+    private static void TryTintShaderColor(ShaderMaterial material, string parameterName)
+    {
+        Variant value = material.GetShaderParameter(parameterName);
+        if (value.VariantType == Variant.Type.Color)
+            material.SetShaderParameter(parameterName, BlendHighlightColor(value.AsColor()));
+    }
+
+    private static void RestoreMeshHighlights()
     {
         foreach (KeyValuePair<MeshInstance3D, Material> entry in _savedMaterialOverrides)
         {
@@ -94,47 +137,5 @@ public static class LevelViewerSelection
         }
 
         _savedMaterialOverrides.Clear();
-    }
-
-    private static void BuildWireframeBounds(Node3D highlightRoot, Node3D selected)
-    {
-        if (!LevelViewerView.TryComputeLocalSubtreeAabb(selected, out Aabb bounds) || !bounds.HasVolume())
-        {
-            bounds = new Aabb(Vector3.Zero, Vector3.One * 0.5f);
-        }
-
-        Vector3 min = bounds.Position;
-        Vector3 max = bounds.Position + bounds.Size;
-        float lineWidth = Mathf.Clamp(bounds.Size.Length() * 0.004f, 0.02f, 0.35f);
-
-        Vector3[] corners =
-        {
-            new Vector3(min.X, min.Y, min.Z),
-            new Vector3(max.X, min.Y, min.Z),
-            new Vector3(max.X, max.Y, min.Z),
-            new Vector3(min.X, max.Y, min.Z),
-            new Vector3(min.X, min.Y, max.Z),
-            new Vector3(max.X, min.Y, max.Z),
-            new Vector3(max.X, max.Y, max.Z),
-            new Vector3(min.X, max.Y, max.Z),
-        };
-
-        int[,] edges =
-        {
-            { 0, 1 }, { 1, 2 }, { 2, 3 }, { 3, 0 },
-            { 4, 5 }, { 5, 6 }, { 6, 7 }, { 7, 4 },
-            { 0, 4 }, { 1, 5 }, { 2, 6 }, { 3, 7 },
-        };
-
-        for (int i = 0; i < edges.GetLength(0); i++)
-        {
-            PreviewVisualUtility.CreateLineSegment(
-                $"Edge{i}",
-                highlightRoot,
-                corners[edges[i, 0]],
-                corners[edges[i, 1]],
-                lineWidth,
-                WireframeColor);
-        }
     }
 }

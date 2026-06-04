@@ -11,6 +11,8 @@ using System.Linq;
 
 public partial class AlienScene : Node3D
 {
+	public const string OwnerCompositeMetaKey = "owner_composite";
+
 	public Action OnLoaded;
 
 	private string _levelName = "";
@@ -196,6 +198,7 @@ public partial class AlienScene : Node3D
 	private void ClearSelectedEntity()
 	{
 		_selectedEntity = null;
+		LevelViewerSelection.Clear();
 		_selectionHud?.Hide();
 	}
 
@@ -204,6 +207,7 @@ public partial class AlienScene : Node3D
 		PreviewVisualUtility.CleanupAllFunctionEntityPreviews(this);
 		ClearSelectedEntity();
 		LevelViewerSelection.Clear();
+		LevelViewerCompositeFocus.Clear();
 
 		if (_parentNode != null && GodotObject.IsInstanceValid(_parentNode))
 			_parentNode.QueueFree();
@@ -386,6 +390,7 @@ public partial class AlienScene : Node3D
 
 		InvalidateFunctionEntityPreviewCache();
 		RefreshRenderFilters();
+		RefreshCompositeFocus();
 	}
 
 	/// <summary>Moves level root so loaded content is centered near the origin for stable rendering.</summary>
@@ -485,6 +490,7 @@ public partial class AlienScene : Node3D
 		parentNode.AddChild(entityNode);
 		entityNode.Position = position;
 		entityNode.RotationDegrees = rotation;
+		entityNode.SetMeta(OwnerCompositeMetaKey, composite.shortGUID.AsUInt32);
 		_nodeEntities.Add(entityNode, entity);
 		TrackEntityNode(composite.shortGUID, entity.shortGUID, entityNode);
 
@@ -530,25 +536,74 @@ public partial class AlienScene : Node3D
 					Composite compositeNext = _content.Level.Commands.GetComposite(function.function);
 					if (compositeNext != null)
 						AddCompositeInstance(compositeNext, entityNode, function);
+					// Nested composites register pickables per inner entity — do not stamp this whole subtree.
 				}
 				else
 				{
 					if (FunctionEntityPreviewSetup.TryAddPreview(this, function, entityNode, _content.Level.Commands.Utils, composite.shortGUID))
 						_functionEntityPreviewsCacheDirty = true;
+					LevelViewerPick.RegisterPickableSubtree(entityNode);
 				}
+
 				break;
 			}
 		}
 	}
 
+	public bool TryPickSelectionTarget(Camera3D camera, Vector2 screenPosition, out LevelViewerPick.SelectionTarget target)
+	{
+		target = default;
+		if (_parentNode == null || !GodotObject.IsInstanceValid(_parentNode) || camera == null)
+			return false;
+
+		Commands commands = _content.Level.Commands;
+		LevelViewerPick.PickHit? hit = LevelViewerPick.PickClosest(_parentNode, camera, screenPosition, _parentNode, commands);
+		if (!hit.HasValue)
+			return false;
+
+		Node3D hitEntityNode = LevelViewerPick.ResolveNearestEntityNode(hit.Value.HitNode, _nodeEntities);
+		if (hitEntityNode == null)
+			return false;
+
+		LevelViewerPick.SelectionTarget? built = LevelViewerPick.BuildSelectionTarget(
+			hitEntityNode,
+			_parentNode,
+			_nodeEntities);
+		if (!built.HasValue)
+			return false;
+
+		target = built.Value;
+		return true;
+	}
+
+	public void RefreshCompositeFocus()
+	{
+		if (_parentNode == null || !_content.Loaded)
+		{
+			LevelViewerCompositeFocus.Clear();
+			return;
+		}
+
+		LevelViewerCompositeFocus.Refresh(_parentNode, _parentNode, _content.Level.Commands);
+		LevelViewerSelection.ReapplyIfSelectionActive();
+	}
+
 	public void SelectEntity(List<uint> entityPath, List<uint> compositePath, bool entitySelected, bool focusSelected)
 	{
-		Node3D entityNode = GetEntityNode(entityPath, ParentNode);
-		if (entityNode != null)
+		if (!entitySelected || entityPath == null || entityPath.Count == 0)
 		{
-			EntityOverride entityOverride = entityNode as EntityOverride;
-			if (entityOverride != null && entityOverride.PointedEntity != null)
-				entityNode = entityOverride.PointedEntity;
+			if (_selectedEntity == null)
+				return;
+
+			ClearSelectedEntity();
+			return;
+		}
+
+		Node3D entityNode = TryResolveSelectionNode(entityPath, compositePath);
+		if (entityNode == _selectedEntity && entityNode != null)
+		{
+			ShowEntitySelectionHud(entityPath, compositePath);
+			return;
 		}
 
 		_selectedEntity = entityNode;
@@ -557,10 +612,7 @@ public partial class AlienScene : Node3D
 		if (entityNode != null)
 			GD.Print("SelectEntity: " + string.Join("/", entityPath) + " -> " + entityNode.Name);
 
-		if (entitySelected)
-			ShowEntitySelectionHud(entityPath, compositePath);
-		else
-			_selectionHud?.Hide();
+		ShowEntitySelectionHud(entityPath, compositePath);
 
 		if (focusSelected && entityNode != null)
 			Callable.From(() => FocusSelectedEntity(entityNode)).CallDeferred();
@@ -649,6 +701,26 @@ public partial class AlienScene : Node3D
 			LevelViewerView.FrameAll(ParentNode ?? target, camera, focusEditor: true);
 		else
 			LevelViewerView.FrameRuntimeCamera(ParentNode ?? target, camera);
+	}
+
+	private Node3D TryResolveSelectionNode(List<uint> entityPath, List<uint> compositePath)
+	{
+		Node3D entityNode = GetEntityNode(entityPath, ParentNode);
+		if (entityNode == null && entityPath != null && entityPath.Count > 0 && compositePath != null && compositePath.Count > 0)
+		{
+			int last = entityPath.Count - 1;
+			int compositeIndex = Mathf.Min(last, compositePath.Count - 1);
+			if (TryGetCachedEntityNodes(new ShortGuid(compositePath[compositeIndex]), new ShortGuid(entityPath[last]), out List<Node3D> nodes))
+				entityNode = nodes[0];
+		}
+
+		if (entityNode == null)
+			return null;
+
+		if (entityNode is EntityOverride entityOverride && entityOverride.PointedEntity != null)
+			return entityOverride.PointedEntity;
+
+		return entityNode;
 	}
 
 	private Node3D GetEntityNode(List<uint> path, Node3D parent)
@@ -1098,6 +1170,7 @@ public partial class AlienScene : Node3D
 		meshInstance.MaterialOverride = GetSolidMaterial(material);
 		parent.AddChild(meshInstance);
 		UpdateWireframeOverlay(meshInstance, material);
+		LevelViewerPick.RegisterPickableSubtree(parent);
 	}
 
 	private bool GetEntityTransform(Entity entity, out Vector3 position, out Vector3 rotation)

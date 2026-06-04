@@ -1,7 +1,7 @@
 using Godot;
 
 /// <summary>
-/// Free camera: WASD/QE always move along view axes; hold RMB to look; MMB pan; scroll adjusts speed; Z frames selection.
+/// Free camera: WASD/QE move; RMB look; MMB pan; LMB select entity; Ctrl+MMB step into composite instance; scroll adjusts speed; Z frames selection.
 /// MoveSpeed is world units per second (framerate-independent via delta).
 /// </summary>
 public partial class LevelViewerCamera : Camera3D
@@ -303,17 +303,45 @@ public partial class LevelViewerCamera : Camera3D
     {
         switch (mouseButton.ButtonIndex)
         {
+            case MouseButton.Left:
+                TryPickSelect(mouseButton.Position);
+                GetViewport().SetInputAsHandled();
+                break;
             case MouseButton.Right:
                 _mouseLookActive = true;
                 CaptureMouse();
                 GetViewport().SetInputAsHandled();
                 break;
             case MouseButton.Middle:
-                _panning = true;
-                CaptureMouse();
-                GetViewport().SetInputAsHandled();
+                if (mouseButton.CtrlPressed)
+                {
+                    TryPickDrillIntoComposite(mouseButton.Position);
+                    GetViewport().SetInputAsHandled();
+                }
+                else
+                {
+                    _panning = true;
+                    CaptureMouse();
+                    GetViewport().SetInputAsHandled();
+                }
                 break;
         }
+    }
+
+    private void TryPickSelect(Vector2 screenPosition)
+    {
+        if (_commandsEditorConnection == null || !GodotObject.IsInstanceValid(_commandsEditorConnection))
+            _commandsEditorConnection = GetNodeOrNull<CommandsEditorConnection>(CommandsEditorConnectionPath);
+
+        _commandsEditorConnection?.TryPickSelectAtScreen(this, screenPosition);
+    }
+
+    private void TryPickDrillIntoComposite(Vector2 screenPosition)
+    {
+        if (_commandsEditorConnection == null || !GodotObject.IsInstanceValid(_commandsEditorConnection))
+            _commandsEditorConnection = GetNodeOrNull<CommandsEditorConnection>(CommandsEditorConnectionPath);
+
+        _commandsEditorConnection?.TryPickDrillIntoCompositeAtScreen(this, screenPosition);
     }
 
     private void HandleMouseButtonReleased(InputEventMouseButton mouseButton)

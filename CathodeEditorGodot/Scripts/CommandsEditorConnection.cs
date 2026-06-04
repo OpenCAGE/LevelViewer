@@ -1,3 +1,4 @@
+using CATHODE;
 using CATHODE.Scripting;
 using CATHODE.Scripting.Internal;
 using Godot;
@@ -97,6 +98,10 @@ public partial class CommandsEditorConnection : Node3D
     private HashSet<uint> _renderFiltersChangedFunctionTypes = null;
 
     private LevelViewerConnectionHud _connectionHud;
+    /// <summary>Composite path depth last seen from OpenCAGE packets (detect editor navigating back).</summary>
+    private int _syncedCompositePathDepth;
+    private bool _compositeFocusDirty;
+    private bool _forceSelectionApply;
 
     public override void _Ready()
     {
@@ -216,11 +221,22 @@ public partial class CommandsEditorConnection : Node3D
             }
         }
 
-        if (_currentEntityGOID != _currentEntity)
+        bool compositeFocusDirty = false;
+        lock (_lock)
         {
-            GD.Print("Selecting entity: " + _currentEntity);
-            _scene.SelectEntity(_pathEntities, _pathComposites, _entitySelected, _focusSelected);
-            _currentEntityGOID = _currentEntity;
+            compositeFocusDirty = _compositeFocusDirty;
+        }
+
+        if (_forceSelectionApply || _currentEntityGOID != _currentEntity)
+            ApplySelectionNow();
+
+        if (compositeFocusDirty && _scene != null && _scene.Content.Loaded)
+        {
+            _scene.RefreshCompositeFocus();
+            lock (_lock)
+            {
+                _compositeFocusDirty = false;
+            }
         }
     }
 
@@ -275,8 +291,18 @@ public partial class CommandsEditorConnection : Node3D
             _levelName = packet.level_name;
             _pathToAI = packet.system_folder;
 
+            uint previousActiveCompositeId = PreviewVisibilitySettings.ActiveCompositeId;
+            uint[] previousInstancePath = PreviewVisibilitySettings.ActiveInstanceEntityPath;
+            bool previousEntitySelected = _entitySelected;
+            uint previousEntity = _currentEntity;
+            int previousCompositeDepth = _pathComposites?.Count ?? 0;
+            List<uint> previousPathComposites = _pathComposites;
+
             _pathComposites = packet.path_composites;
             _pathEntities = packet.path_entities;
+
+            int incomingCompositeDepth = _pathComposites?.Count ?? 0;
+            _syncedCompositePathDepth = incomingCompositeDepth;
 
             _compositeLoaded = _pathComposites != null && _pathComposites.Count != 0;
             _entitySelected = _compositeLoaded && _pathComposites.Count == _pathEntities.Count;
@@ -286,9 +312,26 @@ public partial class CommandsEditorConnection : Node3D
 
             _focusSelected = packet.focus_object;
             _showCameraPosition = packet.show_camera_position;
-            uint previousActiveCompositeId = PreviewVisibilitySettings.ActiveCompositeId;
             bool hideNestedChanged = ApplyViewerSettings(packet);
-            bool activeCompositeChanged = ApplyActiveComposite(packet);
+            ApplyActiveComposite(packet);
+
+            bool activeCompositeChanged = previousActiveCompositeId != PreviewVisibilitySettings.ActiveCompositeId;
+            bool instancePathChanged = !PreviewVisibilitySettings.InstancePathsEqual(
+                previousInstancePath,
+                PreviewVisibilitySettings.ActiveInstanceEntityPath);
+            bool compositeNavigationChanged = activeCompositeChanged
+                || instancePathChanged
+                || incomingCompositeDepth != previousCompositeDepth
+                || !PathsEqual(previousPathComposites, packet.path_composites);
+            bool selectionChanged = previousEntitySelected != _entitySelected
+                || previousEntity != _currentEntity
+                || compositeNavigationChanged;
+
+            if (compositeNavigationChanged)
+                MarkCompositeFocusDirty();
+
+            if (selectionChanged)
+                _forceSelectionApply = true;
 
             bool nestedVisibilityOnly = !hideNestedChanged
                 && activeCompositeChanged
@@ -606,9 +649,21 @@ public partial class CommandsEditorConnection : Node3D
             ? _currentComposite
             : packet.composite;
 
+        PreviewVisibilitySettings.SyncFromEditorPath(_pathEntities, _pathComposites, _entitySelected);
+
         bool changed = PreviewVisibilitySettings.ActiveCompositeId != activeCompositeId;
         PreviewVisibilitySettings.ActiveCompositeId = activeCompositeId;
+        if (changed)
+            MarkCompositeFocusDirty();
         return changed;
+    }
+
+    private void MarkCompositeFocusDirty()
+    {
+        lock (_lock)
+        {
+            _compositeFocusDirty = true;
+        }
     }
 
     private void MarkRenderFiltersDirty(HashSet<uint> changedFunctionTypes)
@@ -747,5 +802,197 @@ public partial class CommandsEditorConnection : Node3D
         {
             GD.PrintErr("Failed to send websocket message: " + ex.Message);
         }
+    }
+
+    public void TryPickSelectAtScreen(Camera3D camera, Vector2 screenPosition)
+    {
+        if (_scene == null || camera == null || !_scene.Content.Loaded)
+            return;
+
+        if (!_scene.TryPickSelectionTarget(camera, screenPosition, out LevelViewerPick.SelectionTarget target))
+        {
+            TryClearEntitySelection();
+            return;
+        }
+
+        uint activeCompositeId = PreviewVisibilitySettings.ActiveCompositeId;
+        if (activeCompositeId == 0 && _pathComposites != null && _pathComposites.Count > 0)
+            activeCompositeId = _pathComposites[_pathComposites.Count - 1];
+
+        if (!LevelViewerPick.TryBuildActiveCompositeSelectionPath(
+                target,
+                activeCompositeId,
+                out List<uint> pathEntities,
+                out List<uint> pathComposites))
+        {
+            return;
+        }
+
+        ApplyLocalSelection(pathEntities, pathComposites, entitySelected: true);
+        SendSelectionToEditor(pathEntities, pathComposites, entitySelected: true);
+        ApplySelectionNow();
+    }
+
+    public void TryPickDrillIntoCompositeAtScreen(Camera3D camera, Vector2 screenPosition)
+    {
+        if (_scene == null || camera == null || !_scene.Content.Loaded)
+            return;
+
+        if (!_scene.TryPickSelectionTarget(camera, screenPosition, out LevelViewerPick.SelectionTarget target))
+            return;
+
+        uint activeCompositeId = PreviewVisibilitySettings.ActiveCompositeId;
+        if (activeCompositeId == 0 && _pathComposites != null && _pathComposites.Count > 0)
+            activeCompositeId = _pathComposites[_pathComposites.Count - 1];
+
+        Commands commands = _scene.Content.Level.Commands;
+        if (!LevelViewerPick.TryBuildCompositeDrillPath(
+                target,
+                activeCompositeId,
+                commands,
+                out List<uint> pathEntities,
+                out List<uint> pathComposites))
+        {
+            return;
+        }
+
+        ApplyLocalSelection(pathEntities, pathComposites, entitySelected: false);
+        SendSelectionToEditor(pathEntities, pathComposites, entitySelected: false);
+        ApplySelectionNow();
+    }
+
+    public void TryClearEntitySelection()
+    {
+        if (_scene == null || !_scene.Content.Loaded)
+            return;
+
+        List<uint> pathEntities;
+        List<uint> pathComposites;
+
+        lock (_lock)
+        {
+            if (!_entitySelected || _pathComposites == null || _pathComposites.Count == 0)
+                return;
+
+            if (_pathEntities == null || _pathEntities.Count != _pathComposites.Count)
+                return;
+
+            pathEntities = new List<uint>(_pathEntities);
+            pathEntities.RemoveAt(pathEntities.Count - 1);
+            pathComposites = new List<uint>(_pathComposites);
+        }
+
+        ApplyLocalSelection(pathEntities, pathComposites, entitySelected: false);
+        SendSelectionToEditor(pathEntities, pathComposites, entitySelected: false);
+        ApplySelectionNow();
+    }
+
+    private void ApplyLocalSelection(List<uint> pathEntities, List<uint> pathComposites, bool entitySelected)
+    {
+        lock (_lock)
+        {
+            uint previousActiveComposite = PreviewVisibilitySettings.ActiveCompositeId;
+            uint[] previousInstancePath = PreviewVisibilitySettings.ActiveInstanceEntityPath;
+
+            _pathEntities = pathEntities;
+            _pathComposites = pathComposites;
+            _compositeLoaded = _pathComposites != null && _pathComposites.Count != 0;
+            _entitySelected = entitySelected;
+            _currentComposite = _compositeLoaded ? _pathComposites[_pathComposites.Count - 1] : 0;
+            _currentEntity = _entitySelected && _pathEntities != null && _pathEntities.Count > 0
+                ? _pathEntities[_pathEntities.Count - 1]
+                : 0;
+            _forceSelectionApply = true;
+            PreviewVisibilitySettings.SyncFromEditorPath(_pathEntities, _pathComposites, _entitySelected);
+            PreviewVisibilitySettings.ActiveCompositeId = _currentComposite;
+
+            if (previousActiveComposite != _currentComposite
+                || !PreviewVisibilitySettings.InstancePathsEqual(previousInstancePath, PreviewVisibilitySettings.ActiveInstanceEntityPath))
+            {
+                MarkCompositeFocusDirty();
+            }
+        }
+    }
+
+    private void ApplySelectionNow()
+    {
+        if (_scene == null || !_scene.Content.Loaded)
+            return;
+
+        bool focusSelected;
+        bool entitySelected;
+        List<uint> pathEntities;
+        List<uint> pathComposites;
+
+        lock (_lock)
+        {
+            if (!_forceSelectionApply && _currentEntityGOID == _currentEntity)
+                return;
+
+            focusSelected = _focusSelected;
+            entitySelected = _entitySelected;
+            pathEntities = _pathEntities;
+            pathComposites = _pathComposites;
+            _currentEntityGOID = _currentEntity;
+            _forceSelectionApply = false;
+        }
+
+        _scene.SelectEntity(pathEntities, pathComposites, entitySelected, focusSelected);
+    }
+
+    private static bool PathsEqual(IReadOnlyList<uint> left, IReadOnlyList<uint> right)
+    {
+        if (ReferenceEquals(left, right))
+            return true;
+
+        if (left == null || right == null)
+            return left == right;
+
+        if (left.Count != right.Count)
+            return false;
+
+        for (int i = 0; i < left.Count; i++)
+        {
+            if (left[i] != right[i])
+                return false;
+        }
+
+        return true;
+    }
+
+    private void SendSelectionToEditor(List<uint> pathEntities, List<uint> pathComposites, bool entitySelected)
+    {
+        if (pathComposites == null || pathComposites.Count == 0)
+            return;
+
+        Packet packet = new Packet(PacketEvent.ENTITY_SELECTED)
+        {
+            path_entities = pathEntities ?? new List<uint>(),
+            path_composites = pathComposites,
+            composite = pathComposites[pathComposites.Count - 1],
+        };
+
+        if (entitySelected && pathEntities != null && pathEntities.Count > 0)
+        {
+            packet.entity = pathEntities[pathEntities.Count - 1];
+            TryFillEntityMetadata(packet);
+        }
+
+        SendMessage(packet);
+    }
+
+    private void TryFillEntityMetadata(Packet packet)
+    {
+        if (_scene?.Content?.Level == null || packet.entity == 0)
+            return;
+
+        Composite composite = _scene.Content.Level.Commands.GetComposite(new ShortGuid(packet.composite));
+        Entity entity = composite?.GetEntityByID(new ShortGuid(packet.entity));
+        if (entity == null)
+            return;
+
+        packet.entity_variant = entity.variant;
+        if (entity.variant == EntityVariant.FUNCTION)
+            packet.entity_function = ((FunctionEntity)entity).function.AsUInt32;
     }
 }

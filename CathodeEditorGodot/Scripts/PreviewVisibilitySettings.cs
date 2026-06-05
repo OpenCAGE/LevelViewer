@@ -8,6 +8,9 @@ public static class PreviewVisibilitySettings
 {
     public static bool HideNestedScriptEntities { get; set; }
 
+    /// <summary>When true, LMB selects the deepest entity on the pick chain and Ctrl+MMB drills through all composite instances in one action.</summary>
+    public static bool DeepSelectMode { get; set; }
+
     /// <summary>
     /// The composite OpenCAGE is currently viewing (not necessarily the root composite loaded in the scene).
     /// </summary>

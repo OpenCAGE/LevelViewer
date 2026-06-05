@@ -529,6 +529,82 @@ public static class LevelViewerPick
 	}
 
 	/// <summary>
+	/// Selects the deepest selectable entity on the full pick chain (deep-select LMB).
+	/// Falls back to drilling into the innermost composite instance when only composite instances remain on the chain.
+	/// </summary>
+	public static bool TryBuildDeepSelectEntityPath(
+		SelectionTarget target,
+		Commands commands,
+		out List<uint> pathEntities,
+		out List<uint> pathComposites,
+		out bool entitySelected)
+	{
+		pathEntities = new List<uint>();
+		pathComposites = new List<uint>();
+		entitySelected = false;
+
+		if (commands == null || target.EntityIds == null || target.EntityIds.Count == 0)
+			return false;
+
+		int lastIndex = target.EntityIds.Count - 1;
+		if (TryResolveChainEntity(commands, target, lastIndex, out Entity leafEntity)
+			&& !IsCompositeInstanceEntity(leafEntity, commands))
+		{
+			return TryBuildSelectionPath(
+				target,
+				target.EntityIds.Count,
+				commands,
+				out pathEntities,
+				out pathComposites,
+				out entitySelected)
+				&& entitySelected;
+		}
+
+		entitySelected = false;
+		return TryBuildDeepDrillPath(target, commands, out pathEntities, out pathComposites);
+	}
+
+	/// <summary>
+	/// Drills through every composite instance on the pick chain down to the picked entity's place in the hierarchy (deep-select Ctrl+MMB).
+	/// </summary>
+	public static bool TryBuildDeepDrillPath(
+		SelectionTarget target,
+		Commands commands,
+		out List<uint> pathEntities,
+		out List<uint> pathComposites)
+	{
+		pathEntities = new List<uint>();
+		pathComposites = new List<uint>();
+
+		if (commands == null || target.EntityIds == null || target.EntityIds.Count == 0)
+			return false;
+
+		int lastIndex = target.EntityIds.Count - 1;
+		int drillSteps;
+		if (TryResolveChainEntity(commands, target, lastIndex, out Entity leafEntity)
+			&& IsCompositeInstanceEntity(leafEntity, commands))
+		{
+			drillSteps = target.EntityIds.Count;
+		}
+		else if (lastIndex == 0)
+		{
+			return false;
+		}
+		else
+		{
+			drillSteps = lastIndex;
+			if (!TryResolveChainEntity(commands, target, drillSteps - 1, out Entity enterThrough)
+				|| !IsCompositeInstanceEntity(enterThrough, commands))
+			{
+				return false;
+			}
+		}
+
+		return TryBuildSelectionPath(target, drillSteps, commands, out pathEntities, out pathComposites, out bool entitySelected)
+			&& !entitySelected;
+	}
+
+	/// <summary>
 	/// Steps into the composite instance clicked in the active composite (Ctrl+MMB).
 	/// </summary>
 	public static bool TryBuildCompositeDrillPath(

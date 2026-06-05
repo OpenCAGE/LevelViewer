@@ -880,17 +880,36 @@ public partial class CommandsEditorConnection : Node3D
         if (activeCompositeId == 0 && _pathComposites != null && _pathComposites.Count > 0)
             activeCompositeId = _pathComposites[_pathComposites.Count - 1];
 
-        if (!LevelViewerPick.TryBuildActiveCompositeSelectionPath(
+        Commands commands = _scene.Content.Level.Commands;
+        bool built;
+        List<uint> pathEntities;
+        List<uint> pathComposites;
+        bool entitySelected;
+
+        if (PreviewVisibilitySettings.DeepSelectMode)
+        {
+            built = LevelViewerPick.TryBuildDeepSelectEntityPath(
+                target,
+                commands,
+                out pathEntities,
+                out pathComposites,
+                out entitySelected);
+        }
+        else
+        {
+            built = LevelViewerPick.TryBuildActiveCompositeSelectionPath(
                 target,
                 activeCompositeId,
-                out List<uint> pathEntities,
-                out List<uint> pathComposites))
-        {
-            return;
+                out pathEntities,
+                out pathComposites);
+            entitySelected = true;
         }
 
-        ApplyLocalSelection(pathEntities, pathComposites, entitySelected: true);
-        SendSelectionToEditor(pathEntities, pathComposites, entitySelected: true);
+        if (!built)
+            return;
+
+        ApplyLocalSelection(pathEntities, pathComposites, entitySelected);
+        SendSelectionToEditor(pathEntities, pathComposites, entitySelected);
         ApplySelectionNow();
     }
 
@@ -907,15 +926,30 @@ public partial class CommandsEditorConnection : Node3D
             activeCompositeId = _pathComposites[_pathComposites.Count - 1];
 
         Commands commands = _scene.Content.Level.Commands;
-        if (!LevelViewerPick.TryBuildCompositeDrillPath(
+        bool built;
+        List<uint> pathEntities;
+        List<uint> pathComposites;
+
+        if (PreviewVisibilitySettings.DeepSelectMode)
+        {
+            built = LevelViewerPick.TryBuildDeepDrillPath(
+                target,
+                commands,
+                out pathEntities,
+                out pathComposites);
+        }
+        else
+        {
+            built = LevelViewerPick.TryBuildCompositeDrillPath(
                 target,
                 activeCompositeId,
                 commands,
-                out List<uint> pathEntities,
-                out List<uint> pathComposites))
-        {
-            return;
+                out pathEntities,
+                out pathComposites);
         }
+
+        if (!built)
+            return;
 
         ApplyLocalSelection(pathEntities, pathComposites, entitySelected: false);
         SendSelectionToEditor(pathEntities, pathComposites, entitySelected: false);

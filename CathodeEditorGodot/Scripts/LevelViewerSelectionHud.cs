@@ -13,6 +13,7 @@ public partial class LevelViewerSelectionHud : CanvasLayer
 	private float _fadeTimer;
 	private float _fadeDuration = DefaultFadeSeconds;
 	private bool _attached;
+	private bool _persistent;
 
 	public void AttachTo(Node host)
 	{
@@ -61,6 +62,51 @@ public partial class LevelViewerSelectionHud : CanvasLayer
 		_panel.OffsetBottom = bottomOffset;
 	}
 
+	public void SetPanelTopRight()
+	{
+		if (_panel == null || _label == null)
+			return;
+
+		_label.HorizontalAlignment = HorizontalAlignment.Center;
+		_label.AutowrapMode = TextServer.AutowrapMode.Off;
+		_label.SizeFlagsHorizontal = Control.SizeFlags.ShrinkCenter;
+
+		_panel.SetAnchorsPreset(Control.LayoutPreset.TopRight);
+		_panel.CustomMinimumSize = Vector2.Zero;
+		FitPanelTopRight();
+	}
+
+	public void ShowPersistent(string text, Color fontColor)
+	{
+		if (_label == null || _panel == null)
+			return;
+
+		_persistent = true;
+		_fadeTimer = 0f;
+		_label.Text = text;
+		_label.AddThemeColorOverride("font_color", fontColor);
+		_panel.Modulate = Colors.White;
+		_panel.ResetSize();
+		FitPanelTopRight();
+		_panel.Visible = true;
+	}
+
+	private void FitPanelTopRight()
+	{
+		if (_panel == null)
+			return;
+
+		const float margin = 12f;
+		Vector2 size = _panel.GetCombinedMinimumSize();
+		if (size.X <= 0f || size.Y <= 0f)
+			size = _panel.Size;
+
+		_panel.OffsetTop = margin;
+		_panel.OffsetRight = -margin;
+		_panel.OffsetLeft = -margin - size.X;
+		_panel.OffsetBottom = margin + size.Y;
+	}
+
 	public void ShowEntity(string displayName)
 	{
 		if (_label == null || _panel == null)
@@ -72,6 +118,7 @@ public partial class LevelViewerSelectionHud : CanvasLayer
 			return;
 		}
 
+		_persistent = false;
 		_label.Text = displayName;
 		_fadeDuration = DefaultFadeSeconds;
 		_fadeTimer = _fadeDuration;
@@ -81,6 +128,7 @@ public partial class LevelViewerSelectionHud : CanvasLayer
 
 	public void Hide()
 	{
+		_persistent = false;
 		_fadeTimer = 0f;
 		if (_panel != null)
 			_panel.Visible = false;
@@ -88,7 +136,7 @@ public partial class LevelViewerSelectionHud : CanvasLayer
 
 	public void UpdateFade(float deltaSeconds)
 	{
-		if (_panel == null || _fadeTimer <= 0f)
+		if (_persistent || _panel == null || _fadeTimer <= 0f)
 			return;
 
 		_fadeTimer -= deltaSeconds;

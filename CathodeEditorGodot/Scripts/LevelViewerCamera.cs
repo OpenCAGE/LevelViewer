@@ -1,7 +1,7 @@
 using Godot;
 
 /// <summary>
-/// Free camera: WASD/QE move; RMB look; MMB pan; LMB select entity; Ctrl+MMB step into composite instance; scroll adjusts speed; Z frames selection.
+/// Free camera: WASD/QE move; RMB look; MMB pan; LMB select entity; Ctrl+MMB step into composite instance; 0 toggles deep select; scroll adjusts speed; Z frames selection.
 /// MoveSpeed is world units per second (framerate-independent via delta).
 /// </summary>
 public partial class LevelViewerCamera : Camera3D
@@ -60,6 +60,7 @@ public partial class LevelViewerCamera : Camera3D
     private bool _panning;
 
     private LevelViewerSelectionHud _gizmoModeHud;
+    private LevelViewerSelectionHud _deepSelectHud;
 
     private CanvasLayer _hudLayer;
     private PanelContainer _speedPanel;
@@ -139,6 +140,11 @@ public partial class LevelViewerCamera : Camera3D
                 else if (keyEvent.Keycode == Key.Key4)
                 {
                     SetGizmoMode(LevelViewerTransformGizmo.GizmoMode.None);
+                    GetViewport().SetInputAsHandled();
+                }
+                else if (keyEvent.Keycode == Key.Key0)
+                {
+                    ToggleDeepSelectMode();
                     GetViewport().SetInputAsHandled();
                 }
                 break;
@@ -705,5 +711,44 @@ public partial class LevelViewerCamera : Camera3D
     {
         if (_gizmoModeHud == null || !GodotObject.IsInstanceValid(_gizmoModeHud))
             SetupGizmoModeHud();
+    }
+
+    private void ToggleDeepSelectMode()
+    {
+        PreviewVisibilitySettings.DeepSelectMode = !PreviewVisibilitySettings.DeepSelectMode;
+        UpdateDeepSelectHud();
+    }
+
+    private void UpdateDeepSelectHud()
+    {
+        if (!PreviewVisibilitySettings.DeepSelectMode)
+        {
+            _deepSelectHud?.Hide();
+            return;
+        }
+
+        EnsureDeepSelectHud();
+        _deepSelectHud?.ShowPersistent("DEEP SELECT", new Color(0.95f, 0.22f, 0.22f));
+    }
+
+    private void SetupDeepSelectHud()
+    {
+        if (_deepSelectHud != null && GodotObject.IsInstanceValid(_deepSelectHud))
+            return;
+
+        Node host = GetTree()?.CurrentScene ?? this;
+        if (host == null || !GodotObject.IsInstanceValid(host))
+            return;
+
+        _deepSelectHud = new LevelViewerSelectionHud();
+        _deepSelectHud.Name = "DeepSelectHud";
+        _deepSelectHud.AttachTo(host);
+        _deepSelectHud.SetPanelTopRight();
+    }
+
+    private void EnsureDeepSelectHud()
+    {
+        if (_deepSelectHud == null || !GodotObject.IsInstanceValid(_deepSelectHud))
+            SetupDeepSelectHud();
     }
 }

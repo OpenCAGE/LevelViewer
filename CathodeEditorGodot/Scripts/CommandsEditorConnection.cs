@@ -963,6 +963,7 @@ public partial class CommandsEditorConnection : Node3D
 
         List<uint> pathEntities;
         List<uint> pathComposites;
+        bool entitySelected;
 
         lock (_lock)
         {
@@ -975,10 +976,49 @@ public partial class CommandsEditorConnection : Node3D
             pathEntities = new List<uint>(_pathEntities);
             pathEntities.RemoveAt(pathEntities.Count - 1);
             pathComposites = new List<uint>(_pathComposites);
+            entitySelected = false;
         }
 
-        ApplyLocalSelection(pathEntities, pathComposites, entitySelected: false);
-        SendSelectionToEditor(pathEntities, pathComposites, entitySelected: false);
+        ApplyLocalSelection(pathEntities, pathComposites, entitySelected);
+        SendSelectionToEditor(pathEntities, pathComposites, entitySelected);
+        ApplySelectionNow();
+    }
+
+    /// <summary>Steps back one level: deselects the current entity, or pops out of a nested composite instance.</summary>
+    public void TryStepBackHierarchy()
+    {
+        if (_scene == null || !_scene.Content.Loaded)
+            return;
+
+        List<uint> pathEntities;
+        List<uint> pathComposites;
+        bool entitySelected;
+
+        lock (_lock)
+        {
+            if (_pathComposites == null || _pathComposites.Count == 0)
+                return;
+
+            pathComposites = new List<uint>(_pathComposites);
+            pathEntities = _pathEntities != null ? new List<uint>(_pathEntities) : new List<uint>();
+
+            if (_entitySelected && pathEntities.Count > 0 && pathEntities.Count == pathComposites.Count)
+            {
+                pathEntities.RemoveAt(pathEntities.Count - 1);
+                entitySelected = false;
+            }
+            else if (pathEntities.Count > 0 && pathComposites.Count > pathEntities.Count)
+            {
+                pathEntities.RemoveAt(pathEntities.Count - 1);
+                pathComposites.RemoveAt(pathComposites.Count - 1);
+                entitySelected = false;
+            }
+            else
+                return;
+        }
+
+        ApplyLocalSelection(pathEntities, pathComposites, entitySelected);
+        SendSelectionToEditor(pathEntities, pathComposites, entitySelected);
         ApplySelectionNow();
     }
 

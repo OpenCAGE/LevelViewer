@@ -1,7 +1,7 @@
 using Godot;
 
 /// <summary>
-/// Free camera: WASD/QE move; RMB look; MMB pan; LMB select entity; Ctrl+MMB step into composite instance; 0 toggles deep select; scroll adjusts speed; Z frames selection.
+/// Free camera: WASD/QE move; RMB look; MMB pan; LMB select entity; Ctrl+MMB step into composite instance; - step back hierarchy; 0 toggles deep select; scroll adjusts speed; Z frames selection.
 /// MoveSpeed is world units per second (framerate-independent via delta).
 /// </summary>
 public partial class LevelViewerCamera : Camera3D
@@ -145,6 +145,11 @@ public partial class LevelViewerCamera : Camera3D
                 else if (keyEvent.Keycode == Key.Key0)
                 {
                     ToggleDeepSelectMode();
+                    GetViewport().SetInputAsHandled();
+                }
+                else if (keyEvent.Keycode == Key.Minus)
+                {
+                    TryStepBackHierarchy();
                     GetViewport().SetInputAsHandled();
                 }
                 break;
@@ -382,6 +387,14 @@ public partial class LevelViewerCamera : Camera3D
             _commandsEditorConnection = GetNodeOrNull<CommandsEditorConnection>(CommandsEditorConnectionPath);
 
         _commandsEditorConnection?.TryPickDrillIntoCompositeAtScreen(this, screenPosition);
+    }
+
+    private void TryStepBackHierarchy()
+    {
+        if (_commandsEditorConnection == null || !GodotObject.IsInstanceValid(_commandsEditorConnection))
+            _commandsEditorConnection = GetNodeOrNull<CommandsEditorConnection>(CommandsEditorConnectionPath);
+
+        _commandsEditorConnection?.TryStepBackHierarchy();
     }
 
     private void HandleMouseButtonReleased(InputEventMouseButton mouseButton)

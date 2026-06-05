@@ -823,6 +823,31 @@ public partial class AlienScene : Node3D
 		}
 	}
 
+	/// <summary>
+	/// Apply a gizmo transform to every scene instance of an entity (shared composite definition).
+	/// Mirrors the OpenCAGE parameter-sync visual path; used while outbound resync is suppressed.
+	/// </summary>
+	public void ApplyGizmoTransformToAllInstances(
+		ShortGuid compositeId,
+		ShortGuid entityId,
+		Vector3 godotPosition,
+		Vector3 godotRotationDegrees)
+	{
+		Vector3 cathodePos = CathodeCoordinates.PositionFromGodot(godotPosition);
+		Vector3 cathodeRot = CathodeCoordinates.EulerDegreesFromGodot(godotRotationDegrees);
+
+		SyncedParameter sync = new SyncedParameter()
+		{
+			name = ShortGuidUtils.Generate("position").AsUInt32,
+			removed = false,
+			data_type = (uint)DataType.TRANSFORM,
+			vector3_a = new float[] { cathodePos.X, cathodePos.Y, cathodePos.Z },
+			vector3_b = new float[] { cathodeRot.X, cathodeRot.Y, cathodeRot.Z },
+		};
+
+		ApplyEntityParameter(compositeId, entityId, sync, compositeId, entityId, fromPointer: false, pointedOverride: false);
+	}
+
 	private void RefreshFunctionEntityPreviews(Node3D entityNode)
 	{
 		if (entityNode == null)

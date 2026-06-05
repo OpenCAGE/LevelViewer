@@ -22,19 +22,86 @@ public static class LevelViewerView
 
 	private static void AccumulateAabb(Node node, ref Aabb bounds, ref bool hasBounds)
 	{
-		if (node is VisualInstance3D visual)
+		if (node == null || !GodotObject.IsInstanceValid(node))
+			return;
+
+		if (node is VisualInstance3D visual
+			&& TryGetGlobalVisualAabb(visual, out Aabb global))
 		{
-			Aabb local = visual.GetAabb();
-			if (local.Size.LengthSquared() > 0.000001f)
-			{
-				Aabb global = visual.GlobalTransform * local;
-				bounds = hasBounds ? bounds.Merge(global) : global;
-				hasBounds = true;
-			}
+			bounds = hasBounds ? bounds.Merge(global) : global;
+			hasBounds = true;
 		}
 
 		foreach (Node child in node.GetChildren())
 			AccumulateAabb(child, ref bounds, ref hasBounds);
+	}
+
+	private static bool TryGetGlobalVisualAabb(VisualInstance3D visual, out Aabb global)
+	{
+		global = default;
+		if (!GodotObject.IsInstanceValid(visual) || !visual.IsInsideTree())
+			return false;
+
+		if (!TryGetLocalVisualAabb(visual, out Aabb local))
+			return false;
+
+		try
+		{
+			global = visual.GlobalTransform * local;
+		}
+		catch
+		{
+			return false;
+		}
+
+		return IsUsableAabb(global);
+	}
+
+	private static bool TryGetLocalVisualAabb(VisualInstance3D visual, out Aabb local)
+	{
+		local = default;
+		try
+		{
+			if (visual is MeshInstance3D meshInstance)
+			{
+				Mesh mesh = meshInstance.Mesh;
+				if (mesh == null || !GodotObject.IsInstanceValid(mesh))
+					return false;
+
+				local = mesh.GetAabb();
+			}
+			else
+			{
+				local = visual.GetAabb();
+			}
+		}
+		catch
+		{
+			return false;
+		}
+
+		return IsUsableAabb(local);
+	}
+
+	private static bool IsUsableAabb(Aabb aabb)
+	{
+		try
+		{
+			if (!aabb.HasVolume())
+				return false;
+
+			Vector3 position = aabb.Position;
+			Vector3 size = aabb.Size;
+			if (size.LengthSquared() <= 0.000001f)
+				return false;
+
+			return Mathf.IsFinite(position.X) && Mathf.IsFinite(position.Y) && Mathf.IsFinite(position.Z)
+				&& Mathf.IsFinite(size.X) && Mathf.IsFinite(size.Y) && Mathf.IsFinite(size.Z);
+		}
+		catch
+		{
+			return false;
+		}
 	}
 
 	public static void FrameRuntimeCamera(Node3D contentRoot, Camera3D camera = null)

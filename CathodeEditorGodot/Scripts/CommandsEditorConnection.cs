@@ -1082,6 +1082,15 @@ public partial class CommandsEditorConnection : Node3D
         if (!entitySelected || pathEntities == null || pathEntities.Count == 0)
             return;
 
+        if (_scene != null)
+        {
+            _scene.ApplyGizmoTransformToAllInstances(
+                new ShortGuid(pathComposites[pathComposites.Count - 1]),
+                new ShortGuid(pathEntities[pathEntities.Count - 1]),
+                godotPos,
+                godotRotDeg);
+        }
+
         SendEntityTransform(godotPos, godotRotDeg, pathEntities, pathComposites);
     }
 

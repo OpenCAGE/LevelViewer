@@ -128,10 +128,15 @@ public partial class LevelViewerCamera : Camera3D
                 }
                 else if (keyEvent.Keycode == Key.Key2)
                 {
-                    SetGizmoMode(LevelViewerTransformGizmo.GizmoMode.Rotate);
+                    SetGizmoMode(LevelViewerTransformGizmo.GizmoMode.RotateLocal);
                     GetViewport().SetInputAsHandled();
                 }
                 else if (keyEvent.Keycode == Key.Key3)
+                {
+                    SetGizmoMode(LevelViewerTransformGizmo.GizmoMode.RotateWorld);
+                    GetViewport().SetInputAsHandled();
+                }
+                else if (keyEvent.Keycode == Key.Key4)
                 {
                     SetGizmoMode(LevelViewerTransformGizmo.GizmoMode.None);
                     GetViewport().SetInputAsHandled();
@@ -630,9 +635,10 @@ public partial class LevelViewerCamera : Camera3D
 
         string label = mode switch
         {
-            LevelViewerTransformGizmo.GizmoMode.Translate => "Translate",
-            LevelViewerTransformGizmo.GizmoMode.Rotate    => "Rotate",
-            _                                             => "None",
+            LevelViewerTransformGizmo.GizmoMode.Translate    => "Translate",
+            LevelViewerTransformGizmo.GizmoMode.RotateLocal  => "Rotate (Local)",
+            LevelViewerTransformGizmo.GizmoMode.RotateWorld  => "Rotate (World)",
+            _                                                => "None",
         };
 
         EnsureGizmoModeHud();

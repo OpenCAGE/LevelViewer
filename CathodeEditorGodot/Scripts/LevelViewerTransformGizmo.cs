@@ -4,13 +4,13 @@ using System.Collections.Generic;
 
 /// <summary>
 /// In-viewport transform gizmo attached to the currently selected entity.
-/// Modes: Translate (axis arrows + plane squares) or Rotate (arc circles).
+/// Modes: Translate, local/world rotation rings, or hidden.
 /// <see cref="OnTransformChanged"/> fires on every drag update so callers can push
 /// position / rotation back to OpenCAGE.
 /// </summary>
 public partial class LevelViewerTransformGizmo : Node3D
 {
-    public enum GizmoMode { None, Translate, Rotate }
+    public enum GizmoMode { None, Translate, RotateLocal, RotateWorld }
 
     /// <summary>Fired when dragging moves/rotates the target. Args: local position, local euler rotation degrees.</summary>
     public Action<Vector3, Vector3> OnTransformChanged;
@@ -145,6 +145,8 @@ public partial class LevelViewerTransformGizmo : Node3D
         if (!_isDragging)
             GlobalPosition = _target.GlobalPosition;
 
+        GlobalBasis = GetOrientationBasis();
+
         UpdateWorldScale();
         Scale   = Vector3.One * _worldScale;
         Visible = true;
@@ -229,7 +231,7 @@ public partial class LevelViewerTransformGizmo : Node3D
                 _dragPlaneNormal = GetCameraForward();
             }
         }
-        else // Rotate
+        else if (IsRotateMode)
         {
             // Rotation happens in the plane perpendicular to the ring axis.
             _dragAxisDir     = AxisToWorldDir(_dragAxis);
@@ -284,7 +286,7 @@ public partial class LevelViewerTransformGizmo : Node3D
 
             GlobalPosition = _target.GlobalPosition;
         }
-        else // Rotate — accumulate small per-frame deltas to avoid ±180° acos flips
+        else if (IsRotateMode)
         {
             Vector3 to = currentHit.Value - _dragPivot;
             if (to.LengthSquared() < 1e-8f)
@@ -295,9 +297,19 @@ public partial class LevelViewerTransformGizmo : Node3D
             _dragRotRefDir      = to;
             _dragAccumAngleRad += deltaRad;
 
-            Vector3 axis = _dragAxisDir.Normalized();
-            Quaternion worldDelta = new Quaternion(axis, _dragAccumAngleRad);
-            SetGlobalQuaternion(_target, worldDelta * _dragStartGlobalQuat);
+            if (_mode == GizmoMode.RotateWorld)
+            {
+                Vector3 axis = _dragAxisDir.Normalized();
+                Quaternion worldDelta = new Quaternion(axis, _dragAccumAngleRad);
+                SetGlobalQuaternion(_target, worldDelta * _dragStartGlobalQuat);
+            }
+            else
+            {
+                Vector3 localAxis = AxisToLocalDir(_dragAxis).Normalized();
+                Quaternion localDelta = new Quaternion(localAxis, _dragAccumAngleRad);
+                SetGlobalQuaternion(_target, _dragStartGlobalQuat * localDelta);
+                GlobalBasis = _target.GlobalBasis;
+            }
         }
 
         // Entity position parameters are parent-local — never sync GlobalPosition.
@@ -373,7 +385,7 @@ public partial class LevelViewerTransformGizmo : Node3D
             TestAxisScreen(mousePos, Vector3.Up,    alen, DragAxis.Y, ref bestAxis, ref bestDist);
             TestAxisScreen(mousePos, Vector3.Back,  alen, DragAxis.Z, ref bestAxis, ref bestDist);
         }
-        else if (_mode == GizmoMode.Rotate)
+        else if (IsRotateMode)
         {
             float rr = RingRadius * _worldScale;
             TestRingScreen(mousePos, Vector3.Right, rr, DragAxis.RotX, ref bestAxis, ref bestDist);
@@ -384,11 +396,12 @@ public partial class LevelViewerTransformGizmo : Node3D
         return bestAxis;
     }
 
-    private void TestAxisScreen(Vector2 mouse, Vector3 axisDir, float axisLength, DragAxis axis,
+    private void TestAxisScreen(Vector2 mouse, Vector3 localAxisDir, float axisLength, DragAxis axis,
         ref DragAxis bestAxis, ref float bestDist)
     {
+        Vector3 worldAxis = GetOrientationBasis() * localAxisDir;
         Vector2 centre = WorldToScreen(GlobalPosition);
-        Vector2 end    = WorldToScreen(GlobalPosition + axisDir * axisLength);
+        Vector2 end    = WorldToScreen(GlobalPosition + worldAxis * axisLength);
         float dist     = ScreenDistToSegment(mouse, centre, end);
         if (dist < AxisScreenPickPx && dist < bestDist)
         {
@@ -397,9 +410,12 @@ public partial class LevelViewerTransformGizmo : Node3D
         }
     }
 
-    private void TestPlaneScreen(Vector2 mouse, Vector3 u, Vector3 v, float offset, float halfSize,
+    private void TestPlaneScreen(Vector2 mouse, Vector3 localU, Vector3 localV, float offset, float halfSize,
         DragAxis axis, ref DragAxis bestAxis, ref float bestDist)
     {
+        Basis basis = GetOrientationBasis();
+        Vector3 u = basis * localU;
+        Vector3 v = basis * localV;
         Vector3 centre = GlobalPosition + (u + v) * offset;
         // Quad corners in world space (matches visual square).
         Vector3 c00 = centre + (-u - v) * halfSize;
@@ -430,9 +446,10 @@ public partial class LevelViewerTransformGizmo : Node3D
         }
     }
 
-    private void TestRingScreen(Vector2 mouse, Vector3 ringNormal, float radius, DragAxis axis,
+    private void TestRingScreen(Vector2 mouse, Vector3 localRingNormal, float radius, DragAxis axis,
         ref DragAxis bestAxis, ref float bestDist)
     {
+        Vector3 ringNormal = (GetOrientationBasis() * localRingNormal).Normalized();
         GetRingBasis(ringNormal, out Vector3 basisU, out Vector3 basisV);
         Vector2 prevScreen = WorldToScreen(GlobalPosition);
         float minSegDist = float.MaxValue;
@@ -492,7 +509,7 @@ public partial class LevelViewerTransformGizmo : Node3D
 
         if (_mode == GizmoMode.Translate)
             BuildTranslateMeshes();
-        else if (_mode == GizmoMode.Rotate)
+        else if (IsRotateMode)
             BuildRotateMeshes();
     }
 
@@ -710,7 +727,30 @@ public partial class LevelViewerTransformGizmo : Node3D
         return ray.Origin + ray.Dir * t;
     }
 
-    private static Vector3 AxisToWorldDir(DragAxis axis) => axis switch
+    private bool IsRotateMode
+        => _mode == GizmoMode.RotateLocal || _mode == GizmoMode.RotateWorld;
+
+    private Basis GetOrientationBasis()
+    {
+        if (_mode == GizmoMode.RotateLocal
+            && _target != null && GodotObject.IsInstanceValid(_target))
+        {
+            return _target.GlobalBasis;
+        }
+
+        return Basis.Identity;
+    }
+
+    private Vector3 AxisToWorldDir(DragAxis axis)
+    {
+        Vector3 local = AxisToLocalDir(axis);
+        if (local.LengthSquared() < 1e-8f)
+            return Vector3.Zero;
+
+        return GetOrientationBasis() * local;
+    }
+
+    private static Vector3 AxisToLocalDir(DragAxis axis) => axis switch
     {
         DragAxis.X   or DragAxis.RotX => Vector3.Right,
         DragAxis.Y   or DragAxis.RotY => Vector3.Up,

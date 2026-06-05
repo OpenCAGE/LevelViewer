@@ -529,43 +529,40 @@ public static class LevelViewerPick
 	}
 
 	/// <summary>
-	/// Alias hierarchy for deep select: deepest entity in the direct child composite of the active view (not deeper).
+	/// How many composite levels below the active view exist on the pick chain (0 = pick stays in active composite).
 	/// </summary>
-	public static bool TryBuildOneLevelDownAliasHierarchyPath(
+	public static int GetDeepSelectMaxDepth(
+		SelectionTarget target,
+		uint activeCompositeId,
+		uint[] instanceEntityPath)
+	{
+		if (!TryGetAliasHierarchyStartIndex(target, activeCompositeId, instanceEntityPath, out int start))
+			return 0;
+
+		return CountChildCompositeSegments(target, activeCompositeId, start);
+	}
+
+	/// <summary>
+	/// Alias hierarchy for deep select at a composite depth below the active view (1 = first child composite).
+	/// </summary>
+	public static bool TryBuildDeepSelectAliasHierarchyPath(
 		SelectionTarget target,
 		uint activeCompositeId,
 		uint[] instanceEntityPath,
+		int depthLevel,
 		out ShortGuid[] hierarchy)
 	{
 		hierarchy = null;
+		if (depthLevel <= 0)
+			return false;
+
 		if (!TryGetAliasHierarchyStartIndex(target, activeCompositeId, instanceEntityPath, out int start))
 			return false;
 
-		int firstInChild = -1;
-		uint childCompositeId = 0;
-		for (int i = start; i < target.EntityIds.Count; i++)
-		{
-			if (target.CompositeIds[i] == activeCompositeId)
-				continue;
-
-			firstInChild = i;
-			childCompositeId = target.CompositeIds[i];
-			break;
-		}
-
-		if (firstInChild < 0)
+		if (!TryFindDeepSelectSegmentEndIndex(target, activeCompositeId, start, depthLevel, out int deepestIndex))
 			return false;
 
-		int deepestInChild = firstInChild;
-		for (int i = firstInChild + 1; i < target.EntityIds.Count; i++)
-		{
-			if (target.CompositeIds[i] != childCompositeId)
-				break;
-
-			deepestInChild = i;
-		}
-
-		int count = deepestInChild - start + 1;
+		int count = deepestIndex - start + 1;
 		if (count <= 0)
 			return false;
 
@@ -574,6 +571,68 @@ public static class LevelViewerPick
 			hierarchy[i] = new ShortGuid(target.EntityIds[start + i]);
 
 		return true;
+	}
+
+	private static int CountChildCompositeSegments(SelectionTarget target, uint activeCompositeId, int start)
+	{
+		int segmentCount = 0;
+		int i = start;
+		while (i < target.EntityIds.Count)
+		{
+			while (i < target.EntityIds.Count && target.CompositeIds[i] == activeCompositeId)
+				i++;
+
+			if (i >= target.EntityIds.Count)
+				break;
+
+			uint segmentCompositeId = target.CompositeIds[i];
+			while (i < target.EntityIds.Count && target.CompositeIds[i] == segmentCompositeId)
+				i++;
+
+			segmentCount++;
+		}
+
+		return segmentCount;
+	}
+
+	private static bool TryFindDeepSelectSegmentEndIndex(
+		SelectionTarget target,
+		uint activeCompositeId,
+		int start,
+		int depthLevel,
+		out int deepestIndex)
+	{
+		deepestIndex = -1;
+		int segmentCount = CountChildCompositeSegments(target, activeCompositeId, start);
+		if (segmentCount == 0)
+			return false;
+
+		int clampedDepth = Mathf.Clamp(depthLevel, 1, segmentCount);
+		int segmentIndex = 0;
+		int i = start;
+
+		while (i < target.EntityIds.Count && segmentIndex < clampedDepth)
+		{
+			while (i < target.EntityIds.Count && target.CompositeIds[i] == activeCompositeId)
+				i++;
+
+			if (i >= target.EntityIds.Count)
+				return false;
+
+			uint segmentCompositeId = target.CompositeIds[i];
+			int segmentEnd = i;
+			while (i < target.EntityIds.Count && target.CompositeIds[i] == segmentCompositeId)
+			{
+				segmentEnd = i;
+				i++;
+			}
+
+			segmentIndex++;
+			if (segmentIndex == clampedDepth)
+				deepestIndex = segmentEnd;
+		}
+
+		return deepestIndex >= start;
 	}
 
 	/// <summary>
@@ -737,6 +796,92 @@ public static class LevelViewerPick
 	}
 
 	/// <summary>
+	/// Steps into the composite at progressive deep-select depth (Ctrl+MMB after repeated LMB clicks).
+	/// </summary>
+	public static bool TryBuildProgressiveDeepDrillPath(
+		SelectionTarget target,
+		uint activeCompositeId,
+		uint[] instanceEntityPath,
+		int depthLevel,
+		Commands commands,
+		out List<uint> pathEntities,
+		out List<uint> pathComposites)
+	{
+		pathEntities = new List<uint>();
+		pathComposites = new List<uint>();
+
+		if (commands == null || depthLevel <= 0)
+			return false;
+
+		if (!TryFindDeepSelectDrillEnterIndex(
+				target,
+				activeCompositeId,
+				instanceEntityPath,
+				depthLevel,
+				commands,
+				out int enterIndex))
+		{
+			return false;
+		}
+
+		int steps = enterIndex + 1;
+		return TryBuildSelectionPath(target, steps, commands, out pathEntities, out pathComposites, out bool entitySelected)
+			&& !entitySelected;
+	}
+
+	private static bool TryFindDeepSelectDrillEnterIndex(
+		SelectionTarget target,
+		uint activeCompositeId,
+		uint[] instanceEntityPath,
+		int depthLevel,
+		Commands commands,
+		out int enterIndex)
+	{
+		enterIndex = -1;
+		if (depthLevel <= 0 || commands == null)
+			return false;
+
+		if (!TryGetAliasHierarchyStartIndex(target, activeCompositeId, instanceEntityPath, out int start))
+			return false;
+
+		int segmentCount = CountChildCompositeSegments(target, activeCompositeId, start);
+		if (segmentCount == 0 || depthLevel > segmentCount)
+			return false;
+
+		int i = start;
+		for (int depth = 1; depth <= depthLevel; depth++)
+		{
+			uint regionId = depth == 1 ? activeCompositeId : target.CompositeIds[i];
+			int lastCompositeInstance = -1;
+
+			while (i < target.EntityIds.Count && target.CompositeIds[i] == regionId)
+			{
+				if (TryResolveChainEntity(commands, target, i, out Entity entity)
+					&& IsCompositeInstanceEntity(entity, commands))
+				{
+					lastCompositeInstance = i;
+				}
+
+				i++;
+			}
+
+			if (lastCompositeInstance < 0)
+				return false;
+
+			if (depth == depthLevel)
+			{
+				enterIndex = lastCompositeInstance;
+				return true;
+			}
+
+			if (i >= target.EntityIds.Count)
+				return false;
+		}
+
+		return false;
+	}
+
+	/// <summary>
 	/// Steps into the composite instance clicked in the active composite (Ctrl+MMB).
 	/// </summary>
 	public static bool TryBuildCompositeDrillPath(
@@ -761,6 +906,40 @@ public static class LevelViewerPick
 		int steps = entityIndex + 1;
 		return TryBuildSelectionPath(target, steps, commands, out pathEntities, out pathComposites, out bool entitySelected)
 			&& !entitySelected;
+	}
+
+	/// <summary>
+	/// Deepest non-composite-instance entity on the pick chain that lives in <paramref name="enteredCompositeId"/>.
+	/// </summary>
+	public static uint TryFindPreservedEntityInComposite(
+		SelectionTarget target,
+		uint enteredCompositeId,
+		Commands commands)
+	{
+		if (commands == null || enteredCompositeId == 0
+			|| target.EntityIds == null || target.CompositeIds == null)
+		{
+			return 0;
+		}
+
+		Composite enteredComposite = commands.GetComposite(new ShortGuid(enteredCompositeId));
+		if (enteredComposite == null)
+			return 0;
+
+		for (int i = target.EntityIds.Count - 1; i >= 0; i--)
+		{
+			if (target.CompositeIds[i] != enteredCompositeId)
+				continue;
+
+			uint entityId = target.EntityIds[i];
+			Entity entity = enteredComposite.GetEntityByID(new ShortGuid(entityId));
+			if (entity == null || IsCompositeInstanceEntity(entity, commands))
+				continue;
+
+			return entityId;
+		}
+
+		return 0;
 	}
 
 	/// <summary>

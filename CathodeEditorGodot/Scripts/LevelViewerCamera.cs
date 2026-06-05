@@ -728,6 +728,7 @@ public partial class LevelViewerCamera : Camera3D
 
     private void ToggleDeepSelectMode()
     {
+        _commandsEditorConnection?.ResetProgressiveDeepSelectPickState();
         PreviewVisibilitySettings.DeepSelectMode = PreviewVisibilitySettings.DeepSelectMode switch
         {
             PreviewVisibilitySettings.DeepSelectModeKind.None => PreviewVisibilitySettings.DeepSelectModeKind.DeepSelect,

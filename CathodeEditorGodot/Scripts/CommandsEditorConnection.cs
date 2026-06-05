@@ -110,6 +110,12 @@ public partial class CommandsEditorConnection : Node3D
     private bool _compositeFocusDirty;
     private bool _forceSelectionApply;
     private readonly HashSet<uint> _viewerOriginatedEntityAdds = new HashSet<uint>();
+    private uint _progressiveDeepSelectLeafId;
+    private int _progressiveDeepSelectDepth;
+    private uint _progressiveDeepSelectActiveComposite;
+    private uint[] _progressiveDeepSelectInstancePath = System.Array.Empty<uint>();
+    private List<uint> _progressiveDeepSelectEntityIds;
+    private List<uint> _progressiveDeepSelectCompositeIds;
 
     public override void _Ready()
     {
@@ -386,7 +392,10 @@ public partial class CommandsEditorConnection : Node3D
                 || compositeNavigationChanged;
 
             if (compositeNavigationChanged)
+            {
+                ResetProgressiveDeepSelectState();
                 MarkCompositeFocusDirty();
+            }
 
             if (selectionChanged)
                 _forceSelectionApply = true;
@@ -915,36 +924,44 @@ public partial class CommandsEditorConnection : Node3D
             activeCompositeId = _pathComposites[_pathComposites.Count - 1];
 
         Commands commands = _scene.Content.Level.Commands;
-        bool built;
-        List<uint> pathEntities;
-        List<uint> pathComposites;
+        bool built = false;
+        List<uint> pathEntities = null;
+        List<uint> pathComposites = null;
         bool entitySelected;
         bool createdNewAlias = false;
 
         switch (PreviewVisibilitySettings.DeepSelectMode)
         {
             case PreviewVisibilitySettings.DeepSelectModeKind.AdvancedDeepSelect:
+                ResetProgressiveDeepSelectState();
                 built = TryPickDeepSelectViaAlias(
                     target,
                     activeCompositeId,
                     commands,
-                    limitToDirectChildComposite: false,
+                    deepSelectDepth: 0,
                     out pathEntities,
                     out pathComposites,
                     out createdNewAlias);
                 entitySelected = built;
                 break;
             case PreviewVisibilitySettings.DeepSelectModeKind.DeepSelect:
-                built = TryPickDeepSelectViaAlias(
-                    target,
-                    activeCompositeId,
-                    commands,
-                    limitToDirectChildComposite: true,
-                    out pathEntities,
-                    out pathComposites,
-                    out createdNewAlias);
+            {
+                int deepSelectDepth = ResolveProgressiveDeepSelectDepth(target, activeCompositeId);
+                if (deepSelectDepth > 0)
+                {
+                    built = TryPickDeepSelectViaAlias(
+                        target,
+                        activeCompositeId,
+                        commands,
+                        deepSelectDepth,
+                        out pathEntities,
+                        out pathComposites,
+                        out createdNewAlias);
+                }
+
                 if (!built)
                 {
+                    ResetProgressiveDeepSelectState();
                     built = LevelViewerPick.TryBuildActiveCompositeSelectionPath(
                         target,
                         activeCompositeId,
@@ -954,6 +971,7 @@ public partial class CommandsEditorConnection : Node3D
 
                 entitySelected = built;
                 break;
+            }
             default:
                 built = LevelViewerPick.TryBuildActiveCompositeSelectionPath(
                     target,
@@ -990,38 +1008,197 @@ public partial class CommandsEditorConnection : Node3D
             activeCompositeId = _pathComposites[_pathComposites.Count - 1];
 
         Commands commands = _scene.Content.Level.Commands;
-        bool built;
-        List<uint> pathEntities;
-        List<uint> pathComposites;
+        List<uint> pathEntities = null;
+        List<uint> pathComposites = null;
+        bool built = false;
 
-        if (PreviewVisibilitySettings.DeepSelectMode == PreviewVisibilitySettings.DeepSelectModeKind.AdvancedDeepSelect)
+        switch (PreviewVisibilitySettings.DeepSelectMode)
         {
-            built = LevelViewerPick.TryBuildDeepDrillPath(
-                target,
-                commands,
-                out pathEntities,
-                out pathComposites);
-        }
-        else
-        {
-            built = LevelViewerPick.TryBuildCompositeDrillPath(
-                target,
-                activeCompositeId,
-                commands,
-                out pathEntities,
-                out pathComposites);
+            case PreviewVisibilitySettings.DeepSelectModeKind.AdvancedDeepSelect:
+                built = LevelViewerPick.TryBuildDeepDrillPath(
+                    target,
+                    commands,
+                    out pathEntities,
+                    out pathComposites);
+                break;
+            case PreviewVisibilitySettings.DeepSelectModeKind.DeepSelect:
+            {
+                uint[] instancePath = PreviewVisibilitySettings.ActiveInstanceEntityPath ?? Array.Empty<uint>();
+                LevelViewerPick.SelectionTarget drillTarget = ResolveProgressiveDeepSelectDrillTarget(
+                    target,
+                    activeCompositeId,
+                    out int drillDepth);
+                if (drillDepth > 0)
+                {
+                    built = LevelViewerPick.TryBuildProgressiveDeepDrillPath(
+                        drillTarget,
+                        activeCompositeId,
+                        instancePath,
+                        drillDepth,
+                        commands,
+                        out pathEntities,
+                        out pathComposites);
+                }
+
+                if (!built)
+                {
+                    built = LevelViewerPick.TryBuildCompositeDrillPath(
+                        target,
+                        activeCompositeId,
+                        commands,
+                        out pathEntities,
+                        out pathComposites);
+                }
+
+                break;
+            }
+            default:
+                built = LevelViewerPick.TryBuildCompositeDrillPath(
+                    target,
+                    activeCompositeId,
+                    commands,
+                    out pathEntities,
+                    out pathComposites);
+                break;
         }
 
         if (!built)
             return;
 
-        ApplyLocalSelection(pathEntities, pathComposites, entitySelected: false);
-        SendSelectionToEditor(pathEntities, pathComposites, entitySelected: false);
+        bool entitySelected = false;
+        if (PreviewVisibilitySettings.DeepSelectMode != PreviewVisibilitySettings.DeepSelectModeKind.None)
+        {
+            LevelViewerPick.SelectionTarget preserveTarget = target;
+            if (PreviewVisibilitySettings.DeepSelectMode == PreviewVisibilitySettings.DeepSelectModeKind.DeepSelect
+                && _progressiveDeepSelectEntityIds != null
+                && _progressiveDeepSelectCompositeIds != null
+                && _progressiveDeepSelectEntityIds.Count > 0)
+            {
+                preserveTarget = new LevelViewerPick.SelectionTarget(
+                    _progressiveDeepSelectEntityIds,
+                    _progressiveDeepSelectCompositeIds,
+                    _progressiveDeepSelectLeafId);
+            }
+
+            TryMergePreservedSelectionIntoDrillPath(
+                pathEntities,
+                pathComposites,
+                preserveTarget,
+                commands,
+                out pathEntities,
+                out pathComposites,
+                out entitySelected);
+        }
+
+        if (PreviewVisibilitySettings.DeepSelectMode == PreviewVisibilitySettings.DeepSelectModeKind.DeepSelect)
+            ResetProgressiveDeepSelectState();
+
+        ApplyLocalSelection(pathEntities, pathComposites, entitySelected);
+        SendSelectionToEditor(pathEntities, pathComposites, entitySelected);
         ApplySelectionNow();
+    }
+
+    private bool TryMergePreservedSelectionIntoDrillPath(
+        List<uint> drillPathEntities,
+        List<uint> drillPathComposites,
+        LevelViewerPick.SelectionTarget pickTarget,
+        Commands commands,
+        out List<uint> pathEntities,
+        out List<uint> pathComposites,
+        out bool entitySelected)
+    {
+        pathEntities = drillPathEntities;
+        pathComposites = drillPathComposites;
+        entitySelected = false;
+
+        if (commands == null
+            || drillPathEntities == null
+            || drillPathComposites == null
+            || drillPathEntities.Count == 0
+            || drillPathComposites.Count != drillPathEntities.Count + 1)
+        {
+            return false;
+        }
+
+        uint selectedEntityId;
+        uint ownerCompositeId;
+        bool hadSelection;
+        lock (_lock)
+        {
+            hadSelection = _entitySelected;
+            selectedEntityId = _currentEntity;
+            ownerCompositeId = _pathComposites != null && _pathComposites.Count > 0
+                ? _pathComposites[_pathComposites.Count - 1]
+                : 0;
+        }
+
+        if (!hadSelection || selectedEntityId == 0)
+            return false;
+
+        uint enteredCompositeId = drillPathComposites[drillPathComposites.Count - 1];
+        uint preserveEntityId = ResolvePreservedEntityForDrill(
+            selectedEntityId,
+            ownerCompositeId,
+            enteredCompositeId,
+            pickTarget,
+            commands);
+        if (preserveEntityId == 0)
+            return false;
+
+        pathEntities = new List<uint>(drillPathEntities);
+        pathEntities.Add(preserveEntityId);
+        pathComposites = new List<uint>(drillPathComposites);
+        entitySelected = true;
+        return true;
+    }
+
+    private static uint ResolvePreservedEntityForDrill(
+        uint selectedEntityId,
+        uint ownerCompositeId,
+        uint enteredCompositeId,
+        LevelViewerPick.SelectionTarget pickTarget,
+        Commands commands)
+    {
+        Composite enteredComposite = commands.GetComposite(new ShortGuid(enteredCompositeId));
+        if (enteredComposite == null)
+            return 0;
+
+        if (ownerCompositeId != 0)
+        {
+            Composite ownerComposite = commands.GetComposite(new ShortGuid(ownerCompositeId));
+            Entity selectedEntity = ownerComposite?.GetEntityByID(new ShortGuid(selectedEntityId));
+            if (selectedEntity?.variant == EntityVariant.ALIAS)
+            {
+                if (ownerCompositeId == enteredCompositeId)
+                    return selectedEntityId;
+
+                AliasEntity alias = (AliasEntity)selectedEntity;
+                if (alias.alias?.path != null && alias.alias.path.Length > 0)
+                {
+                    uint resolved = alias.alias.path[alias.alias.path.Length - 1].AsUInt32;
+                    if (enteredComposite.GetEntityByID(new ShortGuid(resolved)) != null)
+                        return resolved;
+                }
+            }
+            else if (selectedEntity != null
+                && enteredComposite.GetEntityByID(new ShortGuid(selectedEntityId)) != null)
+            {
+                return selectedEntityId;
+            }
+        }
+
+        return LevelViewerPick.TryFindPreservedEntityInComposite(pickTarget, enteredCompositeId, commands);
+    }
+
+    public void ResetProgressiveDeepSelectPickState()
+    {
+        ResetProgressiveDeepSelectState();
     }
 
     public void TryClearEntitySelection()
     {
+        ResetProgressiveDeepSelectState();
+
         if (_scene == null || !_scene.Content.Loaded)
             return;
 
@@ -1306,11 +1483,101 @@ public partial class CommandsEditorConnection : Node3D
         }
     }
 
+    private LevelViewerPick.SelectionTarget ResolveProgressiveDeepSelectDrillTarget(
+        LevelViewerPick.SelectionTarget pickedTarget,
+        uint activeCompositeId,
+        out int drillDepth)
+    {
+        drillDepth = 1;
+        uint[] instancePath = PreviewVisibilitySettings.ActiveInstanceEntityPath ?? Array.Empty<uint>();
+
+        if (_progressiveDeepSelectDepth <= 0
+            || activeCompositeId != _progressiveDeepSelectActiveComposite
+            || !PreviewVisibilitySettings.InstancePathsEqual(instancePath, _progressiveDeepSelectInstancePath))
+        {
+            return pickedTarget;
+        }
+
+        uint pickedLeafId = pickedTarget.LeafEntityId;
+        bool sameGeometryPick = pickedLeafId != 0 && pickedLeafId == _progressiveDeepSelectLeafId;
+        bool pickingCurrentSelection = false;
+        lock (_lock)
+        {
+            pickingCurrentSelection = _entitySelected
+                && pickedLeafId != 0
+                && pickedLeafId == _currentEntity;
+        }
+
+        if (!sameGeometryPick && !pickingCurrentSelection)
+            return pickedTarget;
+
+        drillDepth = _progressiveDeepSelectDepth;
+
+        if (_progressiveDeepSelectEntityIds == null
+            || _progressiveDeepSelectCompositeIds == null
+            || _progressiveDeepSelectEntityIds.Count == 0)
+        {
+            return pickedTarget;
+        }
+
+        int pickedMaxDepth = LevelViewerPick.GetDeepSelectMaxDepth(pickedTarget, activeCompositeId, instancePath);
+        if (pickedMaxDepth >= drillDepth)
+            return pickedTarget;
+
+        return new LevelViewerPick.SelectionTarget(
+            _progressiveDeepSelectEntityIds,
+            _progressiveDeepSelectCompositeIds,
+            _progressiveDeepSelectLeafId);
+    }
+
+    private int ResolveProgressiveDeepSelectDepth(LevelViewerPick.SelectionTarget target, uint activeCompositeId)
+    {
+        uint[] instancePath = PreviewVisibilitySettings.ActiveInstanceEntityPath ?? Array.Empty<uint>();
+        uint leafId = target.LeafEntityId;
+        int maxDepth = LevelViewerPick.GetDeepSelectMaxDepth(target, activeCompositeId, instancePath);
+        if (maxDepth <= 0)
+        {
+            ResetProgressiveDeepSelectState();
+            return 0;
+        }
+
+        bool samePick = leafId != 0
+            && leafId == _progressiveDeepSelectLeafId
+            && activeCompositeId == _progressiveDeepSelectActiveComposite
+            && PreviewVisibilitySettings.InstancePathsEqual(instancePath, _progressiveDeepSelectInstancePath);
+
+        int depth = samePick ? _progressiveDeepSelectDepth + 1 : 1;
+        depth = Math.Min(depth, maxDepth);
+
+        _progressiveDeepSelectLeafId = leafId;
+        _progressiveDeepSelectDepth = depth;
+        _progressiveDeepSelectActiveComposite = activeCompositeId;
+        _progressiveDeepSelectInstancePath = (uint[])instancePath.Clone();
+        _progressiveDeepSelectEntityIds = target.EntityIds != null
+            ? new List<uint>(target.EntityIds)
+            : null;
+        _progressiveDeepSelectCompositeIds = target.CompositeIds != null
+            ? new List<uint>(target.CompositeIds)
+            : null;
+
+        return depth;
+    }
+
+    private void ResetProgressiveDeepSelectState()
+    {
+        _progressiveDeepSelectLeafId = 0;
+        _progressiveDeepSelectDepth = 0;
+        _progressiveDeepSelectActiveComposite = 0;
+        _progressiveDeepSelectInstancePath = Array.Empty<uint>();
+        _progressiveDeepSelectEntityIds = null;
+        _progressiveDeepSelectCompositeIds = null;
+    }
+
     private bool TryPickDeepSelectViaAlias(
         LevelViewerPick.SelectionTarget target,
         uint ownerCompositeId,
         Commands commands,
-        bool limitToDirectChildComposite,
+        int deepSelectDepth,
         out List<uint> pathEntities,
         out List<uint> pathComposites,
         out bool createdNewAlias)
@@ -1327,8 +1594,13 @@ public partial class CommandsEditorConnection : Node3D
             return false;
 
         uint[] instancePath = PreviewVisibilitySettings.ActiveInstanceEntityPath ?? Array.Empty<uint>();
-        bool builtHierarchy = limitToDirectChildComposite
-            ? LevelViewerPick.TryBuildOneLevelDownAliasHierarchyPath(target, ownerCompositeId, instancePath, out ShortGuid[] hierarchy)
+        bool builtHierarchy = deepSelectDepth > 0
+            ? LevelViewerPick.TryBuildDeepSelectAliasHierarchyPath(
+                target,
+                ownerCompositeId,
+                instancePath,
+                deepSelectDepth,
+                out ShortGuid[] hierarchy)
             : LevelViewerPick.TryBuildAliasHierarchyPath(target, ownerCompositeId, instancePath, out hierarchy);
         if (!builtHierarchy)
             return false;

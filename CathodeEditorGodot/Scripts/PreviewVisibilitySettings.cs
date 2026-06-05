@@ -13,7 +13,7 @@ public static class PreviewVisibilitySettings
     public enum DeepSelectModeKind
     {
         None,
-        /// <summary>LMB aliases the deepest entity in the direct child composite; Ctrl+MMB steps in one composite at a time.</summary>
+        /// <summary>LMB aliases one composite level deeper per click on the same target; Ctrl+MMB steps in one composite at a time.</summary>
         DeepSelect,
         /// <summary>LMB creates/selects aliases to the deepest picked entity; Ctrl+MMB drills the full hierarchy.</summary>
         AdvancedDeepSelect,

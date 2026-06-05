@@ -152,6 +152,11 @@ public partial class LevelViewerCamera : Camera3D
                     TryStepBackHierarchy();
                     GetViewport().SetInputAsHandled();
                 }
+                else if (keyEvent.Keycode == Key.Escape)
+                {
+                    TryClearEntitySelection();
+                    GetViewport().SetInputAsHandled();
+                }
                 else if (keyEvent.Keycode == Key.H)
                 {
                     if (keyEvent.ShiftPressed)
@@ -404,6 +409,14 @@ public partial class LevelViewerCamera : Camera3D
             _commandsEditorConnection = GetNodeOrNull<CommandsEditorConnection>(CommandsEditorConnectionPath);
 
         _commandsEditorConnection?.TryStepBackHierarchy();
+    }
+
+    private void TryClearEntitySelection()
+    {
+        if (_commandsEditorConnection == null || !GodotObject.IsInstanceValid(_commandsEditorConnection))
+            _commandsEditorConnection = GetNodeOrNull<CommandsEditorConnection>(CommandsEditorConnectionPath);
+
+        _commandsEditorConnection?.TryClearEntitySelection();
     }
 
     private void HandleMouseButtonReleased(InputEventMouseButton mouseButton)

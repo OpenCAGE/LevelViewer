@@ -726,6 +726,9 @@ public partial class CommandsEditorConnection : Node3D
         bool highlightChanged = PreviewVisibilitySettings.HighlightAliases != packet.highlight_aliases;
         PreviewVisibilitySettings.HighlightAliases = packet.highlight_aliases;
 
+        LevelViewerTransformSnap.GridSize = packet.transform_grid_snap > 0f ? packet.transform_grid_snap : 0f;
+        LevelViewerTransformSnap.RotationDegrees = packet.rotation_snap_degrees > 0f ? packet.rotation_snap_degrees : 0f;
+
         if (packet.model_reference_wireframe != ModelReferenceRenderSettings.WireframeEnabled)
             _scene.SetModelReferenceWireframe(packet.model_reference_wireframe);
 

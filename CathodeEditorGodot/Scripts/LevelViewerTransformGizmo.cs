@@ -312,8 +312,49 @@ public partial class LevelViewerTransformGizmo : Node3D
             }
         }
 
+        ApplyDragSnap();
+
         // Entity position parameters are parent-local — never sync GlobalPosition.
         OnTransformChanged?.Invoke(_target.Position, _target.RotationDegrees);
+    }
+
+    private void ApplyDragSnap()
+    {
+        if (_target == null || !GodotObject.IsInstanceValid(_target))
+            return;
+
+        float grid = LevelViewerTransformSnap.GridSize;
+        if (grid > 0f && _mode == GizmoMode.Translate)
+        {
+            Vector3 pos = _target.Position;
+            _target.Position = new Vector3(
+                LevelViewerTransformSnap.SnapValue(pos.X, grid),
+                LevelViewerTransformSnap.SnapValue(pos.Y, grid),
+                LevelViewerTransformSnap.SnapValue(pos.Z, grid));
+            GlobalPosition = _target.GlobalPosition;
+        }
+
+        float rotationStep = LevelViewerTransformSnap.RotationDegrees;
+        if (rotationStep > 0f && IsRotateMode)
+        {
+            Vector3 rot = _target.RotationDegrees;
+            switch (_dragAxis)
+            {
+                case DragAxis.RotX:
+                    rot.X = LevelViewerTransformSnap.SnapValue(rot.X, rotationStep);
+                    break;
+                case DragAxis.RotY:
+                    rot.Y = LevelViewerTransformSnap.SnapValue(rot.Y, rotationStep);
+                    break;
+                case DragAxis.RotZ:
+                    rot.Z = LevelViewerTransformSnap.SnapValue(rot.Z, rotationStep);
+                    break;
+            }
+
+            _target.RotationDegrees = rot;
+            if (_mode == GizmoMode.RotateLocal)
+                GlobalBasis = _target.GlobalBasis;
+        }
     }
 
     /// <summary>Intersect the mouse ray with the active drag plane through <see cref="_dragPivot"/>.</summary>
@@ -356,6 +397,7 @@ public partial class LevelViewerTransformGizmo : Node3D
         if (_target == null || !GodotObject.IsInstanceValid(_target))
             return;
 
+        ApplyDragSnap();
         OnTransformChanged?.Invoke(_target.Position, _target.RotationDegrees);
         OnDragCommitted?.Invoke(_target);
     }

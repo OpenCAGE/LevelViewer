@@ -74,6 +74,7 @@ public partial class CommandsEditorConnection : Node3D
         public SyncedParameter Sync;
         public bool FromPointer;
         public bool PointedOverride;
+        public Node3D VisualLimitNode;
     }
 
     private readonly Dictionary<ParameterSyncKey, PendingParameterSync> _pendingParameterSyncs = new Dictionary<ParameterSyncKey, PendingParameterSync>();
@@ -108,6 +109,7 @@ public partial class CommandsEditorConnection : Node3D
     private bool _suppressParameterResync;
     private bool _compositeFocusDirty;
     private bool _forceSelectionApply;
+    private readonly HashSet<uint> _viewerOriginatedEntityAdds = new HashSet<uint>();
 
     public override void _Ready()
     {
@@ -210,6 +212,7 @@ public partial class CommandsEditorConnection : Node3D
             GD.Print("Adding entity: " + _addedEntity.Item2.AsUInt32);
             _scene.AddEntity(_addedEntity.Item1, _addedEntity.Item2);
             _addedEntity = null;
+            _scene.RefreshAliasHighlights();
         }
 
         if (_removedEntity != null)
@@ -293,6 +296,16 @@ public partial class CommandsEditorConnection : Node3D
         {
             GD.PrintErr("Your Commands Editor is utilising a different API version than this Godot client!!\nPlease ensure both are up to date.");
             return;
+        }
+
+        // OpenCAGE echoes ENTITY_ADDED with its current (pre-selection) drill path, which would clear our selection.
+        if (packet.packet_event == PacketEvent.ENTITY_ADDED)
+        {
+            lock (_lock)
+            {
+                if (_viewerOriginatedEntityAdds.Remove(packet.entity))
+                    return;
+            }
         }
 
         if (packet.packet_event == PacketEvent.RENDER_FILTERS_CHANGED)
@@ -406,29 +419,35 @@ public partial class CommandsEditorConnection : Node3D
                     Composite composite = _scene.Content.Level?.Commands.Entries.FirstOrDefault(o => o.shortGUID.AsUInt32 == packet.composite);
                     if (composite != null)
                     {
-                        switch (packet.entity_variant)
+                        ShortGuid entityId = new ShortGuid(packet.entity);
+                        if (composite.GetEntityByID(entityId) == null)
                         {
-                            case EntityVariant.FUNCTION:
-                                composite.AddFunction(new FunctionEntity() { shortGUID = new ShortGuid(packet.entity), function = new ShortGuid(packet.entity_function) });
-                                break;
-                            case EntityVariant.VARIABLE:
-                                composite.AddVariable(new VariableEntity() { shortGUID = new ShortGuid(packet.entity) });
-                                break;
-                            case EntityVariant.ALIAS:
+                            switch (packet.entity_variant)
                             {
-                                EntityPath alias = new EntityPath() { path = new ShortGuid[packet.entity_pointed.Count] };
-                                for (int i = 0; i < packet.entity_pointed.Count; i++)
-                                    alias.path[i] = new ShortGuid(packet.entity_pointed[i]);
-                                composite.AddAlias(new AliasEntity() { shortGUID = new ShortGuid(packet.entity), alias = alias });
-                                break;
-                            }
-                            case EntityVariant.PROXY:
-                            {
-                                EntityPath proxy = new EntityPath() { path = new ShortGuid[packet.entity_pointed.Count] };
-                                for (int i = 0; i < packet.entity_pointed.Count; i++)
-                                    proxy.path[i] = new ShortGuid(packet.entity_pointed[i]);
-                                composite.AddProxy(new ProxyEntity() { shortGUID = new ShortGuid(packet.entity), proxy = proxy });
-                                break;
+                                case EntityVariant.FUNCTION:
+                                    composite.AddFunction(new FunctionEntity() { shortGUID = entityId, function = new ShortGuid(packet.entity_function) });
+                                    break;
+                                case EntityVariant.VARIABLE:
+                                    composite.AddVariable(new VariableEntity() { shortGUID = entityId });
+                                    break;
+                                case EntityVariant.ALIAS:
+                                {
+                                    EntityPath aliasPath = new EntityPath() { path = new ShortGuid[packet.entity_pointed.Count] };
+                                    for (int i = 0; i < packet.entity_pointed.Count; i++)
+                                        aliasPath.path[i] = new ShortGuid(packet.entity_pointed[i]);
+                                    AliasEntity aliasEntity = new AliasEntity() { shortGUID = entityId, alias = aliasPath };
+                                    composite.AddAlias(aliasEntity);
+                                    ApplyEntityAddedParameters(aliasEntity, packet);
+                                    break;
+                                }
+                                case EntityVariant.PROXY:
+                                {
+                                    EntityPath proxy = new EntityPath() { path = new ShortGuid[packet.entity_pointed.Count] };
+                                    for (int i = 0; i < packet.entity_pointed.Count; i++)
+                                        proxy.path[i] = new ShortGuid(packet.entity_pointed[i]);
+                                    composite.AddProxy(new ProxyEntity() { shortGUID = entityId, proxy = proxy });
+                                    break;
+                                }
                             }
                         }
                     }
@@ -559,6 +578,7 @@ public partial class CommandsEditorConnection : Node3D
             bool pointedOverride = false;
             ShortGuid visualCompositeID = compositeID;
             ShortGuid visualEntityID = entityID;
+            Node3D visualLimitNode = null;
 
             DataType syncDataType = ParameterSync.GetDataType(sync);
             if (syncDataType == DataType.TRANSFORM || syncDataType == DataType.RESOURCE)
@@ -570,6 +590,7 @@ public partial class CommandsEditorConnection : Node3D
                         break;
                     case EntityVariant.ALIAS:
                         HandlePointedEntity(sync, out visualEntityID, out visualCompositeID, ((AliasEntity)entity).alias, composite, out fromPointer, out pointedOverride);
+                        visualLimitNode = _scene.TryResolveAliasOverrideNode(packet.path_entities);
                         break;
                 }
             }
@@ -590,6 +611,7 @@ public partial class CommandsEditorConnection : Node3D
                 Sync = sync,
                 FromPointer = fromPointer,
                 PointedOverride = pointedOverride,
+                VisualLimitNode = visualLimitNode,
             };
         }
     }
@@ -619,8 +641,11 @@ public partial class CommandsEditorConnection : Node3D
                 pending.VisualCompositeID,
                 pending.VisualEntityID,
                 pending.FromPointer,
-                pending.PointedOverride);
+                pending.PointedOverride,
+                pending.VisualLimitNode);
         }
+
+        _scene.RefreshAliasHighlights();
     }
 
     private List<SyncedParameter> BuildLegacySyncedParameters(Packet packet, Entity entity)
@@ -870,7 +895,7 @@ public partial class CommandsEditorConnection : Node3D
         if (_scene == null || camera == null || !_scene.Content.Loaded)
             return;
 
-        if (!_scene.TryPickSelectionTarget(camera, screenPosition, out LevelViewerPick.SelectionTarget target))
+        if (!_scene.TryPickSelectionTarget(camera, screenPosition, out LevelViewerPick.SelectionTarget target, out _))
         {
             TryClearEntitySelection();
             return;
@@ -885,15 +910,18 @@ public partial class CommandsEditorConnection : Node3D
         List<uint> pathEntities;
         List<uint> pathComposites;
         bool entitySelected;
+        bool createdNewAlias = false;
 
         if (PreviewVisibilitySettings.DeepSelectMode)
         {
-            built = LevelViewerPick.TryBuildDeepSelectEntityPath(
+            built = TryPickDeepSelectViaAlias(
                 target,
+                activeCompositeId,
                 commands,
                 out pathEntities,
                 out pathComposites,
-                out entitySelected);
+                out createdNewAlias);
+            entitySelected = built;
         }
         else
         {
@@ -909,8 +937,13 @@ public partial class CommandsEditorConnection : Node3D
             return;
 
         ApplyLocalSelection(pathEntities, pathComposites, entitySelected);
-        SendSelectionToEditor(pathEntities, pathComposites, entitySelected);
         ApplySelectionNow();
+
+        // New alias: selection path is bundled into ENTITY_ADDED so OpenCAGE can add+select atomically.
+        if (createdNewAlias)
+            return;
+
+        SendSelectionToEditor(pathEntities, pathComposites, entitySelected);
     }
 
     public void TryPickDrillIntoCompositeAtScreen(Camera3D camera, Vector2 screenPosition)
@@ -1153,16 +1186,40 @@ public partial class CommandsEditorConnection : Node3D
             entitySelected = _entitySelected;
         }
 
-        if (!entitySelected || pathEntities == null || pathEntities.Count == 0)
+        if (!entitySelected || pathEntities == null || pathEntities.Count == 0 || pathComposites == null || pathComposites.Count == 0)
             return;
+
+        ShortGuid compositeId = new ShortGuid(pathComposites[pathComposites.Count - 1]);
+        ShortGuid entityId = new ShortGuid(pathEntities[pathEntities.Count - 1]);
 
         if (_scene != null)
         {
-            _scene.ApplyGizmoTransformToAllInstances(
-                new ShortGuid(pathComposites[pathComposites.Count - 1]),
-                new ShortGuid(pathEntities[pathEntities.Count - 1]),
-                godotPos,
-                godotRotDeg);
+            Composite composite = _scene.Content.Level.Commands.GetComposite(compositeId);
+            Entity entity = composite?.GetEntityByID(entityId);
+            if (entity?.variant == EntityVariant.ALIAS)
+            {
+                AliasEntity alias = (AliasEntity)entity;
+                SyncedParameter sync = BuildPositionSync(godotPos, godotRotDeg);
+                bool positionAdded = EnsureAliasPositionParameter(alias, sync);
+
+                EntityOverride aliasOverride = _scene.TryResolveAliasOverrideNode(pathEntities);
+                _scene.ApplyEntityParameter(
+                    compositeId,
+                    entityId,
+                    sync,
+                    compositeId,
+                    entityId,
+                    fromPointer: true,
+                    pointedOverride: true,
+                    aliasOverride);
+
+                if (positionAdded)
+                    _scene.RefreshAliasHighlights();
+            }
+            else
+            {
+                _scene.ApplyGizmoTransformToAllInstances(compositeId, entityId, godotPos, godotRotDeg);
+            }
         }
 
         SendEntityTransform(godotPos, godotRotDeg, pathEntities, pathComposites);
@@ -1216,5 +1273,133 @@ public partial class CommandsEditorConnection : Node3D
             // Re-enable after a short delay so echo packet is already suppressed
             Callable.From(() => { _suppressParameterResync = false; }).CallDeferred();
         }
+    }
+
+    private bool TryPickDeepSelectViaAlias(
+        LevelViewerPick.SelectionTarget target,
+        uint ownerCompositeId,
+        Commands commands,
+        out List<uint> pathEntities,
+        out List<uint> pathComposites,
+        out bool createdNewAlias)
+    {
+        pathEntities = null;
+        pathComposites = null;
+        createdNewAlias = false;
+
+        if (commands == null || ownerCompositeId == 0)
+            return false;
+
+        Composite ownerComposite = commands.GetComposite(new ShortGuid(ownerCompositeId));
+        if (ownerComposite == null)
+            return false;
+
+        uint[] instancePath = PreviewVisibilitySettings.ActiveInstanceEntityPath ?? Array.Empty<uint>();
+        if (!LevelViewerPick.TryBuildAliasHierarchyPath(target, ownerCompositeId, instancePath, out ShortGuid[] hierarchy))
+            return false;
+
+        if (!LevelViewerPick.TryFindAliasWithPath(ownerComposite, hierarchy, out AliasEntity alias))
+        {
+            ShortGuid aliasId = ShortGuidUtils.GenerateRandom();
+            alias = new AliasEntity(aliasId, hierarchy);
+            ownerComposite.AddAlias(alias);
+            _scene.AddEntity(ownerComposite.shortGUID, alias.shortGUID);
+            createdNewAlias = true;
+        }
+
+        if (!TryBuildAliasSelectionPath(ownerCompositeId, alias.shortGUID.AsUInt32, out pathEntities, out pathComposites))
+            return false;
+
+        if (createdNewAlias)
+            SendAliasEntityAdded(ownerComposite, alias, pathEntities, pathComposites);
+
+        return true;
+    }
+
+    private bool TryBuildAliasSelectionPath(uint ownerCompositeId, uint aliasEntityId, out List<uint> pathEntities, out List<uint> pathComposites)
+    {
+        pathEntities = new List<uint>();
+        pathComposites = new List<uint>();
+
+        lock (_lock)
+        {
+            uint[] instancePath = PreviewVisibilitySettings.ActiveInstanceEntityPath ?? Array.Empty<uint>();
+            for (int i = 0; i < instancePath.Length; i++)
+                pathEntities.Add(instancePath[i]);
+            pathEntities.Add(aliasEntityId);
+
+            if (instancePath.Length == 0)
+            {
+                pathComposites.Add(ownerCompositeId);
+                return true;
+            }
+
+            if (_pathComposites != null && _pathComposites.Count > 0)
+            {
+                for (int i = 0; i < pathEntities.Count; i++)
+                    pathComposites.Add(i < _pathComposites.Count ? _pathComposites[i] : ownerCompositeId);
+            }
+            else
+            {
+                for (int i = 0; i < pathEntities.Count; i++)
+                    pathComposites.Add(ownerCompositeId);
+            }
+        }
+
+        return pathEntities.Count > 0 && pathComposites.Count == pathEntities.Count;
+    }
+
+    private static bool EnsureAliasPositionParameter(AliasEntity alias, SyncedParameter sync)
+    {
+        if (alias == null || alias.GetParameter("position") != null || sync == null)
+            return false;
+
+        Vector3 cathodePos = new Vector3(sync.vector3_a[0], sync.vector3_a[1], sync.vector3_a[2]);
+        Vector3 cathodeRot = new Vector3(sync.vector3_b[0], sync.vector3_b[1], sync.vector3_b[2]);
+        alias.AddParameter("position", new cTransform(cathodePos, cathodeRot));
+        return true;
+    }
+
+    private void SendAliasEntityAdded(
+        Composite ownerComposite,
+        AliasEntity alias,
+        List<uint> pathEntities,
+        List<uint> pathComposites)
+    {
+        Packet packet = new Packet(PacketEvent.ENTITY_ADDED)
+        {
+            composite = ownerComposite.shortGUID.AsUInt32,
+            entity = alias.shortGUID.AsUInt32,
+            entity_variant = EntityVariant.ALIAS,
+            entity_pointed = alias.alias.pathUint,
+            path_entities = pathEntities ?? new List<uint>(),
+            path_composites = pathComposites ?? new List<uint>(),
+        };
+
+        _viewerOriginatedEntityAdds.Add(alias.shortGUID.AsUInt32);
+        SendMessage(packet);
+    }
+
+    private static SyncedParameter BuildPositionSync(Vector3 godotPos, Vector3 godotRotDeg)
+    {
+        Vector3 cathodePos = CathodeCoordinates.PositionFromGodot(godotPos);
+        Vector3 cathodeRot = CathodeCoordinates.EulerDegreesFromGodot(godotRotDeg);
+        return new SyncedParameter()
+        {
+            name = ShortGuidUtils.Generate("position").AsUInt32,
+            removed = false,
+            data_type = (uint)DataType.TRANSFORM,
+            vector3_a = new float[] { cathodePos.X, cathodePos.Y, cathodePos.Z },
+            vector3_b = new float[] { cathodeRot.X, cathodeRot.Y, cathodeRot.Z },
+        };
+    }
+
+    private void ApplyEntityAddedParameters(Entity entity, Packet packet)
+    {
+        if (entity == null || packet?.parameters == null || packet.parameters.Count == 0 || _scene?.Content == null)
+            return;
+
+        foreach (SyncedParameter sync in packet.parameters)
+            ParameterSync.ApplyToEntity(entity, sync, _scene.Content);
     }
 }

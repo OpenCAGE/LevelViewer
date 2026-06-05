@@ -201,6 +201,7 @@ public partial class AlienScene : Node3D
 	{
 		_selectedEntity = null;
 		LevelViewerSelection.Clear();
+		RefreshAliasHighlights();
 		_selectionHud?.Hide();
 		OnSelectionChanged?.Invoke(null);
 	}
@@ -558,7 +559,17 @@ public partial class AlienScene : Node3D
 
 	public bool TryPickSelectionTarget(Camera3D camera, Vector2 screenPosition, out LevelViewerPick.SelectionTarget target)
 	{
+		return TryPickSelectionTarget(camera, screenPosition, out target, out _);
+	}
+
+	public bool TryPickSelectionTarget(
+		Camera3D camera,
+		Vector2 screenPosition,
+		out LevelViewerPick.SelectionTarget target,
+		out Node3D hitEntityNode)
+	{
 		target = default;
+		hitEntityNode = null;
 		if (_parentNode == null || !GodotObject.IsInstanceValid(_parentNode) || camera == null)
 			return false;
 
@@ -567,7 +578,7 @@ public partial class AlienScene : Node3D
 		if (!hit.HasValue)
 			return false;
 
-		Node3D hitEntityNode = LevelViewerPick.ResolveNearestEntityNode(hit.Value.HitNode, _nodeEntities);
+		hitEntityNode = LevelViewerPick.ResolveNearestEntityNode(hit.Value.HitNode, _nodeEntities);
 		if (hitEntityNode == null)
 			return false;
 
@@ -582,6 +593,23 @@ public partial class AlienScene : Node3D
 		return true;
 	}
 
+	public bool TryGetEntitySceneNodes(ShortGuid compositeId, ShortGuid entityId, out List<Node3D> entityNodes)
+	{
+		return TryGetCachedEntityNodes(compositeId, entityId, out entityNodes);
+	}
+
+	public void RefreshAliasHighlights()
+	{
+		if (!_content.Loaded)
+		{
+			LevelViewerAliasHighlight.Clear();
+			return;
+		}
+
+		LevelViewerAliasHighlight.Refresh(this, _content.Level.Commands, PreviewVisibilitySettings.ActiveCompositeId);
+		LevelViewerSelection.ReapplyIfSelectionActive();
+	}
+
 	public void RefreshCompositeFocus()
 	{
 		if (_parentNode == null || !_content.Loaded)
@@ -591,7 +619,7 @@ public partial class AlienScene : Node3D
 		}
 
 		LevelViewerCompositeFocus.Refresh(_parentNode, _parentNode, _content.Level.Commands);
-		LevelViewerSelection.ReapplyIfSelectionActive();
+		RefreshAliasHighlights();
 	}
 
 	public void SelectEntity(List<uint> entityPath, List<uint> compositePath, bool entitySelected, bool focusSelected)
@@ -613,7 +641,9 @@ public partial class AlienScene : Node3D
 		}
 
 		_selectedEntity = entityNode;
+		LevelViewerAliasHighlight.ReleaseNode(entityNode);
 		LevelViewerSelection.Apply(entityNode);
+		RefreshAliasHighlights();
 
 		if (entityNode != null)
 			GD.Print("SelectEntity: " + string.Join("/", entityPath) + " -> " + entityNode.Name);
@@ -756,7 +786,23 @@ public partial class AlienScene : Node3D
 		return list;
 	}
 
-	public void ApplyEntityParameter(ShortGuid dataCompositeID, ShortGuid dataEntityID, SyncedParameter sync, ShortGuid visualCompositeID, ShortGuid visualEntityID, bool fromPointer, bool pointedOverride)
+	public EntityOverride TryResolveAliasOverrideNode(List<uint> entityPath)
+	{
+		if (entityPath == null || entityPath.Count == 0 || _parentNode == null)
+			return null;
+
+		return GetEntityNode(entityPath, _parentNode) as EntityOverride;
+	}
+
+	public void ApplyEntityParameter(
+		ShortGuid dataCompositeID,
+		ShortGuid dataEntityID,
+		SyncedParameter sync,
+		ShortGuid visualCompositeID,
+		ShortGuid visualEntityID,
+		bool fromPointer,
+		bool pointedOverride,
+		Node3D visualLimitNode = null)
 	{
 		if (sync == null)
 			return;
@@ -787,6 +833,29 @@ public partial class AlienScene : Node3D
 				if (renderables.Count > 0 && remapEntity != null)
 					_content.RemappedResources[remapEntity] = renderables;
 			}
+		}
+
+		if (visualLimitNode != null && GodotObject.IsInstanceValid(visualLimitNode))
+		{
+			if (!ShouldSyncVisualForOwnerComposite(dataCompositeID))
+				return;
+
+			ParameterVisualContext limitedContext = new ParameterVisualContext()
+			{
+				Composite = dataComposite,
+				Entity = dataEntity,
+				EntityNode = visualLimitNode,
+				Sync = sync,
+				FromPointer = fromPointer,
+				PointedOverride = pointedOverride,
+			};
+
+			if (_parameterVisualHandlers.TryGetValue(syncDataType, out ParameterVisualHandler limitedHandler))
+				limitedHandler(limitedContext);
+			else if (syncDataType != DataType.VECTOR && syncDataType != DataType.SPLINE && syncDataType != DataType.BOOL)
+				RefreshFunctionEntityPreviews(visualLimitNode);
+
+			return;
 		}
 
 		if (!ShouldSyncVisualForOwnerComposite(visualCompositeID))

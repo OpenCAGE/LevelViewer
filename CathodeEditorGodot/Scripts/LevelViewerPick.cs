@@ -529,6 +529,79 @@ public static class LevelViewerPick
 	}
 
 	/// <summary>
+	/// Builds an alias hierarchy path relative to <paramref name="ownerCompositeId"/>.
+	/// </summary>
+	public static bool TryBuildAliasHierarchyPath(
+		SelectionTarget target,
+		uint ownerCompositeId,
+		uint[] instanceEntityPath,
+		out ShortGuid[] hierarchy)
+	{
+		hierarchy = null;
+		if (ownerCompositeId == 0 || target.EntityIds == null || target.EntityIds.Count == 0)
+			return false;
+
+		int start;
+		if (instanceEntityPath != null && instanceEntityPath.Length > 0)
+		{
+			if (instanceEntityPath.Length > target.EntityIds.Count)
+				return false;
+
+			for (int i = 0; i < instanceEntityPath.Length; i++)
+			{
+				if (target.EntityIds[i] != instanceEntityPath[i])
+					return false;
+			}
+
+			start = instanceEntityPath.Length;
+		}
+		else
+		{
+			start = -1;
+			for (int i = 0; i < target.EntityIds.Count; i++)
+			{
+				if (target.CompositeIds[i] == ownerCompositeId)
+				{
+					start = i;
+					break;
+				}
+			}
+
+			if (start < 0)
+				return false;
+		}
+
+		int count = target.EntityIds.Count - start;
+		if (count <= 0)
+			return false;
+
+		hierarchy = new ShortGuid[count];
+		for (int i = 0; i < count; i++)
+			hierarchy[i] = new ShortGuid(target.EntityIds[start + i]);
+
+		return true;
+	}
+
+	public static bool TryFindAliasWithPath(Composite composite, ShortGuid[] hierarchy, out AliasEntity alias)
+	{
+		alias = null;
+		if (composite == null || hierarchy == null || hierarchy.Length == 0)
+			return false;
+
+		EntityPath desiredPath = new EntityPath(hierarchy);
+		foreach (AliasEntity candidate in composite.aliases)
+		{
+			if (candidate?.alias == desiredPath)
+			{
+				alias = candidate;
+				return true;
+			}
+		}
+
+		return false;
+	}
+
+	/// <summary>
 	/// Selects the deepest selectable entity on the full pick chain (deep-select LMB).
 	/// Falls back to drilling into the innermost composite instance when only composite instances remain on the chain.
 	/// </summary>

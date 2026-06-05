@@ -21,7 +21,8 @@ public partial class LevelViewerSelectionHud : CanvasLayer
 
 		_attached = true;
 		Layer = 100;
-		Name = "SelectionHud";
+		if (Name == null || Name.IsEmpty || Name == "LevelViewerSelectionHud")
+			Name = "SelectionHud";
 		host.AddChild(this);
 
 		_root = new Control
@@ -50,6 +51,14 @@ public partial class LevelViewerSelectionHud : CanvasLayer
 		_panel.CustomMinimumSize = new Vector2(200f, 0f);
 		_panel.Visible = false;
 		_root.AddChild(_panel);
+	}
+
+	public void SetPanelTopOffset(float topOffset, float bottomOffset)
+	{
+		if (_panel == null)
+			return;
+		_panel.OffsetTop = topOffset;
+		_panel.OffsetBottom = bottomOffset;
 	}
 
 	public void ShowEntity(string displayName)

@@ -14,6 +14,8 @@ public partial class AlienScene : Node3D
 	public const string OwnerCompositeMetaKey = "owner_composite";
 
 	public Action OnLoaded;
+	/// <summary>Fires when the selected entity changes. Argument is the new selected node (null when deselected).</summary>
+	public Action<Node3D> OnSelectionChanged;
 
 	private string _levelName = "";
 	public string LevelName => _levelName;
@@ -200,6 +202,7 @@ public partial class AlienScene : Node3D
 		_selectedEntity = null;
 		LevelViewerSelection.Clear();
 		_selectionHud?.Hide();
+		OnSelectionChanged?.Invoke(null);
 	}
 
 	private void ResetLevel()
@@ -615,6 +618,7 @@ public partial class AlienScene : Node3D
 			GD.Print("SelectEntity: " + string.Join("/", entityPath) + " -> " + entityNode.Name);
 
 		ShowEntitySelectionHud(entityPath, compositePath);
+		OnSelectionChanged?.Invoke(entityNode);
 
 		if (focusSelected && entityNode != null)
 			Callable.From(() => FocusSelectedEntity(entityNode)).CallDeferred();

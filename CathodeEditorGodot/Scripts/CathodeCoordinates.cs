@@ -39,6 +39,18 @@ public static class CathodeCoordinates
     }
 
     /// <summary>Reverses each triangle's winding (Godot 4.3 ArrayMesh has no SurfaceFlipFaces).</summary>
+    /// <summary>Convert a Godot position back to Cathode/Unity space (Z flip).</summary>
+    public static Vector3 PositionFromGodot(Vector3 position)
+    {
+        return new Vector3(position.X, position.Y, -position.Z);
+    }
+
+    /// <summary>Convert Godot euler degrees back to Cathode degrees.</summary>
+    public static Vector3 EulerDegreesFromGodot(Vector3 eulerDegrees)
+    {
+        return new Vector3(-eulerDegrees.X, -eulerDegrees.Y, eulerDegrees.Z);
+    }
+
     public static void FlipTriangleWinding(int[] indices)
     {
         if (indices == null)

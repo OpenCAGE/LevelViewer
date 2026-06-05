@@ -100,6 +100,12 @@ public partial class CommandsEditorConnection : Node3D
     private LevelViewerConnectionHud _connectionHud;
     /// <summary>Composite path depth last seen from OpenCAGE packets (detect editor navigating back).</summary>
     private int _syncedCompositePathDepth;
+
+    private LevelViewerTransformGizmo _transformGizmo;
+    public LevelViewerTransformGizmo TransformGizmo => _transformGizmo;
+
+    /// <summary>Block resync echo from our own outbound transform packets.</summary>
+    private bool _suppressParameterResync;
     private bool _compositeFocusDirty;
     private bool _forceSelectionApply;
 
@@ -107,8 +113,43 @@ public partial class CommandsEditorConnection : Node3D
     {
         _scene = GetNode<AlienScene>("../AlienScene");
         _connectionCts = new CancellationTokenSource();
+        if (_scene != null)
+            _scene.OnSelectionChanged += OnSceneSelectionChanged;
         Callable.From(EnsureConnectionHud).CallDeferred();
+        Callable.From(EnsureTransformGizmo).CallDeferred();
         _ = ReconnectLoopAsync(_connectionCts.Token);
+    }
+
+    public void EnsureTransformGizmo()
+    {
+        if (_transformGizmo != null && GodotObject.IsInstanceValid(_transformGizmo))
+            return;
+
+        _transformGizmo = new LevelViewerTransformGizmo();
+        _transformGizmo.Name = "TransformGizmo";
+        _transformGizmo.OnTransformChanged = OnGizmoTransformChanged;
+        GetTree().CurrentScene?.AddChild(_transformGizmo);
+    }
+
+    private Camera3D FindCamera()
+    {
+        // Node is named "Camera3D" in the main scene (see main.tscn).
+        return GetNodeOrNull<Camera3D>("../Camera3D")
+            ?? GetTree()?.Root?.FindChild("Camera3D", true, false) as Camera3D;
+    }
+
+    private void OnSceneSelectionChanged(Node3D selectedNode)
+    {
+        if (_transformGizmo == null || !GodotObject.IsInstanceValid(_transformGizmo))
+            EnsureTransformGizmo();
+
+        if (_transformGizmo == null)
+            return;
+
+        if (selectedNode != null && GodotObject.IsInstanceValid(selectedNode))
+            _transformGizmo.SetTarget(selectedNode, FindCamera());
+        else
+            _transformGizmo.ClearTarget();
     }
 
     public override void _ExitTree()
@@ -120,6 +161,9 @@ public partial class CommandsEditorConnection : Node3D
         if (_connectionHud != null && GodotObject.IsInstanceValid(_connectionHud))
             _connectionHud.QueueFree();
         _connectionHud = null;
+
+        if (_scene != null)
+            _scene.OnSelectionChanged -= OnSceneSelectionChanged;
 
         if (_scene == null)
             return;
@@ -458,6 +502,22 @@ public partial class CommandsEditorConnection : Node3D
     {
         if (_scene?.Content?.Level == null)
             return;
+
+        // Don't apply position echoes that were caused by our own gizmo drag.
+        if (_suppressParameterResync && packet.parameters?.Count > 0)
+        {
+            bool allPosition = true;
+            foreach (SyncedParameter p in packet.parameters)
+            {
+                if (ParameterSync.GetDataType(p) != DataType.TRANSFORM)
+                {
+                    allPosition = false;
+                    break;
+                }
+            }
+            if (allPosition)
+                return;
+        }
 
         ShortGuid entityID = new ShortGuid(packet.entity);
         ShortGuid compositeID = new ShortGuid(packet.composite);
@@ -994,5 +1054,76 @@ public partial class CommandsEditorConnection : Node3D
         packet.entity_variant = entity.variant;
         if (entity.variant == EntityVariant.FUNCTION)
             packet.entity_function = ((FunctionEntity)entity).function.AsUInt32;
+    }
+
+    // -------------------------------------------------------------------------
+    //  Transform gizmo outbound sync
+    // -------------------------------------------------------------------------
+
+    private void OnGizmoTransformChanged(Vector3 godotPos, Vector3 godotRotDeg)
+    {
+        List<uint> pathEntities;
+        List<uint> pathComposites;
+        bool entitySelected;
+        lock (_lock)
+        {
+            pathEntities   = _pathEntities;
+            pathComposites = _pathComposites;
+            entitySelected = _entitySelected;
+        }
+
+        if (!entitySelected || pathEntities == null || pathEntities.Count == 0)
+            return;
+
+        SendEntityTransform(godotPos, godotRotDeg, pathEntities, pathComposites);
+    }
+
+    /// <summary>
+    /// Send a position parameter update packet to OpenCAGE for the currently selected entity.
+    /// <paramref name="godotPos"/> and <paramref name="godotRotDeg"/> are in Godot world space.
+    /// </summary>
+    public void SendEntityTransform(Vector3 godotPos, Vector3 godotRotDeg,
+        List<uint> pathEntities, List<uint> pathComposites)
+    {
+        if (pathComposites == null || pathComposites.Count == 0 ||
+            pathEntities   == null || pathEntities.Count   == 0)
+            return;
+
+        // Convert Godot → Cathode space
+        Vector3 cathodePos = CathodeCoordinates.PositionFromGodot(godotPos);
+        Vector3 cathodeRot = CathodeCoordinates.EulerDegreesFromGodot(godotRotDeg);
+
+        uint positionName = ShortGuidUtils.Generate("position").AsUInt32;
+
+        SyncedParameter sync = new SyncedParameter()
+        {
+            name      = positionName,
+            removed   = false,
+            data_type = (uint)DataType.TRANSFORM,
+            vector3_a = new float[] { cathodePos.X, cathodePos.Y, cathodePos.Z },
+            vector3_b = new float[] { cathodeRot.X, cathodeRot.Y, cathodeRot.Z },
+        };
+
+        Packet packet = new Packet(PacketEvent.ENTITY_PARAMETER_MODIFIED)
+        {
+            path_entities   = pathEntities,
+            path_composites = pathComposites,
+            composite       = pathComposites[pathComposites.Count - 1],
+            entity          = pathEntities[pathEntities.Count - 1],
+            parameters      = new System.Collections.Generic.List<SyncedParameter>() { sync },
+        };
+
+        TryFillEntityMetadata(packet);
+
+        _suppressParameterResync = true;
+        try
+        {
+            SendMessage(packet);
+        }
+        finally
+        {
+            // Re-enable after a short delay so echo packet is already suppressed
+            Callable.From(() => { _suppressParameterResync = false; }).CallDeferred();
+        }
     }
 }

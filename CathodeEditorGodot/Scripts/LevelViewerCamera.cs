@@ -59,6 +59,8 @@ public partial class LevelViewerCamera : Camera3D
     private bool _mouseLookActive;
     private bool _panning;
 
+    private LevelViewerSelectionHud _gizmoModeHud;
+
     private CanvasLayer _hudLayer;
     private PanelContainer _speedPanel;
     private PanelContainer _positionPanel;
@@ -79,6 +81,7 @@ public partial class LevelViewerCamera : Camera3D
 
         SyncAnglesFromTransform();
         Callable.From(SetupHud).CallDeferred();
+        Callable.From(SetupGizmoModeHud).CallDeferred();
 
         _alienScene = GetNodeOrNull<AlienScene>(AlienScenePath);
         _commandsEditorConnection = GetNodeOrNull<CommandsEditorConnection>(CommandsEditorConnectionPath);
@@ -118,6 +121,21 @@ public partial class LevelViewerCamera : Camera3D
                     FocusSelectedEntity();
                     GetViewport().SetInputAsHandled();
                 }
+                else if (keyEvent.Keycode == Key.Key1)
+                {
+                    SetGizmoMode(LevelViewerTransformGizmo.GizmoMode.Translate);
+                    GetViewport().SetInputAsHandled();
+                }
+                else if (keyEvent.Keycode == Key.Key2)
+                {
+                    SetGizmoMode(LevelViewerTransformGizmo.GizmoMode.Rotate);
+                    GetViewport().SetInputAsHandled();
+                }
+                else if (keyEvent.Keycode == Key.Key3)
+                {
+                    SetGizmoMode(LevelViewerTransformGizmo.GizmoMode.None);
+                    GetViewport().SetInputAsHandled();
+                }
                 break;
             case InputEventMouseButton mouseButton when mouseButton.Pressed && !IsScrollWheelButton(mouseButton.ButtonIndex):
                 HandleMouseButtonPressed(mouseButton);
@@ -125,9 +143,8 @@ public partial class LevelViewerCamera : Camera3D
             case InputEventMouseButton mouseButtonReleased when !mouseButtonReleased.Pressed && !IsScrollWheelButton(mouseButtonReleased.ButtonIndex):
                 HandleMouseButtonReleased(mouseButtonReleased);
                 break;
-            case InputEventMouseMotion mouseMotion when _mouseLookActive || _panning:
-                HandleMouseMotion(mouseMotion);
-                GetViewport().SetInputAsHandled();
+            case InputEventMouseMotion mouseMotion:
+                HandleMouseMotionWithGizmo(mouseMotion);
                 break;
         }
     }
@@ -164,6 +181,7 @@ public partial class LevelViewerCamera : Camera3D
         else
             HidePositionHud();
         UpdateHudFade(deltaSeconds);
+        _gizmoModeHud?.UpdateFade(deltaSeconds);
     }
 
     /// <summary>Sync internal yaw/pitch after external framing (LookAt, etc.).</summary>
@@ -304,6 +322,12 @@ public partial class LevelViewerCamera : Camera3D
         switch (mouseButton.ButtonIndex)
         {
             case MouseButton.Left:
+                // Let the gizmo consume LMB before the pick/select logic.
+                if (TryGizmoMouseDown(mouseButton.Position))
+                {
+                    GetViewport().SetInputAsHandled();
+                    break;
+                }
                 TryPickSelect(mouseButton.Position);
                 GetViewport().SetInputAsHandled();
                 break;
@@ -330,6 +354,11 @@ public partial class LevelViewerCamera : Camera3D
 
     private void TryPickSelect(Vector2 screenPosition)
     {
+        // Gizmo handles always win over scene geometry at the same screen pixel.
+        LevelViewerTransformGizmo gizmo = GetGizmo();
+        if (gizmo != null && gizmo.HitsAtScreen(screenPosition))
+            return;
+
         if (_commandsEditorConnection == null || !GodotObject.IsInstanceValid(_commandsEditorConnection))
             _commandsEditorConnection = GetNodeOrNull<CommandsEditorConnection>(CommandsEditorConnectionPath);
 
@@ -348,6 +377,10 @@ public partial class LevelViewerCamera : Camera3D
     {
         switch (mouseButton.ButtonIndex)
         {
+            case MouseButton.Left:
+                if (TryGizmoMouseUp(mouseButton.Position))
+                    GetViewport().SetInputAsHandled();
+                break;
             case MouseButton.Right:
                 _mouseLookActive = false;
                 if (!_panning)
@@ -564,5 +597,107 @@ public partial class LevelViewerCamera : Camera3D
     {
         if (Input.MouseMode == Input.MouseModeEnum.Captured)
             Input.MouseMode = Input.MouseModeEnum.Visible;
+    }
+
+    // -------------------------------------------------------------------------
+    //  Transform gizmo integration
+    // -------------------------------------------------------------------------
+
+    private LevelViewerTransformGizmo GetGizmo()
+    {
+        if (_commandsEditorConnection == null || !GodotObject.IsInstanceValid(_commandsEditorConnection))
+            _commandsEditorConnection = GetNodeOrNull<CommandsEditorConnection>(CommandsEditorConnectionPath);
+
+        if (_commandsEditorConnection?.TransformGizmo == null)
+            _commandsEditorConnection?.EnsureTransformGizmo();
+
+        return _commandsEditorConnection?.TransformGizmo;
+    }
+
+    private void SetGizmoMode(LevelViewerTransformGizmo.GizmoMode mode)
+    {
+        LevelViewerTransformGizmo gizmo = GetGizmo();
+        if (gizmo == null)
+            return;
+
+        gizmo.SetMode(mode);
+
+        // Refresh gizmo target with current camera reference
+        if (_alienScene != null && _alienScene.TryGetSelectedEntity(out Node3D selected))
+            gizmo.SetTarget(selected, this);
+        else
+            gizmo.ClearTarget();
+
+        string label = mode switch
+        {
+            LevelViewerTransformGizmo.GizmoMode.Translate => "Translate",
+            LevelViewerTransformGizmo.GizmoMode.Rotate    => "Rotate",
+            _                                             => "None",
+        };
+
+        EnsureGizmoModeHud();
+        _gizmoModeHud?.ShowEntity(label);
+    }
+
+    private bool TryGizmoMouseDown(Vector2 pos)
+    {
+        LevelViewerTransformGizmo gizmo = GetGizmo();
+        if (gizmo == null || !gizmo.Visible)
+            return false;
+        return gizmo.HandleMouseButtonDown(pos);
+    }
+
+    private bool TryGizmoMouseUp(Vector2 pos)
+    {
+        LevelViewerTransformGizmo gizmo = GetGizmo();
+        if (gizmo == null)
+            return false;
+        return gizmo.HandleMouseButtonUp(pos);
+    }
+
+    private void HandleMouseMotionWithGizmo(InputEventMouseMotion motion)
+    {
+        // Always forward motion to the gizmo for hover highlighting (even when camera is not looking)
+        LevelViewerTransformGizmo gizmo = GetGizmo();
+        bool gizmoConsumed = false;
+        if (gizmo != null && gizmo.Visible)
+        {
+            gizmoConsumed = gizmo.HandleMouseMotion(motion.Position);
+        }
+
+        if (gizmoConsumed)
+        {
+            GetViewport().SetInputAsHandled();
+            return;
+        }
+
+        // Fall through to camera look / pan
+        if (_mouseLookActive || _panning)
+        {
+            HandleMouseMotion(motion);
+            GetViewport().SetInputAsHandled();
+        }
+    }
+
+    private void SetupGizmoModeHud()
+    {
+        if (_gizmoModeHud != null && GodotObject.IsInstanceValid(_gizmoModeHud))
+            return;
+
+        Node host = GetTree()?.CurrentScene ?? this;
+        if (host == null || !GodotObject.IsInstanceValid(host))
+            return;
+
+        _gizmoModeHud = new LevelViewerSelectionHud();
+        _gizmoModeHud.Name = "GizmoModeHud";
+        _gizmoModeHud.AttachTo(host);
+        // Position below the entity selection HUD (which sits at OffsetTop=12)
+        _gizmoModeHud.SetPanelTopOffset(58f, 120f);
+    }
+
+    private void EnsureGizmoModeHud()
+    {
+        if (_gizmoModeHud == null || !GodotObject.IsInstanceValid(_gizmoModeHud))
+            SetupGizmoModeHud();
     }
 }

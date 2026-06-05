@@ -413,6 +413,7 @@ public partial class AlienScene : Node3D
 
 		_contentOrigin = center;
 		_parentNode.Position = -_contentOrigin;
+		LevelViewerPick.InvalidateAllPickBounds();
 	}
 
 	private void AddCompositeInstance(Composite composite, Node3D compositeNode, Entity parentEntity)
@@ -1035,6 +1036,7 @@ public partial class AlienScene : Node3D
 			target.Position = position;
 			target.RotationDegrees = rotation;
 			EntityNodeUtil.SetPointed(target, false);
+			LevelViewerPick.InvalidatePickBounds(target);
 			return;
 		}
 
@@ -1047,6 +1049,9 @@ public partial class AlienScene : Node3D
 		{
 			target.Position = pos;
 			target.RotationDegrees = rot;
+			LevelViewerPick.InvalidatePickBounds(target);
+			if (context.EntityNode != null && context.EntityNode != target)
+				LevelViewerPick.InvalidatePickBounds(context.EntityNode);
 		}
 	}
 

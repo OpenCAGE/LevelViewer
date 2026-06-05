@@ -1,6 +1,4 @@
-using System;
 using System.Collections.Generic;
-using System.Text;
 using CATHODE;
 using CATHODE.ShaderTypes;
 using Godot;
@@ -22,8 +20,6 @@ public static class AlienSceneMaterials
 	private static Shader _wireframeShaderDoubleSided;
 	private static Shader _wireframeShaderTransparent;
 	private static Shader _wireframeShaderTransparentDoubleSided;
-
-	private static readonly HashSet<string> LoggedSignBackgroundMaterials = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
 	private static readonly string[] AlphaBlendFeatureNames =
 	{
@@ -83,166 +79,8 @@ public static class AlienSceneMaterials
 			RenderPriority = useAlpha ? TransparentRenderPriority : OpaqueRenderPriority,
 		};
 
-		LogSignBackgroundMaterialDiagnostics(material, shader, scene, diffuseSamplerIndex, diffuse, separateAlphaMap, useAlpha, doubleSided);
 		ApplyDiffuseParameters(godotMaterial, material, shader, useAlpha, diffuse, separateAlphaMap);
 		return new MaterialResult(godotMaterial, true);
-	}
-
-	private static void LogSignBackgroundMaterialDiagnostics(
-		Materials.Material material,
-		Shaders.Shader shader,
-		AlienScene scene,
-		int diffuseSamplerIndex,
-		Texture2D diffuse,
-		Texture2D separateAlphaMap,
-		bool useAlpha,
-		bool doubleSided)
-	{
-		string materialName = material?.Name;
-		if (string.IsNullOrEmpty(materialName) ||
-			materialName.IndexOf("SIGN_Background_B", StringComparison.OrdinalIgnoreCase) < 0)
-		{
-			return;
-		}
-
-		if (!LoggedSignBackgroundMaterials.Add(materialName))
-			return;
-
-		AlienSceneShaderParams.MaterialParams shaderParams = AlienSceneShaderParams.GetParams(shader.Ubershader);
-		Color diffuseTint = AlienSceneShaderParams.GetDiffuseTint(material, shader, shaderParams, useAlpha);
-		bool useSeparateAlpha = separateAlphaMap != null;
-
-		bool alphaFromLuminance = false;
-		if (useSeparateAlpha)
-			alphaFromLuminance = !AlienSceneTextures.HasTransparency(separateAlphaMap);
-		else if (useAlpha && diffuse != null && !AlienSceneTextures.HasTransparency(diffuse))
-			alphaFromLuminance = true;
-
-		StringBuilder enabledFeatures = new StringBuilder();
-		AppendEnabledFeature(enabledFeatures, shader, "USE_ALPHA_AS_BLENDFACTOR");
-		AppendEnabledFeature(enabledFeatures, shader, "FORCE_TO_ALPHA");
-		AppendEnabledFeature(enabledFeatures, shader, "GLASS");
-		AppendEnabledFeature(enabledFeatures, shader, "SEPARATE_ALPHA");
-		AppendEnabledFeature(enabledFeatures, shader, "SEPARATE_ALPHA_MAP_USE_GREEN_CHANNEL");
-		AppendEnabledFeature(enabledFeatures, shader, "ALPHA_TEST");
-		AppendEnabledFeature(enabledFeatures, shader, "FOG_ALPHA");
-		AppendEnabledFeature(enabledFeatures, shader, "VERTEX_ALPHA_OPACITY_ONLY");
-		AppendEnabledFeature(enabledFeatures, shader, "SECONDARY_DIFFUSE_MAPPING");
-		AppendEnabledFeature(enabledFeatures, shader, "DOUBLE_SIDED");
-
-		int separateAlphaSampler = GetSeparateAlphaSamplerIndex(shader);
-		int secondaryDiffuseSampler = GetSecondaryDiffuseSamplerIndex(shader);
-
-		GD.Print(
-			"[SIGN_Background_B material] " +
-			$"name=\"{materialName}\" ubershader={shader.Ubershader} doubleSided={doubleSided} " +
-			$"useAlpha={useAlpha} useAlphaBlend={HasAlphaBlendingEnabled(shader)} alphaTest={HasShaderFeature(shader, "ALPHA_TEST")} " +
-			$"diffuseHasTransparency={diffuse != null && AlienSceneTextures.HasTransparency(diffuse)} " +
-			$"separateHasTransparency={separateAlphaMap != null && AlienSceneTextures.HasTransparency(separateAlphaMap)} " +
-			$"useSeparateAlphaMap={useSeparateAlpha} alphaFromLuminance={alphaFromLuminance} alphaCutout={useAlpha && HasShaderFeature(shader, "ALPHA_TEST")} " +
-			$"diffuseTint=({diffuseTint.R:F3},{diffuseTint.G:F3},{diffuseTint.B:F3},{diffuseTint.A:F3}) " +
-			$"diffuseUvMult={AlienSceneShaderParams.GetUvScale(material, shader, shaderParams)} " +
-			$"separateAlphaUvMult={AlienSceneShaderParams.GetSeparateAlphaUvScale(material, shader)} " +
-			$"diffuseTexture=\"{diffuse?.ResourceName ?? "(null)"}\" separateAlphaTexture=\"{separateAlphaMap?.ResourceName ?? "(null)"}\" " +
-			$"enabledFeatures=[{enabledFeatures}]");
-
-		GD.Print($"[SIGN_Background_B material] sampler diffuseIndex={diffuseSamplerIndex} separateAlphaIndex={separateAlphaSampler} secondaryDiffuseIndex={secondaryDiffuseSampler}");
-		LogSamplerBinding(material, shader, scene, diffuseSamplerIndex, "DIFFUSE");
-		if (separateAlphaSampler >= 0)
-			LogSamplerBinding(material, shader, scene, separateAlphaSampler, "SEPARATE_ALPHA");
-		if (secondaryDiffuseSampler >= 0)
-			LogSamplerBinding(material, shader, scene, secondaryDiffuseSampler, "SECONDARY_DIFFUSE");
-
-		LogTextureReferenceSlots(material);
-	}
-
-	private static void AppendEnabledFeature(StringBuilder builder, Shaders.Shader shader, string featureName)
-	{
-		if (!HasShaderFeature(shader, featureName))
-			return;
-
-		if (builder.Length > 0)
-			builder.Append(", ");
-		builder.Append(featureName);
-	}
-
-	private static void LogSamplerBinding(
-		Materials.Material material,
-		Shaders.Shader shader,
-		AlienScene scene,
-		int samplerIndex,
-		string label)
-	{
-		if (samplerIndex < 0)
-		{
-			GD.Print($"[SIGN_Background_B material] {label}: sampler index unavailable for {shader.Ubershader}");
-			return;
-		}
-
-		if (shader.SamplerRemaps.Count <= samplerIndex)
-		{
-			GD.Print($"[SIGN_Background_B material] {label}: sampler={samplerIndex} remap=(out of range, remapCount={shader.SamplerRemaps.Count})");
-			return;
-		}
-
-		int textureSlot = shader.SamplerRemaps[samplerIndex];
-		if (textureSlot == 255)
-		{
-			GD.Print($"[SIGN_Background_B material] {label}: sampler={samplerIndex} remap=255 (unbound)");
-			return;
-		}
-
-		if (textureSlot >= material.TextureReferences.Count)
-		{
-			GD.Print($"[SIGN_Background_B material] {label}: sampler={samplerIndex} remap={textureSlot} (texture slot out of range, refCount={material.TextureReferences.Count})");
-			return;
-		}
-
-		TexturePtr texturePtr = material.TextureReferences[textureSlot];
-		string ptrSummary = DescribeTexturePtr(texturePtr);
-		string texPartSummary = DescribeTextureDataParts(texturePtr?.Texture);
-		Texture2D resolved = scene.GetSamplerTexture(material, shader, samplerIndex);
-		GD.Print(
-			$"[SIGN_Background_B material] {label}: sampler={samplerIndex} remap={textureSlot} ptr={ptrSummary} {texPartSummary} resolved=\"{resolved?.ResourceName ?? "(null)"}\"");
-	}
-
-	private static void LogTextureReferenceSlots(Materials.Material material)
-	{
-		StringBuilder slots = new StringBuilder();
-		for (int i = 0; i < material.TextureReferences.Count; i++)
-		{
-			if (i > 0)
-				slots.Append(" | ");
-			slots.Append($"[{i}]={DescribeTexturePtr(material.TextureReferences[i])}");
-		}
-
-		GD.Print($"[SIGN_Background_B material] textureSlots ({material.TextureReferences.Count}): {slots}");
-	}
-
-	private static string DescribeTexturePtr(TexturePtr texturePtr)
-	{
-		if (texturePtr == null)
-			return "null-ptr";
-		if (texturePtr.Location == TexturePtr.Source.NONE)
-			return "NONE";
-		if (texturePtr.Texture == null)
-			return $"{texturePtr.Location}/null-tex";
-
-		return $"{texturePtr.Location}/{texturePtr.Texture.Name}";
-	}
-
-	private static string DescribeTextureDataParts(Textures.TEX4 texture)
-	{
-		if (texture == null)
-			return "texParts=(no-tex4)";
-
-		int streamedBytes = texture.TextureStreamed?.Content?.Length ?? 0;
-		int persistentBytes = texture.TexturePersistent?.Content?.Length ?? 0;
-		Textures.TEX4.Texture chosen = AlienSceneTextures.GetTextureDataPart(texture);
-		string chosenLabel = chosen == texture.TextureStreamed ? "streamed"
-			: chosen == texture.TexturePersistent ? "persistent"
-			: "none";
-		return $"texParts(streamed={streamedBytes}b,persistent={persistentBytes}b,chosen={chosenLabel})";
 	}
 
 	public static ShaderMaterial CreateWireframeMaterial(

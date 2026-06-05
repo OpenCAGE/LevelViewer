@@ -12,8 +12,11 @@ public partial class LevelViewerTransformGizmo : Node3D
 {
     public enum GizmoMode { None, Translate, Rotate }
 
-    /// <summary>Fired when dragging moves/rotates the target. Args: world position, euler rotation degrees.</summary>
+    /// <summary>Fired when dragging moves/rotates the target. Args: local position, local euler rotation degrees.</summary>
     public Action<Vector3, Vector3> OnTransformChanged;
+
+    /// <summary>Fired once when a drag ends — use for pick-cache invalidation (not every mouse-move frame).</summary>
+    public Action<Node3D> OnDragCommitted;
 
     // ── visual constants ──────────────────────────────────────────────────────
     private const float GizmoScreenSize  = 0.10f;  // desired fraction of viewport height
@@ -97,6 +100,9 @@ public partial class LevelViewerTransformGizmo : Node3D
 
     public void SetTarget(Node3D target, Camera3D camera)
     {
+        if (_isDragging)
+            CommitDrag();
+
         _target  = target;
         _camera  = camera;
         _isDragging = false;
@@ -107,6 +113,9 @@ public partial class LevelViewerTransformGizmo : Node3D
 
     public void ClearTarget()
     {
+        if (_isDragging)
+            CommitDrag();
+
         _target = null;
         _isDragging = false;
         Visible = false;
@@ -291,7 +300,8 @@ public partial class LevelViewerTransformGizmo : Node3D
             SetGlobalQuaternion(_target, worldDelta * _dragStartGlobalQuat);
         }
 
-        OnTransformChanged?.Invoke(_target.GlobalPosition, _target.RotationDegrees);
+        // Entity position parameters are parent-local — never sync GlobalPosition.
+        OnTransformChanged?.Invoke(_target.Position, _target.RotationDegrees);
     }
 
     /// <summary>Intersect the mouse ray with the active drag plane through <see cref="_dragPivot"/>.</summary>
@@ -331,8 +341,11 @@ public partial class LevelViewerTransformGizmo : Node3D
 
     private void CommitDrag()
     {
-        if (_target != null && GodotObject.IsInstanceValid(_target))
-            OnTransformChanged?.Invoke(_target.GlobalPosition, _target.RotationDegrees);
+        if (_target == null || !GodotObject.IsInstanceValid(_target))
+            return;
+
+        OnTransformChanged?.Invoke(_target.Position, _target.RotationDegrees);
+        OnDragCommitted?.Invoke(_target);
     }
 
     // ─────────────────────────────────────────────────────────────────────────

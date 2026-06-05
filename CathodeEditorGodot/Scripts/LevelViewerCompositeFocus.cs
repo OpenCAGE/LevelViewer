@@ -21,7 +21,7 @@ public static class LevelViewerCompositeFocus
 	private static readonly HashSet<MeshInstance3D> _dimmedPickables = new();
 	private static readonly HashSet<uint> _compositesInScope = new();
 	private static uint _scopeCacheActiveCompositeId;
-	private static uint[] _scopeCacheInstancePath = Array.Empty<uint>();
+	private static uint[] _lastFocusInstancePath = Array.Empty<uint>();
 	private static Node3D _scopeAnchorNode;
 
 	public static bool HasActiveComposite => PreviewVisibilitySettings.ActiveCompositeId != 0;
@@ -32,23 +32,17 @@ public static class LevelViewerCompositeFocus
 		{
 			_compositesInScope.Clear();
 			_scopeCacheActiveCompositeId = 0;
-			_scopeCacheInstancePath = Array.Empty<uint>();
 			return;
 		}
 
 		uint activeId = PreviewVisibilitySettings.ActiveCompositeId;
-		uint[] instancePath = PreviewVisibilitySettings.ActiveInstanceEntityPath ?? Array.Empty<uint>();
 
-		if (_scopeCacheActiveCompositeId == activeId
-			&& PreviewVisibilitySettings.InstancePathsEqual(_scopeCacheInstancePath, instancePath)
-			&& _compositesInScope.Count > 0)
-		{
+		// Instance drill path only affects the anchor node, not which composites are in scope.
+		if (_scopeCacheActiveCompositeId == activeId && _compositesInScope.Count > 0)
 			return;
-		}
 
 		_compositesInScope.Clear();
 		_scopeCacheActiveCompositeId = activeId;
-		_scopeCacheInstancePath = (uint[])instancePath.Clone();
 		_compositesInScope.Add(activeId);
 
 		Composite active = commands.GetComposite(new ShortGuid(activeId));
@@ -104,10 +98,34 @@ public static class LevelViewerCompositeFocus
 		if (!HasActiveComposite || node == null || commands == null)
 			return true;
 
+		if (node is Node3D entityNode && entityNode.HasMeta(AlienScene.OwnerCompositeMetaKey))
+			return IsPickOwnerInScope(entityNode, commands);
+
 		uint ownerCompositeId = ResolveOwnerCompositeId(node, contentRoot);
 		if (!IsOwnerCompositeInScope(ownerCompositeId, commands))
 			return false;
 
+		return IsUnderScopeAnchor(node);
+	}
+
+	/// <summary>Scope test for a registered pick owner (entity node).</summary>
+	public static bool IsPickOwnerInScope(Node3D owner, Commands commands)
+	{
+		if (!HasActiveComposite || owner == null || commands == null)
+			return true;
+
+		if (owner.HasMeta(AlienScene.OwnerCompositeMetaKey))
+		{
+			uint ownerCompositeId = owner.GetMeta(AlienScene.OwnerCompositeMetaKey).AsUInt32();
+			if (!IsOwnerCompositeInScope(ownerCompositeId, commands))
+				return false;
+		}
+
+		return IsUnderScopeAnchor(owner);
+	}
+
+	private static bool IsUnderScopeAnchor(Node node)
+	{
 		uint[] instancePath = PreviewVisibilitySettings.ActiveInstanceEntityPath ?? Array.Empty<uint>();
 		if (instancePath.Length == 0)
 			return true;
@@ -129,15 +147,16 @@ public static class LevelViewerCompositeFocus
 		uint activeId = PreviewVisibilitySettings.ActiveCompositeId;
 		uint[] instancePath = PreviewVisibilitySettings.ActiveInstanceEntityPath ?? Array.Empty<uint>();
 		if (_scopeCacheActiveCompositeId != activeId
-			|| !PreviewVisibilitySettings.InstancePathsEqual(_scopeCacheInstancePath, instancePath))
+			|| !PreviewVisibilitySettings.InstancePathsEqual(_lastFocusInstancePath, instancePath))
 		{
 			_meshDimmedState.Clear();
 		}
 
 		RebuildScopeCache(commands);
 		_scopeAnchorNode = ResolveScopeAnchorNode(contentRoot, instancePath);
+		_lastFocusInstancePath = (uint[])instancePath.Clone();
 		LevelViewerPick.InvalidateScopedPickables();
-		ApplyRecursive(sceneRoot, contentRoot, commands);
+		ApplyFocusFromPickRegistry(commands);
 	}
 
 	public static void Clear()
@@ -145,7 +164,7 @@ public static class LevelViewerCompositeFocus
 		RestoreAllDimmedMeshes();
 		_compositesInScope.Clear();
 		_scopeCacheActiveCompositeId = 0;
-		_scopeCacheInstancePath = Array.Empty<uint>();
+		_lastFocusInstancePath = Array.Empty<uint>();
 		_scopeAnchorNode = null;
 		_meshDimmedState.Clear();
 		_dimmedPickables.Clear();
@@ -171,24 +190,27 @@ public static class LevelViewerCompositeFocus
 		_savedMaterialOverrides.Clear();
 	}
 
-	private static void ApplyRecursive(Node node, Node contentRoot, Commands commands)
+	private static void ApplyFocusFromPickRegistry(Commands commands)
 	{
-		if (node is MeshInstance3D meshInstance && GodotObject.IsInstanceValid(meshInstance))
+		LevelViewerPick.ForEachPickOwner((owner, meshes) =>
 		{
-			if (!node.IsInGroup(WireframeOverlayGroup))
-				ApplyMeshFocus(meshInstance, contentRoot, commands);
-		}
+			if (LevelViewerSelection.IsUnderSelection(owner))
+				return;
 
-		foreach (Node child in node.GetChildren())
-			ApplyRecursive(child, contentRoot, commands);
+			bool shouldDim = !IsPickOwnerInScope(owner, commands);
+			for (int i = 0; i < meshes.Count; i++)
+			{
+				MeshInstance3D mesh = meshes[i];
+				if (mesh == null || !GodotObject.IsInstanceValid(mesh) || mesh.IsInGroup(WireframeOverlayGroup))
+					continue;
+
+				ApplyMeshFocusState(mesh, shouldDim);
+			}
+		});
 	}
 
-	private static void ApplyMeshFocus(MeshInstance3D mesh, Node contentRoot, Commands commands)
+	private static void ApplyMeshFocusState(MeshInstance3D mesh, bool shouldDim)
 	{
-		if (LevelViewerSelection.IsUnderSelection(mesh))
-			return;
-
-		bool shouldDim = !IsNodeInScope(mesh, contentRoot, commands);
 		if (_meshDimmedState.TryGetValue(mesh, out bool wasDimmed) && wasDimmed == shouldDim)
 			return;
 

@@ -128,6 +128,7 @@ public partial class CommandsEditorConnection : Node3D
         _transformGizmo = new LevelViewerTransformGizmo();
         _transformGizmo.Name = "TransformGizmo";
         _transformGizmo.OnTransformChanged = OnGizmoTransformChanged;
+        _transformGizmo.OnDragCommitted = OnGizmoDragCommitted;
         GetTree().CurrentScene?.AddChild(_transformGizmo);
     }
 
@@ -1060,6 +1061,12 @@ public partial class CommandsEditorConnection : Node3D
     //  Transform gizmo outbound sync
     // -------------------------------------------------------------------------
 
+    private void OnGizmoDragCommitted(Node3D target)
+    {
+        if (target != null && GodotObject.IsInstanceValid(target))
+            LevelViewerPick.InvalidatePickBounds(target);
+    }
+
     private void OnGizmoTransformChanged(Vector3 godotPos, Vector3 godotRotDeg)
     {
         List<uint> pathEntities;
@@ -1080,7 +1087,8 @@ public partial class CommandsEditorConnection : Node3D
 
     /// <summary>
     /// Send a position parameter update packet to OpenCAGE for the currently selected entity.
-    /// <paramref name="godotPos"/> and <paramref name="godotRotDeg"/> are in Godot world space.
+    /// <paramref name="godotPos"/> and <paramref name="godotRotDeg"/> are in Godot parent-local space
+    /// (matches the entity position parameter, not GlobalPosition).
     /// </summary>
     public void SendEntityTransform(Vector3 godotPos, Vector3 godotRotDeg,
         List<uint> pathEntities, List<uint> pathComposites)

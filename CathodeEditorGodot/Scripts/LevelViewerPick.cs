@@ -68,6 +68,70 @@ public static class LevelViewerPick
 		_scopedPickablesDirty = true;
 	}
 
+	/// <summary>Iterate registered pick owners (one scope/dim decision per entity, not per mesh).</summary>
+	public static void ForEachPickOwner(System.Action<Node3D, IReadOnlyList<MeshInstance3D>> action)
+	{
+		if (action == null)
+			return;
+
+		foreach (KeyValuePair<Node3D, List<MeshInstance3D>> entry in _pickablesByOwner)
+		{
+			Node3D owner = entry.Key;
+			if (owner == null || !GodotObject.IsInstanceValid(owner))
+				continue;
+
+			List<MeshInstance3D> meshes = entry.Value;
+			if (meshes == null || meshes.Count == 0)
+				continue;
+
+			action(owner, meshes);
+		}
+	}
+
+	/// <summary>Clear every cached owner AABB (e.g. after shifting the level content root).</summary>
+	public static void InvalidateAllPickBounds()
+	{
+		_ownerGlobalBounds.Clear();
+	}
+
+	/// <summary>
+	/// Drop cached broad-phase AABBs for pick owners whose meshes moved with <paramref name="node"/>.
+	/// </summary>
+	public static void InvalidatePickBounds(Node3D node)
+	{
+		if (node == null || !GodotObject.IsInstanceValid(node))
+			return;
+
+		foreach (KeyValuePair<Node3D, List<MeshInstance3D>> entry in _pickablesByOwner)
+		{
+			Node3D owner = entry.Key;
+			if (owner == null || !GodotObject.IsInstanceValid(owner))
+				continue;
+
+			if (owner == node || owner.IsAncestorOf(node))
+			{
+				_ownerGlobalBounds.Remove(owner);
+				continue;
+			}
+
+			// Model-ref / alias: meshes live under a pointed target outside the alias branch.
+			List<MeshInstance3D> meshes = entry.Value;
+			if (meshes == null)
+				continue;
+
+			for (int i = 0; i < meshes.Count; i++)
+			{
+				MeshInstance3D mesh = meshes[i];
+				if (mesh != null && GodotObject.IsInstanceValid(mesh)
+					&& (node == mesh || node.IsAncestorOf(mesh)))
+				{
+					_ownerGlobalBounds.Remove(owner);
+					break;
+				}
+			}
+		}
+	}
+
 	public static void RegisterPickableSubtree(Node3D ownerEntityNode)
 	{
 		if (ownerEntityNode == null)
@@ -146,11 +210,7 @@ public static class LevelViewerPick
 			if (meshes == null || meshes.Count == 0)
 				continue;
 
-			MeshInstance3D probe = meshes[0];
-			if (probe == null || !GodotObject.IsInstanceValid(probe))
-				continue;
-
-			if (!LevelViewerCompositeFocus.IsNodeInScope(probe, contentRoot, commands))
+			if (!LevelViewerCompositeFocus.IsPickOwnerInScope(owner, commands))
 				continue;
 
 			_scopedPickOwners.Add(owner);

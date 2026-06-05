@@ -728,20 +728,32 @@ public partial class LevelViewerCamera : Camera3D
 
     private void ToggleDeepSelectMode()
     {
-        PreviewVisibilitySettings.DeepSelectMode = !PreviewVisibilitySettings.DeepSelectMode;
+        PreviewVisibilitySettings.DeepSelectMode = PreviewVisibilitySettings.DeepSelectMode switch
+        {
+            PreviewVisibilitySettings.DeepSelectModeKind.None => PreviewVisibilitySettings.DeepSelectModeKind.DeepSelect,
+            PreviewVisibilitySettings.DeepSelectModeKind.DeepSelect => PreviewVisibilitySettings.DeepSelectModeKind.AdvancedDeepSelect,
+            _ => PreviewVisibilitySettings.DeepSelectModeKind.None,
+        };
         UpdateDeepSelectHud();
     }
 
     private void UpdateDeepSelectHud()
     {
-        if (!PreviewVisibilitySettings.DeepSelectMode)
+        string label = PreviewVisibilitySettings.DeepSelectMode switch
+        {
+            PreviewVisibilitySettings.DeepSelectModeKind.DeepSelect => "DEEP SELECT",
+            PreviewVisibilitySettings.DeepSelectModeKind.AdvancedDeepSelect => "ADVANCED DEEP SELECT",
+            _ => null,
+        };
+
+        if (label == null)
         {
             _deepSelectHud?.Hide();
             return;
         }
 
         EnsureDeepSelectHud();
-        _deepSelectHud?.ShowPersistent("DEEP SELECT", new Color(0.95f, 0.22f, 0.22f));
+        _deepSelectHud?.ShowPersistent(label, new Color(0.95f, 0.22f, 0.22f));
     }
 
     private void SetupDeepSelectHud()

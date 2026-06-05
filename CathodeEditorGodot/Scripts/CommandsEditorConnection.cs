@@ -912,25 +912,38 @@ public partial class CommandsEditorConnection : Node3D
         bool entitySelected;
         bool createdNewAlias = false;
 
-        if (PreviewVisibilitySettings.DeepSelectMode)
+        switch (PreviewVisibilitySettings.DeepSelectMode)
         {
-            built = TryPickDeepSelectViaAlias(
-                target,
-                activeCompositeId,
-                commands,
-                out pathEntities,
-                out pathComposites,
-                out createdNewAlias);
-            entitySelected = built;
-        }
-        else
-        {
-            built = LevelViewerPick.TryBuildActiveCompositeSelectionPath(
-                target,
-                activeCompositeId,
-                out pathEntities,
-                out pathComposites);
-            entitySelected = true;
+            case PreviewVisibilitySettings.DeepSelectModeKind.AdvancedDeepSelect:
+                built = TryPickDeepSelectViaAlias(
+                    target,
+                    activeCompositeId,
+                    commands,
+                    limitToDirectChildComposite: false,
+                    out pathEntities,
+                    out pathComposites,
+                    out createdNewAlias);
+                entitySelected = built;
+                break;
+            case PreviewVisibilitySettings.DeepSelectModeKind.DeepSelect:
+                built = TryPickDeepSelectViaAlias(
+                    target,
+                    activeCompositeId,
+                    commands,
+                    limitToDirectChildComposite: true,
+                    out pathEntities,
+                    out pathComposites,
+                    out createdNewAlias);
+                entitySelected = built;
+                break;
+            default:
+                built = LevelViewerPick.TryBuildActiveCompositeSelectionPath(
+                    target,
+                    activeCompositeId,
+                    out pathEntities,
+                    out pathComposites);
+                entitySelected = true;
+                break;
         }
 
         if (!built)
@@ -963,7 +976,7 @@ public partial class CommandsEditorConnection : Node3D
         List<uint> pathEntities;
         List<uint> pathComposites;
 
-        if (PreviewVisibilitySettings.DeepSelectMode)
+        if (PreviewVisibilitySettings.DeepSelectMode == PreviewVisibilitySettings.DeepSelectModeKind.AdvancedDeepSelect)
         {
             built = LevelViewerPick.TryBuildDeepDrillPath(
                 target,
@@ -1279,6 +1292,7 @@ public partial class CommandsEditorConnection : Node3D
         LevelViewerPick.SelectionTarget target,
         uint ownerCompositeId,
         Commands commands,
+        bool limitToDirectChildComposite,
         out List<uint> pathEntities,
         out List<uint> pathComposites,
         out bool createdNewAlias)
@@ -1295,7 +1309,10 @@ public partial class CommandsEditorConnection : Node3D
             return false;
 
         uint[] instancePath = PreviewVisibilitySettings.ActiveInstanceEntityPath ?? Array.Empty<uint>();
-        if (!LevelViewerPick.TryBuildAliasHierarchyPath(target, ownerCompositeId, instancePath, out ShortGuid[] hierarchy))
+        bool builtHierarchy = limitToDirectChildComposite
+            ? LevelViewerPick.TryBuildOneLevelDownAliasHierarchyPath(target, ownerCompositeId, instancePath, out ShortGuid[] hierarchy)
+            : LevelViewerPick.TryBuildAliasHierarchyPath(target, ownerCompositeId, instancePath, out hierarchy);
+        if (!builtHierarchy)
             return false;
 
         if (!LevelViewerPick.TryFindAliasWithPath(ownerComposite, hierarchy, out AliasEntity alias))

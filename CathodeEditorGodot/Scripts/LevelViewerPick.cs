@@ -529,6 +529,54 @@ public static class LevelViewerPick
 	}
 
 	/// <summary>
+	/// Alias hierarchy for deep select: deepest entity in the direct child composite of the active view (not deeper).
+	/// </summary>
+	public static bool TryBuildOneLevelDownAliasHierarchyPath(
+		SelectionTarget target,
+		uint activeCompositeId,
+		uint[] instanceEntityPath,
+		out ShortGuid[] hierarchy)
+	{
+		hierarchy = null;
+		if (!TryGetAliasHierarchyStartIndex(target, activeCompositeId, instanceEntityPath, out int start))
+			return false;
+
+		int firstInChild = -1;
+		uint childCompositeId = 0;
+		for (int i = start; i < target.EntityIds.Count; i++)
+		{
+			if (target.CompositeIds[i] == activeCompositeId)
+				continue;
+
+			firstInChild = i;
+			childCompositeId = target.CompositeIds[i];
+			break;
+		}
+
+		if (firstInChild < 0)
+			return false;
+
+		int deepestInChild = firstInChild;
+		for (int i = firstInChild + 1; i < target.EntityIds.Count; i++)
+		{
+			if (target.CompositeIds[i] != childCompositeId)
+				break;
+
+			deepestInChild = i;
+		}
+
+		int count = deepestInChild - start + 1;
+		if (count <= 0)
+			return false;
+
+		hierarchy = new ShortGuid[count];
+		for (int i = 0; i < count; i++)
+			hierarchy[i] = new ShortGuid(target.EntityIds[start + i]);
+
+		return true;
+	}
+
+	/// <summary>
 	/// Builds an alias hierarchy path relative to <paramref name="ownerCompositeId"/>.
 	/// </summary>
 	public static bool TryBuildAliasHierarchyPath(
@@ -538,10 +586,30 @@ public static class LevelViewerPick
 		out ShortGuid[] hierarchy)
 	{
 		hierarchy = null;
+		if (!TryGetAliasHierarchyStartIndex(target, ownerCompositeId, instanceEntityPath, out int start))
+			return false;
+
+		int count = target.EntityIds.Count - start;
+		if (count <= 0)
+			return false;
+
+		hierarchy = new ShortGuid[count];
+		for (int i = 0; i < count; i++)
+			hierarchy[i] = new ShortGuid(target.EntityIds[start + i]);
+
+		return true;
+	}
+
+	private static bool TryGetAliasHierarchyStartIndex(
+		SelectionTarget target,
+		uint ownerCompositeId,
+		uint[] instanceEntityPath,
+		out int start)
+	{
+		start = -1;
 		if (ownerCompositeId == 0 || target.EntityIds == null || target.EntityIds.Count == 0)
 			return false;
 
-		int start;
 		if (instanceEntityPath != null && instanceEntityPath.Length > 0)
 		{
 			if (instanceEntityPath.Length > target.EntityIds.Count)
@@ -557,7 +625,6 @@ public static class LevelViewerPick
 		}
 		else
 		{
-			start = -1;
 			for (int i = 0; i < target.EntityIds.Count; i++)
 			{
 				if (target.CompositeIds[i] == ownerCompositeId)
@@ -571,15 +638,7 @@ public static class LevelViewerPick
 				return false;
 		}
 
-		int count = target.EntityIds.Count - start;
-		if (count <= 0)
-			return false;
-
-		hierarchy = new ShortGuid[count];
-		for (int i = 0; i < count; i++)
-			hierarchy[i] = new ShortGuid(target.EntityIds[start + i]);
-
-		return true;
+		return start >= 0 && start < target.EntityIds.Count;
 	}
 
 	public static bool TryFindAliasWithPath(Composite composite, ShortGuid[] hierarchy, out AliasEntity alias)

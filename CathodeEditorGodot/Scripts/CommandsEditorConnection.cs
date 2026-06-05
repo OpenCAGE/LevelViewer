@@ -20,6 +20,7 @@ public partial class CommandsEditorConnection : Node3D
     private CancellationTokenSource _connectionCts;
 
     private readonly object _lock = new object();
+    private readonly SemaphoreSlim _sendLock = new SemaphoreSlim(1, 1);
 
     private string _levelName = "";
     private string _pathToAI = "";
@@ -116,6 +117,10 @@ public partial class CommandsEditorConnection : Node3D
     private uint[] _progressiveDeepSelectInstancePath = System.Array.Empty<uint>();
     private List<uint> _progressiveDeepSelectEntityIds;
     private List<uint> _progressiveDeepSelectCompositeIds;
+    private uint _ephemeralDeepSelectAliasCompositeId;
+    private uint _ephemeralDeepSelectAliasEntityId;
+    private uint _pendingEphemeralDeepSelectDeleteCompositeId;
+    private uint _pendingEphemeralDeepSelectDeleteEntityId;
 
     public override void _Ready()
     {
@@ -398,7 +403,11 @@ public partial class CommandsEditorConnection : Node3D
             }
 
             if (selectionChanged)
+            {
+                TryRemoveEphemeralDeepSelectAliasIfAbandoned(_currentEntity, _currentComposite);
+                TrySendPendingEphemeralDeepSelectAliasDelete(null, null, false);
                 _forceSelectionApply = true;
+            }
 
             bool nestedVisibilityOnly = !hideNestedChanged
                 && activeCompositeChanged
@@ -472,23 +481,25 @@ public partial class CommandsEditorConnection : Node3D
                     Composite composite = _scene.Content.Level?.Commands.Entries.FirstOrDefault(o => o.shortGUID.AsUInt32 == packet.composite);
                     if (composite != null)
                     {
+                        ShortGuid entityId = new ShortGuid(packet.entity);
                         switch (packet.entity_variant)
                         {
                             case EntityVariant.FUNCTION:
-                                composite.functions.RemoveAll(o => o.shortGUID == new ShortGuid(packet.entity));
+                                composite.RemoveFunction(entityId);
                                 break;
                             case EntityVariant.ALIAS:
-                                composite.aliases.RemoveAll(o => o.shortGUID == new ShortGuid(packet.entity));
+                                composite.RemoveAlias(entityId);
                                 break;
                             case EntityVariant.VARIABLE:
-                                composite.variables.RemoveAll(o => o.shortGUID == new ShortGuid(packet.entity));
+                                composite.RemoveVariable(entityId);
                                 break;
                             case EntityVariant.PROXY:
-                                composite.proxies.RemoveAll(o => o.shortGUID == new ShortGuid(packet.entity));
+                                composite.RemoveProxy(entityId);
                                 break;
                         }
                     }
 
+                    ClearEphemeralDeepSelectAliasTrackingIfMatch(packet.composite, packet.entity);
                     _removedEntity = new Tuple<ShortGuid, ShortGuid>(new ShortGuid(packet.composite), new ShortGuid(packet.entity));
                 }
                 break;
@@ -652,6 +663,11 @@ public partial class CommandsEditorConnection : Node3D
                 pending.FromPointer,
                 pending.PointedOverride,
                 pending.VisualLimitNode);
+
+            if (!pending.Sync.removed)
+                TryCommitEphemeralDeepSelectAliasAfterParameterSync(
+                    pending.DataCompositeID.AsUInt32,
+                    pending.DataEntityID.AsUInt32);
         }
 
         _scene.RefreshAliasHighlights();
@@ -893,19 +909,71 @@ public partial class CommandsEditorConnection : Node3D
 
     public async void SendMessage(Packet content)
     {
+        await SendMessageAsync(content);
+    }
+
+    private async Task SendMessageAsync(Packet content)
+    {
         if (_client == null || _client.State != WebSocketState.Open)
             return;
 
-        string json = JsonConvert.SerializeObject(content);
-        byte[] bytes = Encoding.UTF8.GetBytes(json);
+        await _sendLock.WaitAsync(_connectionCts.Token);
         try
         {
-            await _client.SendAsync(new ArraySegment<byte>(bytes), WebSocketMessageType.Text, true, _connectionCts.Token);
+            if (_client == null || _client.State != WebSocketState.Open)
+                return;
+
+            string json = JsonConvert.SerializeObject(content);
+            byte[] bytes = Encoding.UTF8.GetBytes(json);
+            try
+            {
+                await _client.SendAsync(new ArraySegment<byte>(bytes), WebSocketMessageType.Text, true, _connectionCts.Token);
+            }
+            catch (Exception ex)
+            {
+                GD.PrintErr("Failed to send websocket message: " + ex.Message);
+            }
         }
-        catch (Exception ex)
+        finally
         {
-            GD.PrintErr("Failed to send websocket message: " + ex.Message);
+            _sendLock.Release();
         }
+    }
+
+    private async Task SendNewAliasToEditorAsync(
+        Composite ownerComposite,
+        AliasEntity alias,
+        List<uint> pathEntities,
+        List<uint> pathComposites,
+        bool entitySelected)
+    {
+        Packet addPacket = BuildAliasEntityAddedPacket(ownerComposite, alias, pathEntities, pathComposites);
+        _viewerOriginatedEntityAdds.Add(alias.shortGUID.AsUInt32);
+        await SendMessageAsync(addPacket);
+
+        if (entitySelected)
+        {
+            Packet selectPacket = BuildSelectionPacket(pathEntities, pathComposites, entitySelected);
+            TryFillEntityMetadata(selectPacket);
+            await SendMessageAsync(selectPacket);
+        }
+    }
+
+    private static Packet BuildSelectionPacket(List<uint> pathEntities, List<uint> pathComposites, bool entitySelected)
+    {
+        Packet packet = new Packet(PacketEvent.ENTITY_SELECTED)
+        {
+            path_entities = pathEntities ?? new List<uint>(),
+            path_composites = pathComposites ?? new List<uint>(),
+            composite = pathComposites != null && pathComposites.Count > 0
+                ? pathComposites[pathComposites.Count - 1]
+                : 0,
+        };
+
+        if (entitySelected && pathEntities != null && pathEntities.Count > 0)
+            packet.entity = pathEntities[pathEntities.Count - 1];
+
+        return packet;
     }
 
     public void TryPickSelectAtScreen(Camera3D camera, Vector2 screenPosition)
@@ -985,14 +1053,43 @@ public partial class CommandsEditorConnection : Node3D
         if (!built)
             return;
 
+        uint nextSelectedEntity = entitySelected && pathEntities != null && pathEntities.Count > 0
+            ? pathEntities[pathEntities.Count - 1]
+            : 0;
+        uint nextSelectedComposite = pathComposites != null && pathComposites.Count > 0
+            ? pathComposites[pathComposites.Count - 1]
+            : 0;
+        TryRemoveEphemeralDeepSelectAliasIfAbandoned(nextSelectedEntity, nextSelectedComposite);
+
         ApplyLocalSelection(pathEntities, pathComposites, entitySelected);
         ApplySelectionNow();
+        UpdateEphemeralDeepSelectAliasTracking(pathEntities, pathComposites, entitySelected);
 
         // New alias: selection path is bundled into ENTITY_ADDED so OpenCAGE can add+select atomically.
         if (createdNewAlias)
-            return;
+        {
+            uint ownerCompositeId = pathComposites[pathComposites.Count - 1];
+            uint aliasEntityId = pathEntities[pathEntities.Count - 1];
+            LevelViewerPick.TryBuildAliasSelectionPath(
+                target,
+                ownerCompositeId,
+                aliasEntityId,
+                GetSyncedPathCompositesSnapshot(),
+                out pathEntities,
+                out pathComposites);
 
-        SendSelectionToEditor(pathEntities, pathComposites, entitySelected);
+            Composite ownerComposite = commands.GetComposite(new ShortGuid(ownerCompositeId));
+            AliasEntity alias = ownerComposite?.GetEntityByID(new ShortGuid(aliasEntityId)) as AliasEntity;
+            if (alias != null)
+            {
+                TrySendPendingEphemeralDeepSelectAliasDelete(null, null, false);
+                _ = SendNewAliasToEditorAsync(ownerComposite, alias, pathEntities, pathComposites, entitySelected);
+            }
+
+            return;
+        }
+
+        SendSelectionToEditorWithPendingEphemeralDelete(pathEntities, pathComposites, entitySelected);
     }
 
     public void TryPickDrillIntoCompositeAtScreen(Camera3D camera, Vector2 screenPosition)
@@ -1094,7 +1191,7 @@ public partial class CommandsEditorConnection : Node3D
             ResetProgressiveDeepSelectState();
 
         ApplyLocalSelection(pathEntities, pathComposites, entitySelected);
-        SendSelectionToEditor(pathEntities, pathComposites, entitySelected);
+        SendSelectionToEditorWithPendingEphemeralDelete(pathEntities, pathComposites, entitySelected);
         ApplySelectionNow();
     }
 
@@ -1209,7 +1306,11 @@ public partial class CommandsEditorConnection : Node3D
         lock (_lock)
         {
             if (!_entitySelected || _pathComposites == null || _pathComposites.Count == 0)
+            {
+                TryRemoveEphemeralDeepSelectAlias();
+                TrySendPendingEphemeralDeepSelectAliasDelete(null, null, false);
                 return;
+            }
 
             if (_pathEntities == null || _pathEntities.Count != _pathComposites.Count)
                 return;
@@ -1221,7 +1322,7 @@ public partial class CommandsEditorConnection : Node3D
         }
 
         ApplyLocalSelection(pathEntities, pathComposites, entitySelected);
-        SendSelectionToEditor(pathEntities, pathComposites, entitySelected);
+        SendSelectionToEditorWithPendingEphemeralDelete(pathEntities, pathComposites, entitySelected);
         ApplySelectionNow();
     }
 
@@ -1259,12 +1360,20 @@ public partial class CommandsEditorConnection : Node3D
         }
 
         ApplyLocalSelection(pathEntities, pathComposites, entitySelected);
-        SendSelectionToEditor(pathEntities, pathComposites, entitySelected);
+        SendSelectionToEditorWithPendingEphemeralDelete(pathEntities, pathComposites, entitySelected);
         ApplySelectionNow();
     }
 
     private void ApplyLocalSelection(List<uint> pathEntities, List<uint> pathComposites, bool entitySelected)
     {
+        uint newSelectedEntity = entitySelected && pathEntities != null && pathEntities.Count > 0
+            ? pathEntities[pathEntities.Count - 1]
+            : 0;
+        uint newSelectedComposite = pathComposites != null && pathComposites.Count > 0
+            ? pathComposites[pathComposites.Count - 1]
+            : 0;
+        TryRemoveEphemeralDeepSelectAliasIfAbandoned(newSelectedEntity, newSelectedComposite);
+
         lock (_lock)
         {
             uint previousActiveComposite = PreviewVisibilitySettings.ActiveCompositeId;
@@ -1341,20 +1450,86 @@ public partial class CommandsEditorConnection : Node3D
         if (pathComposites == null || pathComposites.Count == 0)
             return;
 
-        Packet packet = new Packet(PacketEvent.ENTITY_SELECTED)
-        {
-            path_entities = pathEntities ?? new List<uint>(),
-            path_composites = pathComposites,
-            composite = pathComposites[pathComposites.Count - 1],
-        };
-
+        Packet packet = BuildSelectionPacket(pathEntities, pathComposites, entitySelected);
         if (entitySelected && pathEntities != null && pathEntities.Count > 0)
-        {
-            packet.entity = pathEntities[pathEntities.Count - 1];
             TryFillEntityMetadata(packet);
-        }
 
         SendMessage(packet);
+    }
+
+    private void SendSelectionToEditorWithPendingEphemeralDelete(
+        List<uint> pathEntities,
+        List<uint> pathComposites,
+        bool entitySelected)
+    {
+        bool canBundleSelection = entitySelected
+            && pathEntities != null
+            && pathEntities.Count > 0
+            && pathComposites != null
+            && pathComposites.Count == pathEntities.Count;
+
+        if (_pendingEphemeralDeepSelectDeleteEntityId != 0)
+        {
+            SendPendingEphemeralDeepSelectAliasDelete(
+                pathEntities,
+                pathComposites,
+                canBundleSelection);
+
+            if (canBundleSelection)
+                return;
+        }
+
+        SendSelectionToEditor(pathEntities, pathComposites, entitySelected);
+    }
+
+    private void SendPendingEphemeralDeepSelectAliasDelete(
+        List<uint> selectionPathEntities,
+        List<uint> selectionPathComposites,
+        bool includeSelection)
+    {
+        if (_pendingEphemeralDeepSelectDeleteEntityId == 0)
+            return;
+
+        Packet packet = new Packet(PacketEvent.ENTITY_DELETED)
+        {
+            composite = _pendingEphemeralDeepSelectDeleteCompositeId,
+            entity = _pendingEphemeralDeepSelectDeleteEntityId,
+            entity_variant = EntityVariant.ALIAS,
+        };
+
+        if (includeSelection
+            && selectionPathEntities != null
+            && selectionPathComposites != null
+            && selectionPathEntities.Count > 0
+            && selectionPathEntities.Count == selectionPathComposites.Count)
+        {
+            packet.path_entities = new List<uint>(selectionPathEntities);
+            packet.path_composites = new List<uint>(selectionPathComposites);
+        }
+
+        ClearPendingEphemeralDeepSelectDelete();
+        SendMessage(packet);
+    }
+
+    private bool TrySendPendingEphemeralDeepSelectAliasDelete(
+        List<uint> selectionPathEntities,
+        List<uint> selectionPathComposites,
+        bool includeSelection)
+    {
+        if (_pendingEphemeralDeepSelectDeleteEntityId == 0)
+            return false;
+
+        SendPendingEphemeralDeepSelectAliasDelete(
+            selectionPathEntities,
+            selectionPathComposites,
+            includeSelection);
+        return true;
+    }
+
+    private void ClearPendingEphemeralDeepSelectDelete()
+    {
+        _pendingEphemeralDeepSelectDeleteCompositeId = 0;
+        _pendingEphemeralDeepSelectDeleteEntityId = 0;
     }
 
     private void TryFillEntityMetadata(Packet packet)
@@ -1422,7 +1597,10 @@ public partial class CommandsEditorConnection : Node3D
                     aliasOverride);
 
                 if (positionAdded)
+                {
+                    CommitEphemeralDeepSelectAlias(compositeId.AsUInt32, entityId.AsUInt32);
                     _scene.RefreshAliasHighlights();
+                }
             }
             else
             {
@@ -1483,6 +1661,42 @@ public partial class CommandsEditorConnection : Node3D
         }
     }
 
+    private bool ProgressiveDeepSelectTargetsMatch(
+        LevelViewerPick.SelectionTarget target,
+        uint activeCompositeId,
+        uint[] instancePath)
+    {
+        if (target.EntityIds == null
+            || _progressiveDeepSelectEntityIds == null
+            || target.CompositeIds == null
+            || _progressiveDeepSelectCompositeIds == null
+            || activeCompositeId != _progressiveDeepSelectActiveComposite
+            || !PreviewVisibilitySettings.InstancePathsEqual(instancePath, _progressiveDeepSelectInstancePath))
+        {
+            return false;
+        }
+
+        if (_progressiveDeepSelectEntityIds.Count != target.EntityIds.Count
+            || _progressiveDeepSelectCompositeIds.Count != target.CompositeIds.Count)
+        {
+            return false;
+        }
+
+        for (int i = 0; i < target.EntityIds.Count; i++)
+        {
+            if (_progressiveDeepSelectEntityIds[i] != target.EntityIds[i])
+                return false;
+        }
+
+        for (int i = 0; i < target.CompositeIds.Count; i++)
+        {
+            if (_progressiveDeepSelectCompositeIds[i] != target.CompositeIds[i])
+                return false;
+        }
+
+        return true;
+    }
+
     private LevelViewerPick.SelectionTarget ResolveProgressiveDeepSelectDrillTarget(
         LevelViewerPick.SelectionTarget pickedTarget,
         uint activeCompositeId,
@@ -1499,7 +1713,7 @@ public partial class CommandsEditorConnection : Node3D
         }
 
         uint pickedLeafId = pickedTarget.LeafEntityId;
-        bool sameGeometryPick = pickedLeafId != 0 && pickedLeafId == _progressiveDeepSelectLeafId;
+        bool sameGeometryPick = ProgressiveDeepSelectTargetsMatch(pickedTarget, activeCompositeId, instancePath);
         bool pickingCurrentSelection = false;
         lock (_lock)
         {
@@ -1541,10 +1755,7 @@ public partial class CommandsEditorConnection : Node3D
             return 0;
         }
 
-        bool samePick = leafId != 0
-            && leafId == _progressiveDeepSelectLeafId
-            && activeCompositeId == _progressiveDeepSelectActiveComposite
-            && PreviewVisibilitySettings.InstancePathsEqual(instancePath, _progressiveDeepSelectInstancePath);
+        bool samePick = ProgressiveDeepSelectTargetsMatch(target, activeCompositeId, instancePath);
 
         int depth = samePick ? _progressiveDeepSelectDepth + 1 : 1;
         depth = Math.Min(depth, maxDepth);
@@ -1614,46 +1825,146 @@ public partial class CommandsEditorConnection : Node3D
             createdNewAlias = true;
         }
 
-        if (!TryBuildAliasSelectionPath(ownerCompositeId, alias.shortGUID.AsUInt32, out pathEntities, out pathComposites))
+        if (!LevelViewerPick.TryBuildAliasSelectionPath(
+                target,
+                ownerCompositeId,
+                alias.shortGUID.AsUInt32,
+                GetSyncedPathCompositesSnapshot(),
+                out pathEntities,
+                out pathComposites))
             return false;
-
-        if (createdNewAlias)
-            SendAliasEntityAdded(ownerComposite, alias, pathEntities, pathComposites);
 
         return true;
     }
 
-    private bool TryBuildAliasSelectionPath(uint ownerCompositeId, uint aliasEntityId, out List<uint> pathEntities, out List<uint> pathComposites)
+    private List<uint> GetSyncedPathCompositesSnapshot()
     {
-        pathEntities = new List<uint>();
-        pathComposites = new List<uint>();
-
         lock (_lock)
         {
-            uint[] instancePath = PreviewVisibilitySettings.ActiveInstanceEntityPath ?? Array.Empty<uint>();
-            for (int i = 0; i < instancePath.Length; i++)
-                pathEntities.Add(instancePath[i]);
-            pathEntities.Add(aliasEntityId);
+            return _pathComposites != null ? new List<uint>(_pathComposites) : null;
+        }
+    }
 
-            if (instancePath.Length == 0)
-            {
-                pathComposites.Add(ownerCompositeId);
-                return true;
-            }
+    private void UpdateEphemeralDeepSelectAliasTracking(
+        List<uint> pathEntities,
+        List<uint> pathComposites,
+        bool entitySelected)
+    {
+        if (PreviewVisibilitySettings.DeepSelectMode == PreviewVisibilitySettings.DeepSelectModeKind.None)
+            return;
 
-            if (_pathComposites != null && _pathComposites.Count > 0)
-            {
-                for (int i = 0; i < pathEntities.Count; i++)
-                    pathComposites.Add(i < _pathComposites.Count ? _pathComposites[i] : ownerCompositeId);
-            }
-            else
-            {
-                for (int i = 0; i < pathEntities.Count; i++)
-                    pathComposites.Add(ownerCompositeId);
-            }
+        if (!entitySelected
+            || pathEntities == null
+            || pathEntities.Count == 0
+            || pathComposites == null
+            || pathComposites.Count == 0
+            || _scene?.Content?.Level == null)
+        {
+            ClearEphemeralDeepSelectAliasTracking();
+            return;
         }
 
-        return pathEntities.Count > 0 && pathComposites.Count == pathEntities.Count;
+        uint compositeId = pathComposites[pathComposites.Count - 1];
+        uint entityId = pathEntities[pathEntities.Count - 1];
+        Composite composite = _scene.Content.Level.Commands.GetComposite(new ShortGuid(compositeId));
+        Entity entity = composite?.GetEntityByID(new ShortGuid(entityId));
+        if (entity is AliasEntity alias && IsAliasParameterFree(alias))
+            TrackEphemeralDeepSelectAlias(compositeId, entityId);
+        else
+            ClearEphemeralDeepSelectAliasTracking();
+    }
+
+    private static bool IsAliasParameterFree(AliasEntity alias)
+    {
+        return alias != null && (alias.parameters == null || alias.parameters.Count == 0);
+    }
+
+    private void TrackEphemeralDeepSelectAlias(uint compositeId, uint aliasEntityId)
+    {
+        _ephemeralDeepSelectAliasCompositeId = compositeId;
+        _ephemeralDeepSelectAliasEntityId = aliasEntityId;
+    }
+
+    private void ClearEphemeralDeepSelectAliasTracking()
+    {
+        _ephemeralDeepSelectAliasCompositeId = 0;
+        _ephemeralDeepSelectAliasEntityId = 0;
+    }
+
+    private void ClearEphemeralDeepSelectAliasTrackingIfMatch(uint compositeId, uint entityId)
+    {
+        if (entityId != 0
+            && entityId == _ephemeralDeepSelectAliasEntityId
+            && compositeId == _ephemeralDeepSelectAliasCompositeId)
+        {
+            ClearEphemeralDeepSelectAliasTracking();
+        }
+    }
+
+    private void CommitEphemeralDeepSelectAlias(uint compositeId, uint aliasEntityId)
+    {
+        if (aliasEntityId != 0
+            && aliasEntityId == _ephemeralDeepSelectAliasEntityId
+            && compositeId == _ephemeralDeepSelectAliasCompositeId)
+        {
+            ClearEphemeralDeepSelectAliasTracking();
+        }
+    }
+
+    private void TryCommitEphemeralDeepSelectAliasAfterParameterSync(uint compositeId, uint entityId)
+    {
+        if (entityId == 0 || entityId != _ephemeralDeepSelectAliasEntityId || compositeId != _ephemeralDeepSelectAliasCompositeId)
+            return;
+
+        if (_scene?.Content?.Level == null)
+            return;
+
+        Composite composite = _scene.Content.Level.Commands.GetComposite(new ShortGuid(compositeId));
+        Entity entity = composite != null
+            ? GetEntity(composite, new ShortGuid(entityId), EntityVariant.ALIAS)
+            : null;
+        if (entity is AliasEntity alias && !IsAliasParameterFree(alias))
+            CommitEphemeralDeepSelectAlias(compositeId, entityId);
+    }
+
+    private void TryRemoveEphemeralDeepSelectAliasIfAbandoned(uint newSelectedEntityId, uint newSelectedCompositeId)
+    {
+        if (_ephemeralDeepSelectAliasEntityId == 0)
+            return;
+
+        if (newSelectedEntityId == _ephemeralDeepSelectAliasEntityId
+            && (newSelectedCompositeId == 0 || newSelectedCompositeId == _ephemeralDeepSelectAliasCompositeId))
+        {
+            return;
+        }
+
+        TryRemoveEphemeralDeepSelectAlias();
+    }
+
+    private void TryRemoveEphemeralDeepSelectAlias()
+    {
+        if (_ephemeralDeepSelectAliasEntityId == 0 || _scene?.Content?.Level == null)
+            return;
+
+        uint compositeId = _ephemeralDeepSelectAliasCompositeId;
+        uint entityId = _ephemeralDeepSelectAliasEntityId;
+        Composite composite = _scene.Content.Level.Commands.GetComposite(new ShortGuid(compositeId));
+        AliasEntity alias = composite != null
+            ? GetEntity(composite, new ShortGuid(entityId), EntityVariant.ALIAS) as AliasEntity
+            : null;
+
+        if (alias == null || !IsAliasParameterFree(alias))
+        {
+            ClearEphemeralDeepSelectAliasTracking();
+            return;
+        }
+
+        composite.RemoveAlias(alias);
+        _scene.RemoveEntity(new ShortGuid(compositeId), new ShortGuid(entityId));
+        _scene.RefreshAliasHighlights();
+        _pendingEphemeralDeepSelectDeleteCompositeId = compositeId;
+        _pendingEphemeralDeepSelectDeleteEntityId = entityId;
+        ClearEphemeralDeepSelectAliasTracking();
     }
 
     private static bool EnsureAliasPositionParameter(AliasEntity alias, SyncedParameter sync)
@@ -1673,7 +1984,18 @@ public partial class CommandsEditorConnection : Node3D
         List<uint> pathEntities,
         List<uint> pathComposites)
     {
-        Packet packet = new Packet(PacketEvent.ENTITY_ADDED)
+        Packet packet = BuildAliasEntityAddedPacket(ownerComposite, alias, pathEntities, pathComposites);
+        _viewerOriginatedEntityAdds.Add(alias.shortGUID.AsUInt32);
+        SendMessage(packet);
+    }
+
+    private static Packet BuildAliasEntityAddedPacket(
+        Composite ownerComposite,
+        AliasEntity alias,
+        List<uint> pathEntities,
+        List<uint> pathComposites)
+    {
+        return new Packet(PacketEvent.ENTITY_ADDED)
         {
             composite = ownerComposite.shortGUID.AsUInt32,
             entity = alias.shortGUID.AsUInt32,
@@ -1682,9 +2004,6 @@ public partial class CommandsEditorConnection : Node3D
             path_entities = pathEntities ?? new List<uint>(),
             path_composites = pathComposites ?? new List<uint>(),
         };
-
-        _viewerOriginatedEntityAdds.Add(alias.shortGUID.AsUInt32);
-        SendMessage(packet);
     }
 
     private static SyncedParameter BuildPositionSync(Vector3 godotPos, Vector3 godotRotDeg)

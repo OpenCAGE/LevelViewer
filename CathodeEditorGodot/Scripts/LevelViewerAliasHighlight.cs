@@ -2,10 +2,11 @@ using CATHODE;
 using CATHODE.Scripting;
 using CATHODE.Scripting.Internal;
 using Godot;
+using System;
 using System.Collections.Generic;
 
 /// <summary>
-/// Orange tint on the specific instance targeted by an alias that carries override parameters.
+/// Orange tint on instances targeted by parameterized aliases defined on the active composite.
 /// </summary>
 public static class LevelViewerAliasHighlight
 {
@@ -16,35 +17,81 @@ public static class LevelViewerAliasHighlight
 
 	private static readonly Dictionary<MeshInstance3D, Material> _savedMaterialOverrides = new();
 	private static readonly List<MeshInstance3D> _highlightMeshes = new();
+	private static readonly List<MeshInstance3D> _meshCollectBuffer = new();
 
-	public static void Refresh(AlienScene scene, Commands commands, uint activeCompositeId)
+	private static uint _cachedActiveCompositeId;
+	private static uint[] _cachedInstancePath = Array.Empty<uint>();
+	private static bool _cacheValid;
+
+	public static bool NeedsRebuild(uint activeCompositeId)
+	{
+		if (!_cacheValid)
+			return true;
+
+		if (_cachedActiveCompositeId != activeCompositeId)
+			return true;
+
+		return !PreviewVisibilitySettings.InstancePathsEqual(
+			_cachedInstancePath,
+			PreviewVisibilitySettings.ActiveInstanceEntityPath);
+	}
+
+	public static void InvalidateCache() => _cacheValid = false;
+
+	public static void Rebuild(AlienScene scene, Commands commands, uint activeCompositeId)
 	{
 		Clear();
 		if (scene == null || commands == null || activeCompositeId == 0)
+		{
+			_cacheValid = false;
 			return;
+		}
 
-		Composite composite = commands.GetComposite(new ShortGuid(activeCompositeId));
-		if (composite == null)
+		Node3D contentRoot = scene.ParentNode;
+		if (contentRoot == null)
+		{
+			_cacheValid = false;
 			return;
+		}
 
 		HashSet<ulong> tintedMeshIds = new HashSet<ulong>();
-		foreach (AliasEntity alias in composite.aliases)
+		scene.ForEachParameterizedAliasInActiveComposite((ownerComposite, alias) =>
 		{
-			if (alias?.parameters == null || alias.parameters.Count == 0)
-				continue;
-
-			if (!scene.TryGetEntitySceneNodes(composite.shortGUID, alias.shortGUID, out List<Node3D> aliasNodes))
-				continue;
+			if (!scene.TryGetEntitySceneNodes(ownerComposite.shortGUID, alias.shortGUID, out List<Node3D> aliasNodes))
+				return;
 
 			for (int i = 0; i < aliasNodes.Count; i++)
 			{
-				if (aliasNodes[i] is not EntityOverride aliasOverride || aliasOverride.PointedEntity == null)
+				if (aliasNodes[i] is not EntityOverride aliasOverride)
 					continue;
 
-				ApplyToNode(aliasOverride.PointedEntity, tintedMeshIds);
+				if (!LevelViewerCompositeFocus.IsPickOwnerInScope(aliasOverride, commands))
+					continue;
+
+				if (!scene.TryResolveAliasPointedSceneNode(
+						aliasOverride,
+						alias,
+						ownerComposite,
+						out Node3D pointedNode,
+						preferCached: false))
+				{
+					continue;
+				}
+
+				if (!LevelViewerCompositeFocus.IsNodeInScope(pointedNode, contentRoot, commands))
+					continue;
+
+				ApplyToNode(pointedNode, tintedMeshIds);
 			}
-		}
+		});
+
+		_cachedActiveCompositeId = activeCompositeId;
+		_cachedInstancePath = (uint[])(PreviewVisibilitySettings.ActiveInstanceEntityPath ?? Array.Empty<uint>()).Clone();
+		_cacheValid = true;
 	}
+
+	/// <summary>Re-applies cached orange tint while skipping the current selection subtree.</summary>
+	public static void SyncWithSelection() => ReapplyIfActive();
 
 	public static void Clear()
 	{
@@ -56,6 +103,7 @@ public static class LevelViewerAliasHighlight
 
 		_savedMaterialOverrides.Clear();
 		_highlightMeshes.Clear();
+		_cacheValid = false;
 	}
 
 	/// <summary>Restores materials orange-tinted under <paramref name="root"/> so selection green can take over.</summary>
@@ -64,10 +112,10 @@ public static class LevelViewerAliasHighlight
 		if (root == null || !GodotObject.IsInstanceValid(root))
 			return;
 
-		List<MeshInstance3D> meshes = new();
-		CollectMeshes(root, meshes);
-		for (int i = 0; i < meshes.Count; i++)
-			ReleaseMesh(meshes[i]);
+		_meshCollectBuffer.Clear();
+		CollectMeshes(root, _meshCollectBuffer);
+		for (int i = 0; i < _meshCollectBuffer.Count; i++)
+			ReleaseMeshForSelection(_meshCollectBuffer[i]);
 	}
 
 	public static void ReapplyIfActive()
@@ -86,6 +134,17 @@ public static class LevelViewerAliasHighlight
 
 			TintMeshInstance(mesh);
 		}
+	}
+
+	private static void ReleaseMeshForSelection(MeshInstance3D mesh)
+	{
+		if (mesh == null || !GodotObject.IsInstanceValid(mesh))
+			return;
+
+		if (_savedMaterialOverrides.TryGetValue(mesh, out Material saved))
+			mesh.MaterialOverride = saved;
+
+		_savedMaterialOverrides.Remove(mesh);
 	}
 
 	private static void ReleaseMesh(MeshInstance3D mesh)
@@ -116,23 +175,28 @@ public static class LevelViewerAliasHighlight
 
 	private static void ApplyToNode(Node3D root, HashSet<ulong> tintedMeshIds)
 	{
-		if (root == null || !GodotObject.IsInstanceValid(root) || LevelViewerSelection.IsUnderSelection(root))
+		if (root == null || !GodotObject.IsInstanceValid(root))
 			return;
 
-		List<MeshInstance3D> meshes = new();
-		CollectMeshes(root, meshes);
-		for (int i = 0; i < meshes.Count; i++)
+		_meshCollectBuffer.Clear();
+		CollectMeshes(root, _meshCollectBuffer);
+		for (int i = 0; i < _meshCollectBuffer.Count; i++)
 		{
-			MeshInstance3D mesh = meshes[i];
+			MeshInstance3D mesh = _meshCollectBuffer[i];
 			if (mesh == null || !GodotObject.IsInstanceValid(mesh))
 				continue;
 
 			ulong meshId = mesh.GetInstanceId();
-			if (tintedMeshIds.Contains(meshId) || _savedMaterialOverrides.ContainsKey(mesh))
+			if (tintedMeshIds.Contains(meshId))
 				continue;
 
 			tintedMeshIds.Add(meshId);
-			_highlightMeshes.Add(mesh);
+			if (!_highlightMeshes.Contains(mesh))
+				_highlightMeshes.Add(mesh);
+
+			if (_savedMaterialOverrides.ContainsKey(mesh) || IsMeshUnderSelection(mesh))
+				continue;
+
 			TintMeshInstance(mesh);
 		}
 	}
@@ -162,7 +226,7 @@ public static class LevelViewerAliasHighlight
 		if (_savedMaterialOverrides.ContainsKey(meshInstance))
 			return;
 
-		Material current = meshInstance.GetActiveMaterial(0);
+		Material current = meshInstance.MaterialOverride ?? meshInstance.GetActiveMaterial(0);
 		if (current == null)
 			return;
 

@@ -700,6 +700,42 @@ public static class LevelViewerPick
 		return start >= 0 && start < target.EntityIds.Count;
 	}
 
+	/// <summary>
+	/// Builds an OpenCAGE selection path to an alias in <paramref name="ownerCompositeId"/>,
+	/// prefixing the active instance drill path when the editor is inside nested composites.
+	/// </summary>
+	public static bool TryBuildAliasSelectionPath(
+		SelectionTarget target,
+		uint ownerCompositeId,
+		uint aliasEntityId,
+		IReadOnlyList<uint> syncedPathComposites,
+		out List<uint> pathEntities,
+		out List<uint> pathComposites)
+	{
+		pathEntities = new List<uint>();
+		pathComposites = new List<uint>();
+
+		if (ownerCompositeId == 0 || aliasEntityId == 0)
+			return false;
+
+		uint[] instancePath = PreviewVisibilitySettings.ActiveInstanceEntityPath ?? Array.Empty<uint>();
+		for (int i = 0; i < instancePath.Length; i++)
+		{
+			pathEntities.Add(instancePath[i]);
+			if (syncedPathComposites != null && i < syncedPathComposites.Count)
+				pathComposites.Add(syncedPathComposites[i]);
+			else if (target.CompositeIds != null && i < target.CompositeIds.Count)
+				pathComposites.Add(target.CompositeIds[i]);
+			else
+				pathComposites.Add(ownerCompositeId);
+		}
+
+		pathEntities.Add(aliasEntityId);
+		pathComposites.Add(ownerCompositeId);
+
+		return pathEntities.Count > 0 && pathComposites.Count == pathEntities.Count;
+	}
+
 	public static bool TryFindAliasWithPath(Composite composite, ShortGuid[] hierarchy, out AliasEntity alias)
 	{
 		alias = null;

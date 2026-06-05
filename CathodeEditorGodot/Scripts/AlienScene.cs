@@ -201,7 +201,7 @@ public partial class AlienScene : Node3D
 	{
 		_selectedEntity = null;
 		LevelViewerSelection.Clear();
-		RefreshAliasHighlights();
+		RefreshAliasHighlights(forceRebuild: false);
 		_selectionHud?.Hide();
 		OnSelectionChanged?.Invoke(null);
 	}
@@ -506,17 +506,16 @@ public partial class AlienScene : Node3D
 			case EntityVariant.ALIAS:
 			{
 				AliasEntity alias = (AliasEntity)entity;
-				Node3D aliasedNode = GetEntityNode(EntityPathToGUIDList(alias.alias), parentNode);
-				if (aliasedNode != null)
+				EntityOverride aliasOverride = (EntityOverride)entityNode;
+				if (TryResolveAliasPointedSceneNode(aliasOverride, alias, composite, out Node3D aliasedNode)
+					&& alias.GetParameter("position") != null)
 				{
-					((EntityOverride)entityNode).PointedEntity = aliasedNode;
-					if (alias.GetParameter("position") != null)
-					{
-						EntityNodeUtil.SetPointed(aliasedNode, true);
-						aliasedNode.Position = position;
-						aliasedNode.RotationDegrees = rotation;
-					}
+					EntityNodeUtil.SetPointed(aliasedNode, true);
+					aliasedNode.Position = position;
+					aliasedNode.RotationDegrees = rotation;
 				}
+
+				LevelViewerAliasHighlight.InvalidateCache();
 				break;
 			}
 			case EntityVariant.PROXY:
@@ -598,7 +597,114 @@ public partial class AlienScene : Node3D
 		return TryGetCachedEntityNodes(compositeId, entityId, out entityNodes);
 	}
 
-	public void RefreshAliasHighlights()
+	/// <summary>
+	/// Resolves the scene node an alias points at, using the cached link or re-walking the alias path
+	/// from the composite instance root that owns the alias node.
+	/// </summary>
+	public bool TryResolveAliasPointedSceneNode(
+		EntityOverride aliasOverride,
+		AliasEntity alias,
+		Composite ownerComposite,
+		out Node3D pointedNode,
+		bool preferCached = true)
+	{
+		pointedNode = null;
+		if (aliasOverride == null
+			|| !GodotObject.IsInstanceValid(aliasOverride)
+			|| alias?.alias?.path == null
+			|| alias.alias.path.Length == 0)
+		{
+			return false;
+		}
+
+		if (preferCached
+			&& aliasOverride.PointedEntity != null
+			&& GodotObject.IsInstanceValid(aliasOverride.PointedEntity))
+		{
+			pointedNode = aliasOverride.PointedEntity;
+			return true;
+		}
+
+		Node3D compositeRoot = aliasOverride.GetParent() as Node3D;
+		if (compositeRoot != null)
+		{
+			pointedNode = GetEntityNode(EntityPathToGUIDList(alias.alias), compositeRoot);
+			if (pointedNode != null)
+			{
+				aliasOverride.PointedEntity = pointedNode;
+				return true;
+			}
+		}
+
+		if (ownerComposite == null || compositeRoot == null || _content?.Level?.Commands == null)
+			return false;
+
+		CommandsUtils utils = _content.Level.Commands.Utils;
+		List<Tuple<Composite, Entity>> resolvedHierarchy = utils.ResolveAlias(alias, ownerComposite);
+		(Composite targetComposite, Entity targetEntity) = utils.GetResolvedTarget(resolvedHierarchy);
+		if (targetComposite == null || targetEntity == null)
+			return false;
+
+		if (!TryGetCachedEntityNodes(targetComposite.shortGUID, targetEntity.shortGUID, out List<Node3D> candidates))
+			return false;
+
+		for (int i = 0; i < candidates.Count; i++)
+		{
+			Node3D candidate = candidates[i];
+			if (candidate == null || !GodotObject.IsInstanceValid(candidate))
+				continue;
+
+			if (!IsDescendantOf(candidate, compositeRoot))
+				continue;
+
+			pointedNode = candidate;
+			aliasOverride.PointedEntity = pointedNode;
+			return true;
+		}
+
+		return false;
+	}
+
+	public void ForEachParameterizedAliasInActiveComposite(Action<Composite, AliasEntity> visitor)
+	{
+		if (visitor == null || _content?.Level?.Commands == null)
+			return;
+
+		uint activeCompositeId = PreviewVisibilitySettings.ActiveCompositeId;
+		if (activeCompositeId == 0)
+			return;
+
+		Composite composite = _content.Level.Commands.GetComposite(new ShortGuid(activeCompositeId));
+		if (composite == null)
+			return;
+
+		foreach (AliasEntity alias in composite.aliases)
+		{
+			if (alias == null || alias.parameters == null || alias.parameters.Count == 0)
+				continue;
+
+			visitor(composite, alias);
+		}
+	}
+
+	private static bool IsDescendantOf(Node node, Node ancestor)
+	{
+		if (node == null || ancestor == null)
+			return false;
+
+		Node current = node;
+		while (current != null)
+		{
+			if (current == ancestor)
+				return true;
+
+			current = current.GetParent();
+		}
+
+		return false;
+	}
+
+	public void RefreshAliasHighlights(bool forceRebuild = true)
 	{
 		if (!_content.Loaded || !PreviewVisibilitySettings.HighlightAliases)
 		{
@@ -607,7 +713,12 @@ public partial class AlienScene : Node3D
 			return;
 		}
 
-		LevelViewerAliasHighlight.Refresh(this, _content.Level.Commands, PreviewVisibilitySettings.ActiveCompositeId);
+		uint activeCompositeId = PreviewVisibilitySettings.ActiveCompositeId;
+		if (forceRebuild || LevelViewerAliasHighlight.NeedsRebuild(activeCompositeId))
+			LevelViewerAliasHighlight.Rebuild(this, _content.Level.Commands, activeCompositeId);
+		else
+			LevelViewerAliasHighlight.SyncWithSelection();
+
 		LevelViewerSelection.ReapplyIfSelectionActive();
 	}
 
@@ -644,7 +755,7 @@ public partial class AlienScene : Node3D
 		_selectedEntity = entityNode;
 		LevelViewerAliasHighlight.ReleaseNode(entityNode);
 		LevelViewerSelection.Apply(entityNode);
-		RefreshAliasHighlights();
+		RefreshAliasHighlights(forceRebuild: false);
 
 		if (entityNode != null)
 			GD.Print("SelectEntity: " + string.Join("/", entityPath) + " -> " + entityNode.Name);

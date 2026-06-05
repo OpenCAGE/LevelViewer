@@ -70,6 +70,7 @@ namespace OpenCAGE.UnityConnection
         public bool show_camera_position = true;
         public bool hide_nested_script_entities = false;
         public bool model_reference_wireframe = false;
+        public bool highlight_aliases = true;
         public Dictionary<uint, bool> box_render_filters = new Dictionary<uint, bool>();
     }
 }

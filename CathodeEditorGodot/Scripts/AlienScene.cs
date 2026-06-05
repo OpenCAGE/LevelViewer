@@ -600,9 +600,10 @@ public partial class AlienScene : Node3D
 
 	public void RefreshAliasHighlights()
 	{
-		if (!_content.Loaded)
+		if (!_content.Loaded || !PreviewVisibilitySettings.HighlightAliases)
 		{
 			LevelViewerAliasHighlight.Clear();
+			LevelViewerSelection.ReapplyIfSelectionActive();
 			return;
 		}
 

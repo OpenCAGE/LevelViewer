@@ -8,6 +8,8 @@ public static class PreviewVisibilitySettings
 {
     public static bool HideNestedScriptEntities { get; set; }
 
+    public static bool HighlightAliases { get; set; } = true;
+
     public enum DeepSelectModeKind
     {
         None,

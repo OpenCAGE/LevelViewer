@@ -723,8 +723,14 @@ public partial class CommandsEditorConnection : Node3D
         _hideNestedScriptEntities = packet.hide_nested_script_entities;
         PreviewVisibilitySettings.HideNestedScriptEntities = _hideNestedScriptEntities;
 
+        bool highlightChanged = PreviewVisibilitySettings.HighlightAliases != packet.highlight_aliases;
+        PreviewVisibilitySettings.HighlightAliases = packet.highlight_aliases;
+
         if (packet.model_reference_wireframe != ModelReferenceRenderSettings.WireframeEnabled)
             _scene.SetModelReferenceWireframe(packet.model_reference_wireframe);
+
+        if (highlightChanged && _scene != null)
+            _scene.RefreshAliasHighlights();
 
         return hideNestedChanged;
     }

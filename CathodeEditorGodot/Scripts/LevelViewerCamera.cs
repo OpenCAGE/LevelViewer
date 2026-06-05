@@ -1,7 +1,7 @@
 using Godot;
 
 /// <summary>
-/// Free camera: WASD/QE move; RMB look; MMB pan; LMB select entity; Ctrl+MMB step into composite instance; - step back hierarchy; 0 toggles deep select; scroll adjusts speed; Z frames selection.
+/// Free camera: WASD/QE move; RMB look; MMB pan; LMB select entity; Ctrl+MMB step into composite instance; - step back hierarchy; 0 toggles deep select; H hide selected; Shift+H unhide all; scroll adjusts speed; Z frames selection.
 /// MoveSpeed is world units per second (framerate-independent via delta).
 /// </summary>
 public partial class LevelViewerCamera : Camera3D
@@ -150,6 +150,15 @@ public partial class LevelViewerCamera : Camera3D
                 else if (keyEvent.Keycode == Key.Minus)
                 {
                     TryStepBackHierarchy();
+                    GetViewport().SetInputAsHandled();
+                }
+                else if (keyEvent.Keycode == Key.H)
+                {
+                    if (keyEvent.ShiftPressed)
+                        _alienScene?.ClearCompositeScopedHides();
+                    else if (_alienScene != null && _alienScene.TryHideSelectedEntity())
+                        _commandsEditorConnection?.TryClearEntitySelection();
+
                     GetViewport().SetInputAsHandled();
                 }
                 break;

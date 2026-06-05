@@ -197,6 +197,48 @@ public partial class AlienScene : Node3D
 		return entity != null && GodotObject.IsInstanceValid(entity);
 	}
 
+	public bool TryHideSelectedEntity()
+	{
+		if (!_content.Loaded || !TryGetSelectedEntity(out Node3D selected))
+			return false;
+
+		Commands commands = _content.Level.Commands;
+		if (!LevelViewerCompositeFocus.IsNodeInScope(selected, _parentNode, commands))
+			return false;
+
+		LevelViewerEntityHide.SyncCompositeScope(
+			PreviewVisibilitySettings.ActiveCompositeId,
+			PreviewVisibilitySettings.ActiveInstanceEntityPath);
+
+		if (!LevelViewerEntityHide.TryHide(selected))
+			return false;
+
+		LevelViewerAliasHighlight.InvalidateCache();
+		RefreshAliasHighlights(forceRebuild: true);
+		return true;
+	}
+
+	public void ClearCompositeScopedHides()
+	{
+		if (!LevelViewerEntityHide.HasAny)
+			return;
+
+		LevelViewerEntityHide.ClearAll();
+		LevelViewerAliasHighlight.InvalidateCache();
+		RefreshAliasHighlights(forceRebuild: true);
+	}
+
+	public void ResetCompositeScopedHides()
+	{
+		LevelViewerEntityHide.SyncCompositeScope(
+			PreviewVisibilitySettings.ActiveCompositeId,
+			PreviewVisibilitySettings.ActiveInstanceEntityPath);
+		if (!LevelViewerEntityHide.HasAny)
+			return;
+
+		ClearCompositeScopedHides();
+	}
+
 	private void ClearSelectedEntity()
 	{
 		_selectedEntity = null;
@@ -213,6 +255,7 @@ public partial class AlienScene : Node3D
 		LevelViewerSelection.Clear();
 		LevelViewerPick.ClearRegistry();
 		LevelViewerCompositeFocus.Clear();
+		LevelViewerEntityHide.ClearAll();
 
 		if (_parentNode != null && GodotObject.IsInstanceValid(_parentNode))
 			_parentNode.QueueFree();

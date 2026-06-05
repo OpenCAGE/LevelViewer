@@ -25,6 +25,7 @@ public static class LevelViewerPick
 	private static readonly Dictionary<Node3D, Aabb> _ownerGlobalBounds = new();
 	private static readonly List<Node3D> _scopedPickOwners = new();
 	private static readonly HashSet<MeshInstance3D> _registeredPickables = new();
+	private static readonly HashSet<Node3D> _suppressedPickOwners = new();
 	private static bool _scopedPickablesDirty = true;
 
 	public readonly struct PickHit
@@ -60,7 +61,26 @@ public static class LevelViewerPick
 		_ownerGlobalBounds.Clear();
 		_scopedPickOwners.Clear();
 		_registeredPickables.Clear();
+		_suppressedPickOwners.Clear();
 		_scopedPickablesDirty = true;
+	}
+
+	public static void SetOwnerSuppressed(Node3D owner, bool suppressed)
+	{
+		if (owner == null || !GodotObject.IsInstanceValid(owner))
+			return;
+
+		if (suppressed)
+			_suppressedPickOwners.Add(owner);
+		else
+			_suppressedPickOwners.Remove(owner);
+
+		_scopedPickablesDirty = true;
+	}
+
+	public static bool IsOwnerSuppressed(Node3D owner)
+	{
+		return owner != null && _suppressedPickOwners.Contains(owner);
 	}
 
 	public static void InvalidateScopedPickables()
@@ -211,6 +231,9 @@ public static class LevelViewerPick
 				continue;
 
 			if (!LevelViewerCompositeFocus.IsPickOwnerInScope(owner, commands))
+				continue;
+
+			if (IsOwnerSuppressed(owner))
 				continue;
 
 			_scopedPickOwners.Add(owner);

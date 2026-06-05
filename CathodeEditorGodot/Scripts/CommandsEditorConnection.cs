@@ -400,6 +400,7 @@ public partial class CommandsEditorConnection : Node3D
             {
                 ResetProgressiveDeepSelectState();
                 MarkCompositeFocusDirty();
+                _scene?.ResetCompositeScopedHides();
             }
 
             if (selectionChanged)
@@ -1395,6 +1396,7 @@ public partial class CommandsEditorConnection : Node3D
                 || !PreviewVisibilitySettings.InstancePathsEqual(previousInstancePath, PreviewVisibilitySettings.ActiveInstanceEntityPath))
             {
                 MarkCompositeFocusDirty();
+                _scene?.ResetCompositeScopedHides();
             }
         }
     }

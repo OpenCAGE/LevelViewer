@@ -934,6 +934,15 @@ public partial class CommandsEditorConnection : Node3D
                     out pathEntities,
                     out pathComposites,
                     out createdNewAlias);
+                if (!built)
+                {
+                    built = LevelViewerPick.TryBuildActiveCompositeSelectionPath(
+                        target,
+                        activeCompositeId,
+                        out pathEntities,
+                        out pathComposites);
+                }
+
                 entitySelected = built;
                 break;
             default:

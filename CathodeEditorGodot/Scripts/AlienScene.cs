@@ -509,10 +509,10 @@ public partial class AlienScene : Node3D
 				Node3D aliasedNode = GetEntityNode(EntityPathToGUIDList(alias.alias), parentNode);
 				if (aliasedNode != null)
 				{
-					EntityNodeUtil.SetPointed(aliasedNode, true);
 					((EntityOverride)entityNode).PointedEntity = aliasedNode;
 					if (alias.GetParameter("position") != null)
 					{
+						EntityNodeUtil.SetPointed(aliasedNode, true);
 						aliasedNode.Position = position;
 						aliasedNode.RotationDegrees = rotation;
 					}
@@ -525,10 +525,10 @@ public partial class AlienScene : Node3D
 				Node3D proxiedNode = GetEntityNode(EntityPathToGUIDList(proxy.proxy), ParentNode);
 				if (proxiedNode != null)
 				{
-					EntityNodeUtil.SetPointed(proxiedNode, true);
 					((EntityOverride)entityNode).PointedEntity = proxiedNode;
 					if (proxy.GetParameter("position") != null)
 					{
+						EntityNodeUtil.SetPointed(proxiedNode, true);
 						proxiedNode.Position = position;
 						proxiedNode.RotationDegrees = rotation;
 					}
@@ -869,6 +869,10 @@ public partial class AlienScene : Node3D
 		if (!TryGetCachedEntityNodes(visualCompositeID, visualEntityID, out List<Node3D> entityNodes))
 			return;
 
+		HashSet<Node3D> touchedEntityNodes = null;
+		if (syncDataType == DataType.TRANSFORM && !fromPointer && visualLimitNode == null)
+			touchedEntityNodes = new HashSet<Node3D>();
+
 		for (int i = 0; i < entityNodes.Count; i++)
 		{
 			Node3D entityNode = entityNodes[i];
@@ -889,7 +893,12 @@ public partial class AlienScene : Node3D
 				handler(context);
 			else if (syncDataType != DataType.VECTOR && syncDataType != DataType.SPLINE && syncDataType != DataType.BOOL)
 				RefreshFunctionEntityPreviews(entityNode);
+
+			touchedEntityNodes?.Add(entityNode);
 		}
+
+		if (touchedEntityNodes != null && touchedEntityNodes.Count > 0)
+			ReapplyAliasOverridesPointingAt(touchedEntityNodes);
 	}
 
 	/// <summary>
@@ -1119,8 +1128,9 @@ public partial class AlienScene : Node3D
 
 	private void ApplyTransformVisual(ParameterVisualContext context)
 	{
-		Node3D target = context.EntityNode;
-		EntityOverride entityOverride = target as EntityOverride;
+		Node3D entityNode = context.EntityNode;
+		Node3D target = entityNode;
+		EntityOverride entityOverride = entityNode as EntityOverride;
 		if (entityOverride != null && entityOverride.PointedEntity != null)
 			target = entityOverride.PointedEntity;
 
@@ -1134,18 +1144,48 @@ public partial class AlienScene : Node3D
 			return;
 		}
 
+		bool isAliasOrProxyWrite = context.FromPointer || entityOverride != null;
+		if (!isAliasOrProxyWrite && EntityNodeUtil.IsPointed(target))
+			return;
+
 		Vector3 pos = CathodeCoordinates.PositionToGodot(ParameterSync.ToVector3(context.Sync.vector3_a));
 		Vector3 rot = CathodeCoordinates.EulerDegreesToGodot(ParameterSync.ToVector3(context.Sync.vector3_b));
-		bool applyToPointed = entityOverride != null;
-		bool pointed = applyToPointed || context.PointedOverride;
-		EntityNodeUtil.SetPointed(target, pointed);
-		if (!(EntityNodeUtil.IsPointed(target) && !context.FromPointer && !applyToPointed))
+
+		if (isAliasOrProxyWrite)
+			EntityNodeUtil.SetPointed(target, true);
+
+		target.Position = pos;
+		target.RotationDegrees = rot;
+		LevelViewerPick.InvalidatePickBounds(target);
+		if (entityNode != null && entityNode != target)
+			LevelViewerPick.InvalidatePickBounds(entityNode);
+	}
+
+	/// <summary>
+	/// Re-applies alias/proxy position overrides after a direct entity transform so instance-specific overrides stay fixed.
+	/// </summary>
+	private void ReapplyAliasOverridesPointingAt(HashSet<Node3D> targetNodes)
+	{
+		if (targetNodes == null || targetNodes.Count == 0)
+			return;
+
+		foreach (KeyValuePair<Node3D, Entity> entry in _nodeEntities)
 		{
-			target.Position = pos;
-			target.RotationDegrees = rot;
-			LevelViewerPick.InvalidatePickBounds(target);
-			if (context.EntityNode != null && context.EntityNode != target)
-				LevelViewerPick.InvalidatePickBounds(context.EntityNode);
+			if (entry.Key is not EntityOverride entityOverride || entityOverride.PointedEntity == null)
+				continue;
+
+			if (!targetNodes.Contains(entityOverride.PointedEntity))
+				continue;
+
+			Entity sourceEntity = entry.Value;
+			if (sourceEntity == null || sourceEntity.GetParameter("position") == null)
+				continue;
+
+			GetEntityTransform(sourceEntity, out Vector3 position, out Vector3 rotation);
+			entityOverride.PointedEntity.Position = position;
+			entityOverride.PointedEntity.RotationDegrees = rotation;
+			EntityNodeUtil.SetPointed(entityOverride.PointedEntity, true);
+			LevelViewerPick.InvalidatePickBounds(entityOverride.PointedEntity);
 		}
 	}
 

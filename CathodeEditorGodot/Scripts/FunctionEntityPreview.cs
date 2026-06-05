@@ -14,9 +14,23 @@ public abstract partial class FunctionEntityPreview : Node3D
         Entity = entity;
         OwnerCompositeId = ownerCompositeId;
         Refresh();
+        RegisterPickablesWithOwner();
     }
 
     public abstract void Refresh();
+
+    /// <summary>
+    /// Registers any preview mesh instances under the owning entity node for screen picking.
+    /// Safe to call repeatedly when visuals are created lazily or rebuilt.
+    /// </summary>
+    public void RegisterPickablesWithOwner()
+    {
+        Node3D owner = GetParent() as Node3D;
+        if (owner == null || !GodotObject.IsInstanceValid(owner))
+            return;
+
+        LevelViewerPick.RegisterPickableSubtree(owner);
+    }
 
     /// <summary>
     /// Fast path for hide-nested / active-composite changes — toggles visibility without rebuilding visuals.
@@ -31,7 +45,10 @@ public abstract partial class FunctionEntityPreview : Node3D
             return;
 
         if (visible)
+        {
             Refresh();
+            RegisterPickablesWithOwner();
+        }
     }
 
     protected abstract Node3D GetVisibilityRoot();

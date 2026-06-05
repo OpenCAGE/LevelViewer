@@ -157,8 +157,34 @@ public static class LevelViewerPick
 		if (ownerEntityNode == null)
 			return;
 
+		PruneInvalidPickables(ownerEntityNode);
 		ownerEntityNode.SetMeta(OwnerEntityMetaKey, ownerEntityNode);
 		RegisterPickableRecursive(ownerEntityNode, ownerEntityNode);
+	}
+
+	private static void PruneInvalidPickables(Node3D ownerEntityNode)
+	{
+		if (!_pickablesByOwner.TryGetValue(ownerEntityNode, out List<MeshInstance3D> meshes))
+			return;
+
+		for (int i = meshes.Count - 1; i >= 0; i--)
+		{
+			MeshInstance3D mesh = meshes[i];
+			if (mesh != null && GodotObject.IsInstanceValid(mesh))
+				continue;
+
+			if (mesh != null)
+				_registeredPickables.Remove(mesh);
+
+			meshes.RemoveAt(i);
+		}
+
+		if (meshes.Count == 0)
+		{
+			_pickablesByOwner.Remove(ownerEntityNode);
+			_ownerGlobalBounds.Remove(ownerEntityNode);
+			_scopedPickablesDirty = true;
+		}
 	}
 
 	public static void RegisterPickableMesh(MeshInstance3D meshInstance, Node3D ownerNode)
@@ -1185,7 +1211,9 @@ public static class LevelViewerPick
 
 		return path.Contains("double_sided")
 			|| path.Contains("preview_icon_billboard")
-			|| path.Contains("preview_overlay_line");
+			|| path.Contains("preview_overlay_line")
+			|| path.Contains("preview_opaque")
+			|| path.Contains("preview_transparent");
 	}
 
 	private static bool TryRayIntersectTriangle(

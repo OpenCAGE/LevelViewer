@@ -1105,6 +1105,8 @@ public partial class AlienScene : Node3D
 				continue;
 			others[i].Refresh();
 		}
+
+		LevelViewerPick.RegisterPickableSubtree(entityNode);
 	}
 
 	public void InvalidateFunctionEntityPreviewCache()
@@ -1196,6 +1198,7 @@ public partial class AlienScene : Node3D
 			}
 
 			preview.Refresh();
+			preview.RegisterPickablesWithOwner();
 		}
 	}
 

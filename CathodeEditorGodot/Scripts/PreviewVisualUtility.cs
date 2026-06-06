@@ -134,6 +134,70 @@ public static class PreviewVisualUtility
         material.RenderPriority = OpaqueRenderPriority;
     }
 
+    public static bool IsIconBillboardMaterial(Material material)
+    {
+        if (material is not ShaderMaterial shaderMaterial || shaderMaterial.Shader == null)
+            return false;
+
+        string path = shaderMaterial.Shader.ResourcePath;
+        return !string.IsNullOrEmpty(path) && path.Contains("preview_icon_billboard");
+    }
+
+    /// <summary>
+    /// Ray test against a camera-facing icon billboard quad (matches preview_icon_billboard.gdshader).
+    /// </summary>
+    public static bool TryRayIntersectIconBillboard(
+        MeshInstance3D meshInstance,
+        Camera3D camera,
+        Vector3 rayOrigin,
+        Vector3 rayDirection,
+        out float distance)
+    {
+        distance = 0f;
+        if (meshInstance == null || !GodotObject.IsInstanceValid(meshInstance)
+            || camera == null || !GodotObject.IsInstanceValid(camera))
+        {
+            return false;
+        }
+
+        Transform3D model = meshInstance.GlobalTransform;
+        Vector3 scale = new Vector3(
+            model.Basis.Column0.Length(),
+            model.Basis.Column1.Length(),
+            model.Basis.Column2.Length());
+        Vector3 center = model.Origin;
+
+        Basis cameraBasis = camera.GlobalTransform.Basis;
+        Vector3 cameraRight = cameraBasis.Column0;
+        Vector3 cameraUp = cameraBasis.Column1;
+        Vector3 cameraForward = -cameraBasis.Column2;
+
+        float denom = rayDirection.Dot(cameraForward);
+        if (Mathf.Abs(denom) < 0.000001f)
+            return false;
+
+        float planeDistance = (center - rayOrigin).Dot(cameraForward) / denom;
+        if (planeDistance < 0.000001f)
+            return false;
+
+        Vector3 hit = rayOrigin + rayDirection * planeDistance;
+        Vector3 offset = hit - center;
+        float localX = offset.Dot(cameraRight) / scale.X;
+        float localY = offset.Dot(cameraUp) / scale.Y;
+        if (localX < -0.5f || localX > 0.5f || localY < -0.5f || localY > 0.5f)
+            return false;
+
+        distance = planeDistance;
+        return true;
+    }
+
+    public static Aabb GetIconBillboardPickBounds(MeshInstance3D meshInstance)
+    {
+        Transform3D model = meshInstance.GlobalTransform;
+        Vector3 halfExtents = Vector3.One * (IconBillboardWorldSize * 0.5f);
+        return new Aabb(model.Origin - halfExtents, halfExtents * 2f);
+    }
+
     public static bool IsVisible(FunctionEntity entity)
     {
         return IsPreviewVisible(entity, 0);

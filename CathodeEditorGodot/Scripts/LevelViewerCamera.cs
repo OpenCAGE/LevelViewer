@@ -269,7 +269,8 @@ public partial class LevelViewerCamera : Camera3D
             if (!ShouldAutoFrameLoadedContent())
                 return;
 
-            if (LevelViewerView.TryComputeGlobalAabb(_alienScene.ParentNode, out Aabb bounds) && bounds.HasVolume())
+            _alienScene.TryResolveInitialFocusPoint(out _, out bool focusResolved);
+            if (focusResolved || i >= 2)
                 break;
         }
 
@@ -279,13 +280,16 @@ public partial class LevelViewerCamera : Camera3D
         if (!ShouldAutoFrameLoadedContent())
             return;
 
-        if (!LevelViewerView.TryComputeGlobalAabb(_alienScene.ParentNode, out Aabb contentBounds) || !contentBounds.HasVolume())
-            return;
-
         Vector3 positionBefore = GlobalPosition;
-        _alienScene.RecenterContentOrigin();
-        LevelViewerView.FrameRuntimeCamera(_alienScene.ParentNode, this);
-        SyncAnglesFromTransform();
+        _alienScene.TryResolveInitialFocusPoint(out Vector3 focusPoint, out bool hasExplicitFocus);
+        if (hasExplicitFocus)
+            _alienScene.RecenterContentOrigin();
+        LevelViewerView.FrameRuntimeCameraOnPoint(
+            hasExplicitFocus ? Vector3.Zero : focusPoint,
+            this,
+            distance: FocusDistanceScale * 8f,
+            minDistance: FocusMinDistance,
+            maxDistance: FocusMaxDistance);
         if (ShouldShowCameraPosition())
             UpdatePositionHud(positionBefore);
 

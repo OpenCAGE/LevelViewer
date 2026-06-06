@@ -442,22 +442,168 @@ public partial class AlienScene : Node3D
 		RefreshCompositeFocus();
 	}
 
-	/// <summary>Moves level root so loaded content is centered near the origin for stable rendering.</summary>
+	/// <summary>Moves level root so the initial focus point sits near the origin for stable rendering.</summary>
 	public void RecenterContentOrigin()
 	{
 		if (_parentNode == null || !GodotObject.IsInstanceValid(_parentNode))
 			return;
 
-		if (!LevelViewerView.TryComputeGlobalAabb(_parentNode, out Aabb bounds) || !bounds.HasVolume())
+		TryResolveInitialFocusPoint(out Vector3 focusPoint, out bool hasExplicitFocus);
+		if (!hasExplicitFocus)
 			return;
 
-		Vector3 center = bounds.GetCenter();
-		if (_contentOrigin.DistanceSquaredTo(center) < 0.25f)
+		if (_contentOrigin.DistanceSquaredTo(focusPoint) < 0.25f)
 			return;
 
-		_contentOrigin = center;
+		_contentOrigin = focusPoint;
 		_parentNode.Position = -_contentOrigin;
 		LevelViewerPick.InvalidateAllPickBounds();
+	}
+
+	/// <summary>
+	/// Resolves a world-space point for initial camera framing:
+	/// first entity in the active composite, else the composite instance in the drill path, else origin.
+	/// </summary>
+	public bool TryResolveInitialFocusPoint(out Vector3 worldFocusPoint)
+	{
+		return TryResolveInitialFocusPoint(out worldFocusPoint, out _);
+	}
+
+	public bool TryResolveInitialFocusPoint(out Vector3 worldFocusPoint, out bool hasExplicitFocus)
+	{
+		worldFocusPoint = Vector3.Zero;
+		hasExplicitFocus = false;
+		if (_loadedComposite == null || !_content.Loaded)
+			return true;
+
+		Commands commands = _content.Level.Commands;
+		uint activeCompositeId = PreviewVisibilitySettings.ActiveCompositeId;
+		if (activeCompositeId == 0)
+			activeCompositeId = _loadedComposite.shortGUID.AsUInt32;
+
+		Composite composite = commands.GetComposite(new ShortGuid(activeCompositeId));
+		if (composite == null)
+			return true;
+
+		if (CompositeDefinesEntities(composite))
+		{
+			foreach (Entity entity in EnumerateCompositeEntities(composite))
+			{
+				if (TryGetEntitySceneWorldPosition(composite.shortGUID, entity.shortGUID, out worldFocusPoint)
+					|| TryGetEntityWorldPositionFromTransform(entity, out worldFocusPoint))
+				{
+					hasExplicitFocus = true;
+					return true;
+				}
+			}
+		}
+
+		if (TryGetInstancePathWorldPosition(out worldFocusPoint))
+		{
+			hasExplicitFocus = true;
+			return true;
+		}
+
+		worldFocusPoint = Vector3.Zero;
+		return true;
+	}
+
+	private static bool CompositeDefinesEntities(Composite composite)
+	{
+		return composite != null
+			&& (composite.functions.Count > 0
+				|| composite.variables.Count > 0
+				|| composite.aliases.Count > 0
+				|| composite.proxies.Count > 0);
+	}
+
+	private static IEnumerable<Entity> EnumerateCompositeEntities(Composite composite)
+	{
+		foreach (Entity entity in composite.functions)
+			yield return entity;
+		foreach (Entity entity in composite.variables)
+			yield return entity;
+		foreach (Entity entity in composite.aliases)
+			yield return entity;
+		foreach (Entity entity in composite.proxies)
+			yield return entity;
+	}
+
+	private bool TryGetEntitySceneWorldPosition(ShortGuid compositeId, ShortGuid entityId, out Vector3 worldPosition)
+	{
+		worldPosition = Vector3.Zero;
+		if (TryGetCachedEntityNodes(compositeId, entityId, out List<Node3D> cachedNodes))
+		{
+			for (int i = 0; i < cachedNodes.Count; i++)
+			{
+				Node3D node = cachedNodes[i];
+				if (node != null && GodotObject.IsInstanceValid(node) && node.IsInsideTree())
+				{
+					worldPosition = node.GlobalPosition;
+					return true;
+				}
+			}
+		}
+
+		uint[] instancePath = PreviewVisibilitySettings.ActiveInstanceEntityPath;
+		List<uint> path = new List<uint>();
+		if (instancePath != null && instancePath.Length > 0)
+			path.AddRange(instancePath);
+		path.Add(entityId.AsUInt32);
+
+		Node3D pathNode = GetEntityNode(path, _parentNode);
+		if (pathNode != null && GodotObject.IsInstanceValid(pathNode))
+		{
+			worldPosition = pathNode.GlobalPosition;
+			return true;
+		}
+
+		return false;
+	}
+
+	private Node3D ResolveActiveCompositeParentNode()
+	{
+		if (_parentNode == null || !GodotObject.IsInstanceValid(_parentNode))
+			return null;
+
+		uint[] instancePath = PreviewVisibilitySettings.ActiveInstanceEntityPath;
+		if (instancePath != null && instancePath.Length > 0)
+		{
+			Node3D pathNode = GetEntityNode(new List<uint>(instancePath), _parentNode);
+			if (pathNode != null && GodotObject.IsInstanceValid(pathNode))
+				return pathNode;
+		}
+
+		return _parentNode;
+	}
+
+	private bool TryGetEntityWorldPositionFromTransform(Entity entity, out Vector3 worldPosition)
+	{
+		worldPosition = Vector3.Zero;
+		if (entity == null || !GetEntityTransform(entity, out Vector3 localPosition, out _))
+			return false;
+
+		Node3D parentNode = ResolveActiveCompositeParentNode();
+		if (parentNode == null)
+			return false;
+
+		worldPosition = parentNode.GlobalTransform * localPosition;
+		return true;
+	}
+
+	private bool TryGetInstancePathWorldPosition(out Vector3 worldPosition)
+	{
+		worldPosition = Vector3.Zero;
+		uint[] instancePath = PreviewVisibilitySettings.ActiveInstanceEntityPath;
+		if (instancePath == null || instancePath.Length == 0)
+			return false;
+
+		Node3D node = GetEntityNode(new List<uint>(instancePath), _parentNode);
+		if (node == null || !GodotObject.IsInstanceValid(node))
+			return false;
+
+		worldPosition = node.GlobalPosition;
+		return true;
 	}
 
 	private void AddCompositeInstance(Composite composite, Node3D compositeNode, Entity parentEntity)

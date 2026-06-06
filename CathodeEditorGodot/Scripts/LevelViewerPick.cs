@@ -287,7 +287,9 @@ public static class LevelViewerPick
 				if (local.Size.LengthSquared() <= RayEpsilon)
 					continue;
 
-				Aabb global = mesh.GlobalTransform * local;
+				Aabb global = PreviewVisualUtility.IsIconBillboardMaterial(mesh.MaterialOverride ?? mesh.GetActiveMaterial(0))
+					? PreviewVisualUtility.GetIconBillboardPickBounds(mesh)
+					: mesh.GlobalTransform * local;
 				if (!hasBounds)
 				{
 					merged = global;
@@ -308,6 +310,7 @@ public static class LevelViewerPick
 
 	private static bool TryPickOwner(
 		Node3D owner,
+		Camera3D camera,
 		Vector3 origin,
 		Vector3 direction,
 		ref PickHit? best)
@@ -329,7 +332,7 @@ public static class LevelViewerPick
 			if (meshInstance == null || !GodotObject.IsInstanceValid(meshInstance))
 				continue;
 
-			if (!TryRayIntersectMeshInstance(meshInstance, origin, direction, out float distance))
+			if (!TryRayIntersectMeshInstance(meshInstance, camera, origin, direction, out float distance))
 				continue;
 
 			if (best.HasValue && distance >= best.Value.Distance)
@@ -366,7 +369,7 @@ public static class LevelViewerPick
 
 		PickHit? best = null;
 		for (int i = 0; i < _scopedPickOwners.Count; i++)
-			TryPickOwner(_scopedPickOwners[i], origin, direction, ref best);
+			TryPickOwner(_scopedPickOwners[i], camera, origin, direction, ref best);
 
 		return best;
 	}
@@ -1074,6 +1077,7 @@ public static class LevelViewerPick
 
 	private static bool TryRayIntersectMeshInstance(
 		MeshInstance3D meshInstance,
+		Camera3D camera,
 		Vector3 origin,
 		Vector3 direction,
 		out float distance)
@@ -1081,6 +1085,10 @@ public static class LevelViewerPick
 		distance = 0f;
 		if (meshInstance == null || !GodotObject.IsInstanceValid(meshInstance))
 			return false;
+
+		Material material = meshInstance.MaterialOverride ?? meshInstance.GetActiveMaterial(0);
+		if (PreviewVisualUtility.IsIconBillboardMaterial(material))
+			return PreviewVisualUtility.TryRayIntersectIconBillboard(meshInstance, camera, origin, direction, out distance);
 
 		Mesh mesh = meshInstance.Mesh;
 		if (mesh == null || mesh.GetSurfaceCount() == 0)

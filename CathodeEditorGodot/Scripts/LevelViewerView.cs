@@ -123,6 +123,30 @@ public static class LevelViewerView
 		FrameRuntimeCameraClose(target, camera, distanceScale: 2.8f, minDistance: 4f, maxDistance: 500000f);
 	}
 
+	/// <summary>
+	/// Places the camera slightly above and behind a world-space point (used for initial composite framing).
+	/// </summary>
+	public static void FrameRuntimeCameraOnPoint(
+		Vector3 focusPoint,
+		Camera3D camera = null,
+		float distance = 12f,
+		float minDistance = 4f,
+		float maxDistance = 64f)
+	{
+		if (camera == null || !GodotObject.IsInstanceValid(camera))
+			return;
+
+		distance = Mathf.Clamp(distance, minDistance, maxDistance);
+		Vector3 viewOffset = new Vector3(0.85f, 0.55f, 0.85f).Normalized() * distance;
+		camera.GlobalPosition = focusPoint + viewOffset;
+		camera.LookAt(focusPoint, Vector3.Up);
+		camera.Near = 0.05f;
+		camera.Far = Mathf.Max(distance * 50f, 50000f);
+
+		if (camera is LevelViewerCamera viewerCamera)
+			viewerCamera.SyncAnglesFromTransform();
+	}
+
 	/// <summary>Move the game camera to a close, entity-focused view (selection / focus).</summary>
 	public static void FrameRuntimeCameraClose(
 		Node3D target,

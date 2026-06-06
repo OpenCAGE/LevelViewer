@@ -12,6 +12,8 @@ public static class LevelViewerSelection
     private const float TintMixWeight = 0.5f;
 
     private static readonly Dictionary<MeshInstance3D, Material> _savedMaterialOverrides = new();
+    private static readonly Dictionary<MeshInstance3D, Material> _savedBillboardOverlays = new();
+    private static ShaderMaterial _billboardHighlightOverlay;
     private static Node3D _selectionRoot;
 
     public static void SetSelectionRoot(Node3D root) => _selectionRoot = root;
@@ -66,7 +68,9 @@ public static class LevelViewerSelection
 		for (int i = 0; i < _selectionMeshes.Count; i++)
 		{
 			MeshInstance3D mesh = _selectionMeshes[i];
-			if (mesh != null && GodotObject.IsInstanceValid(mesh) && !_savedMaterialOverrides.ContainsKey(mesh))
+			if (mesh != null && GodotObject.IsInstanceValid(mesh)
+				&& !_savedMaterialOverrides.ContainsKey(mesh)
+				&& !_savedBillboardOverlays.ContainsKey(mesh))
 				TintMeshInstance(mesh);
 		}
 	}
@@ -113,6 +117,16 @@ public static class LevelViewerSelection
         if (current == null)
             return;
 
+        if (PreviewVisualUtility.IsIconBillboardMaterial(current))
+        {
+            if (_savedBillboardOverlays.ContainsKey(meshInstance))
+                return;
+
+            _savedBillboardOverlays[meshInstance] = meshInstance.MaterialOverlay;
+            meshInstance.MaterialOverlay = GetBillboardHighlightOverlay();
+            return;
+        }
+
         _savedMaterialOverrides[meshInstance] = meshInstance.MaterialOverride;
 
         Material tinted = (Material)current.Duplicate();
@@ -148,6 +162,22 @@ public static class LevelViewerSelection
             material.SetShaderParameter(parameterName, BlendHighlightColor(value.AsColor()));
     }
 
+    private static ShaderMaterial GetBillboardHighlightOverlay()
+    {
+        if (_billboardHighlightOverlay == null)
+        {
+            _billboardHighlightOverlay = new ShaderMaterial
+            {
+                Shader = GD.Load<Shader>("res://shaders/selection_highlight_overlay_billboard.gdshader"),
+            };
+            _billboardHighlightOverlay.SetShaderParameter("highlight_color", HighlightGreen);
+            _billboardHighlightOverlay.SetShaderParameter("highlight_strength", 0.55f);
+            _billboardHighlightOverlay.RenderPriority = 2;
+        }
+
+        return _billboardHighlightOverlay;
+    }
+
     private static void RestoreMeshHighlights()
     {
         foreach (KeyValuePair<MeshInstance3D, Material> entry in _savedMaterialOverrides)
@@ -156,6 +186,13 @@ public static class LevelViewerSelection
                 entry.Key.MaterialOverride = entry.Value;
         }
 
+        foreach (KeyValuePair<MeshInstance3D, Material> entry in _savedBillboardOverlays)
+        {
+            if (entry.Key != null && GodotObject.IsInstanceValid(entry.Key))
+                entry.Key.MaterialOverlay = entry.Value;
+        }
+
         _savedMaterialOverrides.Clear();
+        _savedBillboardOverlays.Clear();
     }
 }

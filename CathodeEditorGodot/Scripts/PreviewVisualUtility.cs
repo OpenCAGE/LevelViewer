@@ -226,6 +226,64 @@ public static class PreviewVisualUtility
         return true;
     }
 
+    /// <summary>
+    /// Transform gizmos only apply to entities that can appear in the viewer (render-filter previews or model references).
+    /// </summary>
+    public static bool SupportsTransformGizmo(FunctionEntity entity, uint ownerCompositeId)
+    {
+        if (entity == null || !entity.function.IsFunctionType)
+            return false;
+
+        FunctionType functionType = entity.function.AsFunctionType;
+
+        if (functionType == FunctionType.ModelReference)
+            return true;
+
+        if (!RenderFilterDefinitions.IsSupported(functionType))
+            return false;
+
+        return IsPreviewVisible(entity, ownerCompositeId);
+    }
+
+    public static bool HasValidWorldAnchor(Node3D node)
+    {
+        if (node == null || !GodotObject.IsInstanceValid(node) || !node.IsInsideTree())
+            return false;
+
+        Vector3 position = node.GlobalPosition;
+        if (!float.IsFinite(position.X) || !float.IsFinite(position.Y) || !float.IsFinite(position.Z))
+            return false;
+
+        Basis basis = node.GlobalBasis;
+        return IsFiniteVector(basis.Column0)
+            && IsFiniteVector(basis.Column1)
+            && IsFiniteVector(basis.Column2);
+    }
+
+    private static bool IsFiniteVector(Vector3 vector)
+        => float.IsFinite(vector.X) && float.IsFinite(vector.Y) && float.IsFinite(vector.Z);
+
+    public static void CollectMeshInstances(Node node, List<MeshInstance3D> meshes)
+    {
+        if (node == null || meshes == null)
+            return;
+
+        var pending = new System.Collections.Generic.Stack<Node>();
+        pending.Push(node);
+        while (pending.Count > 0)
+        {
+            Node current = pending.Pop();
+            if (current == null || !GodotObject.IsInstanceValid(current))
+                continue;
+
+            if (current is MeshInstance3D meshInstance)
+                meshes.Add(meshInstance);
+
+            foreach (Node child in current.GetChildren())
+                pending.Push(child);
+        }
+    }
+
     public static void PreparePreviewObject(Node3D node, bool opaque = true)
     {
         MeshInstance3D meshInstance = node as MeshInstance3D;

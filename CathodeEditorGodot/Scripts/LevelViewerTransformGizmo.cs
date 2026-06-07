@@ -106,8 +106,14 @@ public partial class LevelViewerTransformGizmo : Node3D
         _target  = target;
         _camera  = camera;
         _isDragging = false;
-        if (_target != null && GodotObject.IsInstanceValid(_target))
-            GlobalPosition = _target.GlobalPosition;
+        if (!PreviewVisualUtility.HasValidWorldAnchor(_target))
+        {
+            _target = null;
+            Visible = false;
+            return;
+        }
+
+        GlobalPosition = _target.GlobalPosition;
         RefreshVisibility();
     }
 
@@ -125,7 +131,8 @@ public partial class LevelViewerTransformGizmo : Node3D
     public override void _Process(double delta)
     {
         if (_mode == GizmoMode.None
-            || _target == null || !GodotObject.IsInstanceValid(_target))
+            || _target == null || !GodotObject.IsInstanceValid(_target)
+            || !PreviewVisualUtility.HasValidWorldAnchor(_target))
         {
             Visible = false;
             return;
@@ -314,8 +321,7 @@ public partial class LevelViewerTransformGizmo : Node3D
 
         ApplyDragSnap();
 
-        // Entity position parameters are parent-local — never sync GlobalPosition.
-        OnTransformChanged?.Invoke(_target.Position, _target.RotationDegrees);
+        // Sync to OpenCAGE / all entity instances only on CommitDrag — not every mouse-move frame.
     }
 
     private void ApplyDragSnap()
@@ -387,9 +393,18 @@ public partial class LevelViewerTransformGizmo : Node3D
 
     private static void SetGlobalQuaternion(Node3D node, Quaternion quat)
     {
+        if (!IsFiniteQuaternion(quat))
+            return;
+
         Transform3D global = node.GlobalTransform;
         global.Basis = new Basis(quat);
         node.GlobalTransform = global;
+    }
+
+    private static bool IsFiniteQuaternion(Quaternion quat)
+    {
+        return float.IsFinite(quat.X) && float.IsFinite(quat.Y)
+            && float.IsFinite(quat.Z) && float.IsFinite(quat.W);
     }
 
     private void CommitDrag()

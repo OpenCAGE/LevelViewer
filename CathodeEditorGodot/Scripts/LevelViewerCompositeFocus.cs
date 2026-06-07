@@ -16,6 +16,10 @@ public static class LevelViewerCompositeFocus
 	private static Shader _dimmedShaderDoubleSided;
 	private static Shader _dimmedTransparentShader;
 	private static Shader _dimmedTransparentShaderDoubleSided;
+	private static ShaderMaterial _cachedDimmedOpaque;
+	private static ShaderMaterial _cachedDimmedOpaqueDoubleSided;
+	private static ShaderMaterial _cachedDimmedTransparent;
+	private static ShaderMaterial _cachedDimmedTransparentDoubleSided;
 	private static readonly Dictionary<MeshInstance3D, Material> _savedMaterialOverrides = new();
 	private static readonly Dictionary<MeshInstance3D, bool> _meshDimmedState = new();
 	private static readonly HashSet<MeshInstance3D> _dimmedPickables = new();
@@ -263,28 +267,41 @@ public static class LevelViewerCompositeFocus
 			return;
 
 		_savedMaterialOverrides[meshInstance] = meshInstance.MaterialOverride;
-		meshInstance.MaterialOverride = CreateDimmedMaterial(current);
+		meshInstance.MaterialOverride = GetSharedDimmedMaterial(current);
 	}
 
-	private static Material CreateDimmedMaterial(Material original)
+	private static Material GetSharedDimmedMaterial(Material original)
 	{
 		bool doubleSided = IsDoubleSidedMaterial(original);
-		bool transparent = IsTransparentMaterial(original, out float opacity);
+		bool transparent = IsTransparentMaterial(original, out _);
 
-		Shader shader;
 		if (transparent)
 		{
-			shader = doubleSided
-				? GetDimmedTransparentDoubleSidedShader()
-				: GetDimmedTransparentShader();
-		}
-		else
-		{
-			shader = doubleSided
-				? GetDimmedDoubleSidedShader()
-				: GetDimmedShader();
+			if (doubleSided)
+			{
+				_cachedDimmedTransparentDoubleSided ??= CreateSharedDimmedMaterial(
+					GetDimmedTransparentDoubleSidedShader(), transparent: true);
+				return _cachedDimmedTransparentDoubleSided;
+			}
+
+			_cachedDimmedTransparent ??= CreateSharedDimmedMaterial(
+				GetDimmedTransparentShader(), transparent: true);
+			return _cachedDimmedTransparent;
 		}
 
+		if (doubleSided)
+		{
+			_cachedDimmedOpaqueDoubleSided ??= CreateSharedDimmedMaterial(
+				GetDimmedDoubleSidedShader(), transparent: false);
+			return _cachedDimmedOpaqueDoubleSided;
+		}
+
+		_cachedDimmedOpaque ??= CreateSharedDimmedMaterial(GetDimmedShader(), transparent: false);
+		return _cachedDimmedOpaque;
+	}
+
+	private static ShaderMaterial CreateSharedDimmedMaterial(Shader shader, bool transparent)
+	{
 		ShaderMaterial material = new ShaderMaterial
 		{
 			Shader = shader,
@@ -292,7 +309,7 @@ public static class LevelViewerCompositeFocus
 		material.SetShaderParameter("base_grey", DimBaseGrey);
 		if (transparent)
 		{
-			material.SetShaderParameter("opacity", opacity);
+			material.SetShaderParameter("opacity", 0.24f);
 			material.RenderPriority = TransparentRenderPriority;
 		}
 

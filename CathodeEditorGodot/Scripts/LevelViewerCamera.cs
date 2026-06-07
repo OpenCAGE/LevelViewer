@@ -80,6 +80,9 @@ public partial class LevelViewerCamera : Camera3D
         if (viewport != null)
             viewport.UseOcclusionCulling = false;
 
+        LevelViewerEnvironment.EnsureViewerEnvironment(this);
+        LevelViewerRenderIdleThrottle.NotifyUserActivity();
+
         SyncAnglesFromTransform();
         Callable.From(SetupHud).CallDeferred();
         Callable.From(SetupGizmoModeHud).CallDeferred();
@@ -108,6 +111,8 @@ public partial class LevelViewerCamera : Camera3D
 
     public override void _UnhandledInput(InputEvent @event)
     {
+        LevelViewerRenderIdleThrottle.NotifyUserActivity();
+
         if (TryHandleScrollWheel(@event))
         {
             GetViewport().SetInputAsHandled();
@@ -206,6 +211,7 @@ public partial class LevelViewerCamera : Camera3D
         Vector3 positionBefore = GlobalPosition;
 
         ApplyKeyboardMovement(deltaSeconds);
+        LevelViewerRenderIdleThrottle.Update(delta);
         if (ShouldShowCameraPosition())
             UpdatePositionHud(positionBefore);
         else
@@ -250,6 +256,10 @@ public partial class LevelViewerCamera : Camera3D
 
     private void OnCompositeLoaded()
     {
+        Viewport viewport = GetViewport();
+        if (viewport != null)
+            viewport.UseOcclusionCulling = ModelReferenceRenderSettings.UseDistanceCulling;
+
         FrameLoadedContentWhenReadyAsync();
     }
 
@@ -348,7 +358,10 @@ public partial class LevelViewerCamera : Camera3D
             move -= Vector3.Up;
 
         if (move.LengthSquared() > 0f)
+        {
+            LevelViewerRenderIdleThrottle.NotifyUserActivity();
             GlobalPosition += move.Normalized() * speed;
+        }
     }
 
     private void HandleMouseButtonPressed(InputEventMouseButton mouseButton)
@@ -672,11 +685,7 @@ public partial class LevelViewerCamera : Camera3D
 
         gizmo.SetMode(mode);
 
-        // Refresh gizmo target with current camera reference
-        if (_alienScene != null && _alienScene.TryGetSelectedEntity(out Node3D selected))
-            gizmo.SetTarget(selected, this);
-        else
-            gizmo.ClearTarget();
+        _commandsEditorConnection?.SyncTransformGizmoToSelection(this);
 
         string label = mode switch
         {
@@ -687,7 +696,7 @@ public partial class LevelViewerCamera : Camera3D
         };
 
         EnsureGizmoModeHud();
-        _gizmoModeHud?.ShowEntity(label);
+        _gizmoModeHud?.ShowEntity("Gizmo: " + label);
     }
 
     private bool TryGizmoMouseDown(Vector2 pos)

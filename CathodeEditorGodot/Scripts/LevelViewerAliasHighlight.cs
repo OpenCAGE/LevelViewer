@@ -6,16 +6,14 @@ using System;
 using System.Collections.Generic;
 
 /// <summary>
-/// Orange tint on instances targeted by parameterized aliases defined on the active composite.
+/// Orange additive overlay on instances targeted by parameterized aliases in the active composite.
+/// Uses the same MaterialOverlay path as selection highlights.
 /// </summary>
 public static class LevelViewerAliasHighlight
 {
 	public static readonly Color HighlightOrange = new(1f, 0.55f, 0.15f, 1f);
-	private static readonly Color TintMultiply = new(1.45f, 0.85f, 0.55f, 1f);
-	private static readonly Color TintMixToward = new(0.95f, 0.45f, 0.1f, 1f);
-	private const float TintMixWeight = 0.5f;
 
-	private static readonly Dictionary<MeshInstance3D, Material> _savedMaterialOverrides = new();
+	private static readonly Dictionary<MeshInstance3D, Material> _savedOverlays = new();
 	private static readonly List<MeshInstance3D> _highlightMeshes = new();
 	private static readonly List<MeshInstance3D> _meshCollectBuffer = new();
 
@@ -73,7 +71,7 @@ public static class LevelViewerAliasHighlight
 						alias,
 						ownerComposite,
 						out Node3D pointedNode,
-						preferCached: false))
+						preferCached: true))
 				{
 					continue;
 				}
@@ -90,23 +88,17 @@ public static class LevelViewerAliasHighlight
 		_cacheValid = true;
 	}
 
-	/// <summary>Re-applies cached orange tint while skipping the current selection subtree.</summary>
+	/// <summary>Re-applies cached orange overlay while skipping the current selection subtree.</summary>
 	public static void SyncWithSelection() => ReapplyIfActive();
 
 	public static void Clear()
 	{
-		foreach (KeyValuePair<MeshInstance3D, Material> entry in _savedMaterialOverrides)
-		{
-			if (entry.Key != null && GodotObject.IsInstanceValid(entry.Key))
-				entry.Key.MaterialOverride = entry.Value;
-		}
-
-		_savedMaterialOverrides.Clear();
+		LevelViewerHighlightOverlay.RestoreOverlays(_savedOverlays);
 		_highlightMeshes.Clear();
 		_cacheValid = false;
 	}
 
-	/// <summary>Restores materials orange-tinted under <paramref name="root"/> so selection green can take over.</summary>
+	/// <summary>Restores alias overlay under <paramref name="root"/> so selection green can take over.</summary>
 	public static void ReleaseNode(Node3D root)
 	{
 		if (root == null || !GodotObject.IsInstanceValid(root))
@@ -126,13 +118,13 @@ public static class LevelViewerAliasHighlight
 			if (mesh == null || !GodotObject.IsInstanceValid(mesh))
 				continue;
 
-			if (_savedMaterialOverrides.ContainsKey(mesh))
+			if (_savedOverlays.ContainsKey(mesh))
 				continue;
 
 			if (IsMeshUnderSelection(mesh))
 				continue;
 
-			TintMeshInstance(mesh);
+			ApplyMeshHighlight(mesh);
 		}
 	}
 
@@ -141,22 +133,10 @@ public static class LevelViewerAliasHighlight
 		if (mesh == null || !GodotObject.IsInstanceValid(mesh))
 			return;
 
-		if (_savedMaterialOverrides.TryGetValue(mesh, out Material saved))
-			mesh.MaterialOverride = saved;
+		if (_savedOverlays.TryGetValue(mesh, out Material saved))
+			mesh.MaterialOverlay = saved;
 
-		_savedMaterialOverrides.Remove(mesh);
-	}
-
-	private static void ReleaseMesh(MeshInstance3D mesh)
-	{
-		if (mesh == null || !GodotObject.IsInstanceValid(mesh))
-			return;
-
-		if (_savedMaterialOverrides.TryGetValue(mesh, out Material saved))
-			mesh.MaterialOverride = saved;
-
-		_savedMaterialOverrides.Remove(mesh);
-		_highlightMeshes.Remove(mesh);
+		_savedOverlays.Remove(mesh);
 	}
 
 	private static bool IsMeshUnderSelection(MeshInstance3D mesh)
@@ -194,69 +174,20 @@ public static class LevelViewerAliasHighlight
 			if (!_highlightMeshes.Contains(mesh))
 				_highlightMeshes.Add(mesh);
 
-			if (_savedMaterialOverrides.ContainsKey(mesh) || IsMeshUnderSelection(mesh))
+			if (_savedOverlays.ContainsKey(mesh) || IsMeshUnderSelection(mesh))
 				continue;
 
-			TintMeshInstance(mesh);
+			ApplyMeshHighlight(mesh);
 		}
 	}
 
 	private static void CollectMeshes(Node node, List<MeshInstance3D> meshes)
 	{
-		if (node is MeshInstance3D meshInstance)
-			meshes.Add(meshInstance);
-
-		foreach (Node child in node.GetChildren())
-			CollectMeshes(child, meshes);
+		PreviewVisualUtility.CollectMeshInstances(node, meshes);
 	}
 
-	private static Color BlendHighlightColor(Color color)
+	private static void ApplyMeshHighlight(MeshInstance3D meshInstance)
 	{
-		return color * TintMultiply + TintMixToward * TintMixWeight;
-	}
-
-	private static void TintMeshInstance(MeshInstance3D meshInstance)
-	{
-		if (meshInstance == null || !GodotObject.IsInstanceValid(meshInstance))
-			return;
-
-		if (meshInstance.IsInGroup("model_reference_wireframe_overlay"))
-			return;
-
-		if (_savedMaterialOverrides.ContainsKey(meshInstance))
-			return;
-
-		Material current = meshInstance.MaterialOverride ?? meshInstance.GetActiveMaterial(0);
-		if (current == null)
-			return;
-
-		_savedMaterialOverrides[meshInstance] = meshInstance.MaterialOverride;
-
-		Material tinted = (Material)current.Duplicate();
-		if (tinted is StandardMaterial3D standard)
-		{
-			standard.EmissionEnabled = true;
-			standard.Emission = HighlightOrange;
-			standard.EmissionEnergyMultiplier = 2f;
-			standard.AlbedoColor = BlendHighlightColor(standard.AlbedoColor);
-		}
-		else if (tinted is ShaderMaterial shaderMaterial)
-		{
-			shaderMaterial.SetShaderParameter("emission_enabled", true);
-			shaderMaterial.SetShaderParameter("emission", new Vector3(HighlightOrange.R, HighlightOrange.G, HighlightOrange.B));
-			shaderMaterial.SetShaderParameter("emission_energy", 2f);
-			TryTintShaderColor(shaderMaterial, "diffuse_tint");
-			TryTintShaderColor(shaderMaterial, "albedo_color");
-			TryTintShaderColor(shaderMaterial, "albedo");
-		}
-
-		meshInstance.MaterialOverride = tinted;
-	}
-
-	private static void TryTintShaderColor(ShaderMaterial material, string parameterName)
-	{
-		Variant value = material.GetShaderParameter(parameterName);
-		if (value.VariantType == Variant.Type.Color)
-			material.SetShaderParameter(parameterName, BlendHighlightColor(value.AsColor()));
+		LevelViewerHighlightOverlay.TryApplyOverlay(meshInstance, _savedOverlays, aliasHighlight: true);
 	}
 }

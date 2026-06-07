@@ -28,6 +28,7 @@ public partial class AlienScene : Node3D
 	private LevelViewerSelectionHud _selectionHud;
 	public uint CompositeID => _loadedComposite == null ? 0 : _loadedComposite.shortGUID.AsUInt32;
 	public string CompositeIDString => _loadedComposite == null || _loadedComposite.shortGUID == ShortGuid.Invalid ? "" : _loadedComposite.shortGUID.ToByteString();
+	public int ModelReferenceMeshCount => _modelReferenceMeshes.Count;
 	public string CompositeName => _loadedComposite == null ? "" : _loadedComposite.name;
 
 	private Dictionary<Textures.TEX4, TexOrCube> _texturesGlobal = new Dictionary<Textures.TEX4, TexOrCube>();
@@ -37,6 +38,10 @@ public partial class AlienScene : Node3D
 	private Dictionary<ShaderMaterial, bool> _materialSupport = new Dictionary<ShaderMaterial, bool>();
 	private Dictionary<MeshInstance3D, Materials.Material> _modelReferenceMeshes = new Dictionary<MeshInstance3D, Materials.Material>();
 	private Dictionary<Models.CS2.Component.LOD.Submesh, MeshHolder> _modelMeshes = new Dictionary<Models.CS2.Component.LOD.Submesh, MeshHolder>();
+	private MeshInstance3D[] _largeScenePolicyMeshes = System.Array.Empty<MeshInstance3D>();
+	private int _largeScenePolicyIndex;
+	private bool _largeScenePolicyRunning;
+	private const int LargeScenePolicyBatchSize = 8000;
 
 	/// <summary>Subtracted from Cathode world space so geometry sits near the origin (reduces float jitter / cull pops).</summary>
 	private Vector3 _contentOrigin = Vector3.Zero;
@@ -101,6 +106,7 @@ public partial class AlienScene : Node3D
 	public override void _Process(double delta)
 	{
 		AdvanceLoadPipeline();
+		AdvanceLargeSceneRenderPolicyBatch();
 		_selectionHud?.UpdateFade((float)delta);
 	}
 
@@ -197,6 +203,30 @@ public partial class AlienScene : Node3D
 		return entity != null && GodotObject.IsInstanceValid(entity);
 	}
 
+	public bool SupportsTransformGizmo(Node3D selectedNode)
+	{
+		if (selectedNode == null || !GodotObject.IsInstanceValid(selectedNode) || _parentNode == null)
+			return false;
+
+		Node3D entityNode = LevelViewerPick.ResolveNearestEntityNode(selectedNode, _nodeEntities);
+		if (entityNode == null || !_nodeEntities.TryGetValue(entityNode, out Entity entity))
+			return false;
+
+		if (entity is not FunctionEntity function)
+			return false;
+
+		Commands commands = _content?.Level?.Commands;
+		if (commands != null && LevelViewerPick.IsCompositeInstanceEntity(entity, commands))
+			return true;
+
+		uint ownerCompositeId = entityNode.HasMeta(OwnerCompositeMetaKey)
+			? entityNode.GetMeta(OwnerCompositeMetaKey).AsUInt32()
+			: 0;
+
+		return PreviewVisualUtility.SupportsTransformGizmo(function, ownerCompositeId)
+			&& PreviewVisualUtility.HasValidWorldAnchor(selectedNode);
+	}
+
 	public bool TryHideSelectedEntity()
 	{
 		if (!_content.Loaded || !TryGetSelectedEntity(out Node3D selected))
@@ -265,6 +295,8 @@ public partial class AlienScene : Node3D
 		_materials.Clear();
 		_wireframeMaterials.Clear();
 		_modelReferenceMeshes.Clear();
+		CancelLargeSceneRenderPolicy();
+		ModelReferenceRenderSettings.ResetForLevelLoad();
 		_materialSupport.Clear();
 
 		foreach (KeyValuePair<Textures.TEX4, TexOrCube> kvp in _texturesLevel)
@@ -424,6 +456,8 @@ public partial class AlienScene : Node3D
 		ClearSelectedEntity();
 		LevelViewerSelection.Clear();
 		LevelViewerPick.ClearRegistry();
+		CancelLargeSceneRenderPolicy();
+		ModelReferenceRenderSettings.ResetForLevelLoad();
 
 		if (_parentNode != null && GodotObject.IsInstanceValid(_parentNode))
 			_parentNode.QueueFree();
@@ -440,6 +474,8 @@ public partial class AlienScene : Node3D
 		InvalidateFunctionEntityPreviewCache();
 		RefreshRenderFilters();
 		RefreshCompositeFocus();
+		ModelReferenceRenderSettings.FinalizeLevelLoad(_modelReferenceMeshes.Count);
+		QueueLargeSceneRenderPolicyApply();
 	}
 
 	/// <summary>Moves level root so the initial focus point sits near the origin for stable rendering.</summary>
@@ -702,9 +738,9 @@ public partial class AlienScene : Node3D
 					EntityNodeUtil.SetPointed(aliasedNode, true);
 					aliasedNode.Position = position;
 					aliasedNode.RotationDegrees = rotation;
+					LevelViewerAliasHighlight.InvalidateCache();
 				}
 
-				LevelViewerAliasHighlight.InvalidateCache();
 				break;
 			}
 			case EntityVariant.PROXY:
@@ -919,8 +955,15 @@ public partial class AlienScene : Node3D
 			return;
 		}
 
-		LevelViewerCompositeFocus.Refresh(_parentNode, _parentNode, _content.Level.Commands);
-		RefreshAliasHighlights();
+		try
+		{
+			LevelViewerCompositeFocus.Refresh(_parentNode, _parentNode, _content.Level.Commands);
+			RefreshAliasHighlights(forceRebuild: false);
+		}
+		catch (System.Exception ex)
+		{
+			GD.PrintErr("[Viewer] Composite focus refresh failed: " + ex);
+		}
 	}
 
 	public void SelectEntity(List<uint> entityPath, List<uint> compositePath, bool entitySelected, bool focusSelected)
@@ -944,13 +987,26 @@ public partial class AlienScene : Node3D
 		_selectedEntity = entityNode;
 		LevelViewerAliasHighlight.ReleaseNode(entityNode);
 		LevelViewerSelection.Apply(entityNode);
-		RefreshAliasHighlights(forceRebuild: false);
+		try
+		{
+			if (PreviewVisibilitySettings.HighlightAliases)
+			{
+				if (LevelViewerAliasHighlight.NeedsRebuild(PreviewVisibilitySettings.ActiveCompositeId))
+					LevelViewerAliasHighlight.Rebuild(this, _content.Level.Commands, PreviewVisibilitySettings.ActiveCompositeId);
+				else
+					LevelViewerAliasHighlight.SyncWithSelection();
+			}
+		}
+		catch (System.Exception ex)
+		{
+			LevelViewerAliasHighlight.InvalidateCache();
+			GD.PrintErr("[Viewer] Alias highlight failed: " + ex);
+		}
 
-		if (entityNode != null)
-			GD.Print("SelectEntity: " + string.Join("/", entityPath) + " -> " + entityNode.Name);
+		LevelViewerSelection.ReapplyIfSelectionActive();
 
 		ShowEntitySelectionHud(entityPath, compositePath);
-		OnSelectionChanged?.Invoke(entityNode);
+		Callable.From(() => OnSelectionChanged?.Invoke(entityNode)).CallDeferred();
 
 		if (focusSelected && entityNode != null)
 			Callable.From(() => FocusSelectedEntity(entityNode)).CallDeferred();
@@ -1606,6 +1662,8 @@ public partial class AlienScene : Node3D
 		if (!IsMaterialSupported(material))
 			return;
 
+		ModelReferenceRenderSettings.NotifyMeshSpawned(_modelReferenceMeshes.Count + 1);
+
 		MeshInstance3D meshInstance = new MeshInstance3D
 		{
 			Name = holder.MainMesh.ResourceName + " (" + material.Name + ")",
@@ -1618,8 +1676,54 @@ public partial class AlienScene : Node3D
 		_modelReferenceMeshes[meshInstance] = material;
 		meshInstance.MaterialOverride = GetSolidMaterial(material);
 		parent.AddChild(meshInstance);
-		UpdateWireframeOverlay(meshInstance, material);
+		if (ModelReferenceRenderSettings.WireframeEnabled)
+			UpdateWireframeOverlay(meshInstance, material);
 		LevelViewerPick.RegisterPickableMesh(meshInstance, parent);
+	}
+
+	private void QueueLargeSceneRenderPolicyApply()
+	{
+		CancelLargeSceneRenderPolicy();
+		if (!ModelReferenceRenderSettings.UseDistanceCulling)
+			return;
+
+		_largeScenePolicyMeshes = _modelReferenceMeshes.Keys.ToArray();
+		_largeScenePolicyIndex = 0;
+		_largeScenePolicyRunning = _largeScenePolicyMeshes.Length > 0;
+	}
+
+	private void CancelLargeSceneRenderPolicy()
+	{
+		_largeScenePolicyRunning = false;
+		_largeScenePolicyIndex = 0;
+		_largeScenePolicyMeshes = System.Array.Empty<MeshInstance3D>();
+	}
+
+	private void AdvanceLargeSceneRenderPolicyBatch()
+	{
+		if (!_largeScenePolicyRunning)
+			return;
+
+		float visibilityEnd = ModelReferenceRenderSettings.VisibilityRangeEnd;
+		int end = Mathf.Min(_largeScenePolicyIndex + LargeScenePolicyBatchSize, _largeScenePolicyMeshes.Length);
+		for (int i = _largeScenePolicyIndex; i < end; i++)
+		{
+			MeshInstance3D mesh = _largeScenePolicyMeshes[i];
+			if (mesh == null || !GodotObject.IsInstanceValid(mesh))
+				continue;
+
+			LevelViewerMeshUtil.ApplyLargeSceneOptimizations(mesh, visibilityEnd);
+			MeshInstance3D overlay = FindWireframeOverlay(mesh);
+			if (overlay != null)
+				LevelViewerMeshUtil.ApplyLargeSceneOptimizations(overlay, visibilityEnd);
+		}
+
+		_largeScenePolicyIndex = end;
+		if (_largeScenePolicyIndex >= _largeScenePolicyMeshes.Length)
+		{
+			_largeScenePolicyRunning = false;
+			_largeScenePolicyMeshes = System.Array.Empty<MeshInstance3D>();
+		}
 	}
 
 	private bool GetEntityTransform(Entity entity, out Vector3 position, out Vector3 rotation)
@@ -1652,8 +1756,9 @@ public partial class AlienScene : Node3D
 		{
 			Models.CS2.Component.LOD lod = _content.Level.Models.FindModelLOD(submesh);
 			Models.CS2 mesh = _content.Level.Models.FindModel(submesh);
+			string modelName = ((mesh == null) ? "?" : mesh.Name) + ": " + ((lod == null) ? "?" : lod.Name);
 			ArrayMesh arrayMesh = submesh.ToArrayMesh();
-			arrayMesh.ResourceName = ((mesh == null) ? "" : mesh.Name) + ": " + ((lod == null) ? "" : lod.Name);
+			arrayMesh.ResourceName = modelName;
 
 			submesh.Data = null;
 

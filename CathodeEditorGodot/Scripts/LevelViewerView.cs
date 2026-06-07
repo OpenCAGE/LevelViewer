@@ -20,20 +20,29 @@ public static class LevelViewerView
 		return hasBounds && bounds.HasVolume();
 	}
 
-	private static void AccumulateAabb(Node node, ref Aabb bounds, ref bool hasBounds)
+	private static void AccumulateAabb(Node root, ref Aabb bounds, ref bool hasBounds)
 	{
-		if (node == null || !GodotObject.IsInstanceValid(node))
+		if (root == null)
 			return;
 
-		if (node is VisualInstance3D visual
-			&& TryGetGlobalVisualAabb(visual, out Aabb global))
+		var pending = new System.Collections.Generic.Stack<Node>();
+		pending.Push(root);
+		while (pending.Count > 0)
 		{
-			bounds = hasBounds ? bounds.Merge(global) : global;
-			hasBounds = true;
-		}
+			Node node = pending.Pop();
+			if (node == null || !GodotObject.IsInstanceValid(node))
+				continue;
 
-		foreach (Node child in node.GetChildren())
-			AccumulateAabb(child, ref bounds, ref hasBounds);
+			if (node is VisualInstance3D visual
+				&& TryGetGlobalVisualAabb(visual, out Aabb global))
+			{
+				bounds = hasBounds ? bounds.Merge(global) : global;
+				hasBounds = true;
+			}
+
+			foreach (Node child in node.GetChildren())
+				pending.Push(child);
+		}
 	}
 
 	private static bool TryGetGlobalVisualAabb(VisualInstance3D visual, out Aabb global)

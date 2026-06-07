@@ -65,6 +65,8 @@ public static class LevelViewerPick
 		_scopedPickablesDirty = true;
 	}
 
+	public static int PickOwnerCount => _pickablesByOwner.Count;
+
 	public static void SetOwnerSuppressed(Node3D owner, bool suppressed)
 	{
 		if (owner == null || !GodotObject.IsInstanceValid(owner))

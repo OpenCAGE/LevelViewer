@@ -48,26 +48,43 @@ public static class EntityNodeUtil
 
     private static void CollectPreviews<T>(Node node, List<T> results) where T : FunctionEntityPreview
     {
-        if (node is T preview)
-            results.Add(preview);
+        var pending = new Stack<Node>();
+        pending.Push(node);
+        while (pending.Count > 0)
+        {
+            Node current = pending.Pop();
+            if (current == null || !GodotObject.IsInstanceValid(current))
+                continue;
 
-        foreach (Node child in node.GetChildren())
-            CollectPreviews(child, results);
+            if (current is T preview)
+                results.Add(preview);
+
+            foreach (Node child in current.GetChildren())
+                pending.Push(child);
+        }
     }
 
     public static FunctionEntityPreview[] FindAllPreviews(Node root)
     {
         List<FunctionEntityPreview> results = new List<FunctionEntityPreview>();
-        CollectAllPreviews(root, results);
+        if (root == null)
+            return results.ToArray();
+
+        var pending = new Stack<Node>();
+        pending.Push(root);
+        while (pending.Count > 0)
+        {
+            Node current = pending.Pop();
+            if (current == null || !GodotObject.IsInstanceValid(current))
+                continue;
+
+            if (current is FunctionEntityPreview preview)
+                results.Add(preview);
+
+            foreach (Node child in current.GetChildren())
+                pending.Push(child);
+        }
+
         return results.ToArray();
-    }
-
-    private static void CollectAllPreviews(Node node, List<FunctionEntityPreview> results)
-    {
-        if (node is FunctionEntityPreview preview)
-            results.Add(preview);
-
-        foreach (Node child in node.GetChildren())
-            CollectAllPreviews(child, results);
     }
 }

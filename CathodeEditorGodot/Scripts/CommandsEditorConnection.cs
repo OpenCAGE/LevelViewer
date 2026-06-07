@@ -1048,13 +1048,6 @@ public partial class CommandsEditorConnection : Node3D
         Packet addPacket = BuildAliasEntityAddedPacket(ownerComposite, alias, pathEntities, pathComposites);
         _viewerOriginatedEntityAdds.Add(alias.shortGUID.AsUInt32);
         await SendMessageAsync(addPacket);
-
-        if (entitySelected)
-        {
-            Packet selectPacket = BuildSelectionPacket(pathEntities, pathComposites, entitySelected);
-            TryFillEntityMetadata(selectPacket);
-            await SendMessageAsync(selectPacket);
-        }
     }
 
     private static Packet BuildSelectionPacket(List<uint> pathEntities, List<uint> pathComposites, bool entitySelected)

@@ -1,0 +1,41 @@
+[gd_scene format=3 uid="uid://hyfdpjw12y6a"]
+
+[ext_resource type="Script" uid="uid://yacumv1bl687" path="res://Scripts/AlienScene.cs" id="1_alien"]
+[ext_resource type="Script" uid="uid://ctrnkslepapf1" path="res://Scripts/CommandsEditorConnection.cs" id="2_conn"]
+[ext_resource type="Script" uid="uid://qx3f3kij587k" path="res://Scripts/LevelViewerCamera.cs" id="3_cam"]
+
+[sub_resource type="ProceduralSkyMaterial" id="ProceduralSkyMaterial_sky"]
+sky_top_color = Color(0.2, 0.25, 0.35, 1)
+sky_horizon_color = Color(0.35, 0.38, 0.42, 1)
+ground_bottom_color = Color(0.15, 0.15, 0.15, 1)
+ground_horizon_color = Color(0.35, 0.38, 0.42, 1)
+
+[sub_resource type="Sky" id="Sky_env"]
+sky_material = SubResource("ProceduralSkyMaterial_sky")
+
+[sub_resource type="Environment" id="Environment_main"]
+background_mode = 2
+sky = SubResource("Sky_env")
+ambient_light_source = 2
+ambient_light_color = Color(0.85, 0.88, 0.92, 1)
+ambient_light_energy = 0.35
+tonemap_mode = 2
+sdfgi_enabled = false
+
+[node name="Connection" type="Node3D" unique_id=1903326138]
+
+[node name="WorldEnvironment" type="WorldEnvironment" parent="." unique_id=752683446]
+environment = SubResource("Environment_main")
+
+[node name="AlienScene" type="Node3D" parent="." unique_id=1514653504]
+script = ExtResource("1_alien")
+
+[node name="CommandsEditorConnection" type="Node3D" parent="." unique_id=109595931]
+script = ExtResource("2_conn")
+
+[node name="Camera3D" type="Camera3D" parent="." unique_id=587964359]
+transform = Transform3D(0.29091918, 0.47837403, -0.8285677, 2.799802e-09, 0.86602527, 0.50000024, 0.95674765, -0.14545967, 0.25194338, 12.026438, 29.559135, 44.94328)
+current = true
+fov = 70.0
+far = 100000.0
+script = ExtResource("3_cam")

@@ -1440,11 +1440,10 @@ public partial class CommandsEditorConnection : Node3D
                 pathEntities.RemoveAt(pathEntities.Count - 1);
                 entitySelected = false;
             }
-            else if (pathEntities.Count > 0 && pathComposites.Count > pathEntities.Count)
+            else if (pathComposites.Count > 1)
             {
-                pathEntities.RemoveAt(pathEntities.Count - 1);
                 pathComposites.RemoveAt(pathComposites.Count - 1);
-                entitySelected = false;
+                entitySelected = pathEntities.Count > 0;
             }
             else
                 return;

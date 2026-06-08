@@ -1,4 +1,6 @@
 using Godot;
+using System;
+using System.Runtime.InteropServices;
 
 /// <summary>
 /// Free camera: WASD/QE move; RMB look; MMB pan; LMB select entity; Ctrl+MMB step into composite instance; - step back hierarchy; 0 toggles deep select; H hide selected; Shift+H unhide all; scroll adjusts speed; Z frames selection.
@@ -58,6 +60,9 @@ public partial class LevelViewerCamera : Camera3D
     private float _pitch;
     private bool _mouseLookActive;
     private bool _panning;
+    private static readonly bool EmbeddedInOpenCage = DetectEmbeddedInOpenCage();
+    private Vector2? _embeddedLastScreenMousePos;
+    private bool _embeddedMouseCaptured;
 
     private LevelViewerSelectionHud _gizmoModeHud;
     private LevelViewerSelectionHud _deepSelectHud;
@@ -91,11 +96,20 @@ public partial class LevelViewerCamera : Camera3D
         _commandsEditorConnection = GetNodeOrNull<CommandsEditorConnection>(CommandsEditorConnectionPath);
         if (_alienScene != null)
             _alienScene.OnLoaded += OnCompositeLoaded;
+
+        if (EmbeddedInOpenCage)
+        {
+            ProcessMode = ProcessModeEnum.Always;
+            Window window = GetViewport()?.GetWindow();
+            if (window != null)
+                window.ProcessMode = ProcessModeEnum.Always;
+        }
     }
 
     public override void _ExitTree()
     {
-        ReleaseMouse();
+        ReleaseEmbeddedMouseCapture();
+        ReleaseMouse(this);
         if (_alienScene != null)
             _alienScene.OnLoaded -= OnCompositeLoaded;
         if (_hudLayer != null && GodotObject.IsInstanceValid(_hudLayer))
@@ -112,6 +126,9 @@ public partial class LevelViewerCamera : Camera3D
     public override void _UnhandledInput(InputEvent @event)
     {
         LevelViewerRenderIdleThrottle.NotifyUserActivity();
+
+        if (@event is InputEventMouseButton or InputEventKey)
+            EnsureWindowFocus();
 
         if (TryHandleScrollWheel(@event))
         {
@@ -209,6 +226,9 @@ public partial class LevelViewerCamera : Camera3D
     {
         float deltaSeconds = (float)delta;
         Vector3 positionBefore = GlobalPosition;
+
+        if (EmbeddedInOpenCage)
+            ProcessEmbeddedMouseDrag(deltaSeconds);
 
         ApplyKeyboardMovement(deltaSeconds);
         LevelViewerRenderIdleThrottle.Update(delta);
@@ -336,7 +356,7 @@ public partial class LevelViewerCamera : Camera3D
     private void ApplyKeyboardMovement(float deltaSeconds)
     {
         float speed = MoveSpeed * deltaSeconds;
-        if (Input.IsKeyPressed(Key.Shift))
+        if (IsMovementKeyDown(Key.Shift))
             speed *= FastMoveMultiplier;
 
         Basis basis = GlobalTransform.Basis;
@@ -344,17 +364,17 @@ public partial class LevelViewerCamera : Camera3D
         Vector3 right = basis.X;
 
         Vector3 move = Vector3.Zero;
-        if (Input.IsKeyPressed(Key.W))
+        if (IsMovementKeyDown(Key.W))
             move += forward;
-        if (Input.IsKeyPressed(Key.S))
+        if (IsMovementKeyDown(Key.S))
             move -= forward;
-        if (Input.IsKeyPressed(Key.D))
+        if (IsMovementKeyDown(Key.D))
             move += right;
-        if (Input.IsKeyPressed(Key.A))
+        if (IsMovementKeyDown(Key.A))
             move -= right;
-        if (Input.IsKeyPressed(Key.E))
+        if (IsMovementKeyDown(Key.E))
             move += Vector3.Up;
-        if (Input.IsKeyPressed(Key.Q))
+        if (IsMovementKeyDown(Key.Q))
             move -= Vector3.Up;
 
         if (move.LengthSquared() > 0f)
@@ -364,8 +384,41 @@ public partial class LevelViewerCamera : Camera3D
         }
     }
 
+    private bool IsMovementKeyDown(Key key)
+    {
+        if (!EmbeddedInOpenCage)
+            return Input.IsKeyPressed(key);
+
+        if (!HasEmbeddedKeyboardFocus())
+            return false;
+
+        return key switch
+        {
+            Key.W => Win32Input.IsKeyDown(Win32Input.VK_W),
+            Key.A => Win32Input.IsKeyDown(Win32Input.VK_A),
+            Key.S => Win32Input.IsKeyDown(Win32Input.VK_S),
+            Key.D => Win32Input.IsKeyDown(Win32Input.VK_D),
+            Key.E => Win32Input.IsKeyDown(Win32Input.VK_E),
+            Key.Q => Win32Input.IsKeyDown(Win32Input.VK_Q),
+            Key.Shift => Win32Input.IsKeyDown(Win32Input.VK_SHIFT),
+            _ => Input.IsKeyPressed(key),
+        };
+    }
+
+    private bool HasEmbeddedKeyboardFocus()
+    {
+        IntPtr hwnd = GetNativeWindowHandle(this);
+        if (hwnd != IntPtr.Zero && Win32Input.HasKeyboardFocus(hwnd))
+            return true;
+
+        Window window = GetViewport()?.GetWindow();
+        return window != null && window.HasFocus();
+    }
+
     private void HandleMouseButtonPressed(InputEventMouseButton mouseButton)
     {
+        EnsureWindowFocus();
+
         switch (mouseButton.ButtonIndex)
         {
             case MouseButton.Left:
@@ -379,8 +432,13 @@ public partial class LevelViewerCamera : Camera3D
                 GetViewport().SetInputAsHandled();
                 break;
             case MouseButton.Right:
-                _mouseLookActive = true;
-                CaptureMouse();
+                if (EmbeddedInOpenCage)
+                    EnsureWindowFocus();
+                else
+                {
+                    _mouseLookActive = true;
+                    CaptureMouse(this);
+                }
                 GetViewport().SetInputAsHandled();
                 break;
             case MouseButton.Middle:
@@ -389,10 +447,15 @@ public partial class LevelViewerCamera : Camera3D
                     TryPickDrillIntoComposite(mouseButton.Position);
                     GetViewport().SetInputAsHandled();
                 }
+                else if (EmbeddedInOpenCage)
+                {
+                    EnsureWindowFocus();
+                    GetViewport().SetInputAsHandled();
+                }
                 else
                 {
                     _panning = true;
-                    CaptureMouse();
+                    CaptureMouse(this);
                     GetViewport().SetInputAsHandled();
                 }
                 break;
@@ -445,15 +508,21 @@ public partial class LevelViewerCamera : Camera3D
                     GetViewport().SetInputAsHandled();
                 break;
             case MouseButton.Right:
-                _mouseLookActive = false;
-                if (!_panning)
-                    ReleaseMouse();
+                if (!EmbeddedInOpenCage)
+                {
+                    _mouseLookActive = false;
+                    if (!_panning)
+                        ReleaseMouse(this);
+                }
                 GetViewport().SetInputAsHandled();
                 break;
             case MouseButton.Middle:
-                _panning = false;
-                if (!_mouseLookActive)
-                    ReleaseMouse();
+                if (!EmbeddedInOpenCage)
+                {
+                    _panning = false;
+                    if (!_mouseLookActive)
+                        ReleaseMouse(this);
+                }
                 GetViewport().SetInputAsHandled();
                 break;
         }
@@ -461,34 +530,107 @@ public partial class LevelViewerCamera : Camera3D
 
     private void HandleMouseMotion(InputEventMouseMotion motion)
     {
-        if (_mouseLookActive)
+        if (EmbeddedInOpenCage)
+            return;
+
+        ApplyLookRelative(motion.Relative);
+        ApplyPanRelative(motion.Relative, motion.Velocity, (float)GetProcessDeltaTime());
+    }
+
+    private void ApplyLookRelative(Vector2 relative)
+    {
+        if (!_mouseLookActive || relative.LengthSquared() <= 0f)
+            return;
+
+        LevelViewerRenderIdleThrottle.NotifyUserActivity();
+        _yaw -= relative.X * LookSensitivity;
+        _pitch -= relative.Y * LookSensitivity;
+        _pitch = Mathf.Clamp(_pitch, -1.55f, 1.55f);
+        Rotation = new Vector3(_pitch, _yaw, 0f);
+    }
+
+    private void ApplyPanRelative(Vector2 relative, Vector2 velocity, float deltaSeconds)
+    {
+        if (!_panning)
+            return;
+
+        Vector3 positionBefore = GlobalPosition;
+        if (deltaSeconds <= 0f)
+            deltaSeconds = 1f / 60f;
+
+        Basis basis = GlobalTransform.Basis;
+        Vector3 right = basis.X;
+        Vector3 up = basis.Y;
+        if (velocity.LengthSquared() < 0.01f)
+            velocity = relative / deltaSeconds;
+
+        Vector3 pan = -right * velocity.X + up * velocity.Y;
+        GlobalPosition += pan * MoveSpeed * PanSensitivity * deltaSeconds;
+        SyncAnglesFromTransform();
+        if (ShouldShowCameraPosition())
+            UpdatePositionHud(positionBefore);
+    }
+
+    private void ProcessEmbeddedMouseDrag(float deltaSeconds)
+    {
+        IntPtr hwnd = GetNativeWindowHandle(this);
+        if (hwnd == IntPtr.Zero)
+            return;
+
+        bool rightDown = Win32Input.IsKeyDown(Win32Input.VK_RBUTTON);
+        bool middleDown = Win32Input.IsKeyDown(Win32Input.VK_MBUTTON);
+        bool ctrlDown = Win32Input.IsKeyDown(Win32Input.VK_CONTROL);
+        bool dragActive = rightDown || middleDown;
+
+        if (!dragActive)
         {
-            _yaw -= motion.Relative.X * LookSensitivity;
-            _pitch -= motion.Relative.Y * LookSensitivity;
-            _pitch = Mathf.Clamp(_pitch, -1.55f, 1.55f);
-            Rotation = new Vector3(_pitch, _yaw, 0f);
+            ReleaseEmbeddedMouseCapture();
+            _mouseLookActive = false;
+            _panning = false;
+            _embeddedLastScreenMousePos = null;
+            return;
         }
 
-        if (_panning)
+        if (!_embeddedMouseCaptured)
         {
-            Vector3 positionBefore = GlobalPosition;
-            float deltaSeconds = (float)GetProcessDeltaTime();
-            if (deltaSeconds <= 0f)
-                deltaSeconds = 1f / 60f;
+            if (!Win32Input.IsMouseOverWindow(hwnd))
+            {
+                _mouseLookActive = false;
+                _panning = false;
+                _embeddedLastScreenMousePos = null;
+                return;
+            }
 
-            Basis basis = GlobalTransform.Basis;
-            Vector3 right = basis.X;
-            Vector3 up = basis.Y;
-            Vector2 velocity = motion.Velocity;
-            if (velocity.LengthSquared() < 0.01f)
-                velocity = motion.Relative / deltaSeconds;
-
-            Vector3 pan = -right * velocity.X + up * velocity.Y;
-            GlobalPosition += pan * MoveSpeed * PanSensitivity * deltaSeconds;
-            SyncAnglesFromTransform();
-            if (ShouldShowCameraPosition())
-                UpdatePositionHud(positionBefore);
+            Win32Input.SetCapture(hwnd);
+            _embeddedMouseCaptured = true;
         }
+
+        _mouseLookActive = rightDown;
+        _panning = middleDown && !ctrlDown;
+
+        if (!Win32Input.TryGetScreenCursorPosition(out Vector2 screenPos))
+            return;
+
+        if (_embeddedLastScreenMousePos == null)
+        {
+            _embeddedLastScreenMousePos = screenPos;
+            return;
+        }
+
+        Vector2 relative = screenPos - _embeddedLastScreenMousePos.Value;
+        _embeddedLastScreenMousePos = screenPos;
+
+        ApplyLookRelative(relative);
+        ApplyPanRelative(relative, relative / deltaSeconds, deltaSeconds);
+    }
+
+    private void ReleaseEmbeddedMouseCapture()
+    {
+        if (!_embeddedMouseCaptured)
+            return;
+
+        Win32Input.ReleaseCapture();
+        _embeddedMouseCaptured = false;
     }
 
     private void AdjustMoveSpeed(bool faster)
@@ -651,15 +793,144 @@ public partial class LevelViewerCamera : Camera3D
         }
     }
 
-    private static void CaptureMouse()
+    private static void CaptureMouse(Node context)
     {
+        if (EmbeddedInOpenCage)
+            return;
+
         Input.MouseMode = Input.MouseModeEnum.Captured;
     }
 
-    private static void ReleaseMouse()
+    private static void ReleaseMouse(Node context)
     {
+        if (EmbeddedInOpenCage)
+            return;
+
         if (Input.MouseMode == Input.MouseModeEnum.Captured)
             Input.MouseMode = Input.MouseModeEnum.Visible;
+    }
+
+    private static bool DetectEmbeddedInOpenCage()
+    {
+        if (OS.GetEnvironment("OPENCAGE_EMBEDDED") == "1")
+            return true;
+
+        foreach (string arg in OS.GetCmdlineArgs())
+        {
+            if (arg == "--opencage-embedded")
+                return true;
+        }
+
+        return false;
+    }
+
+    private void EnsureWindowFocus()
+    {
+        if (EmbeddedInOpenCage && _embeddedMouseCaptured)
+            return;
+
+        Viewport viewport = GetViewport();
+        if (viewport == null)
+            return;
+
+        Window window = viewport.GetWindow();
+        if (window != null && !window.HasFocus())
+            window.GrabFocus();
+    }
+
+    private static IntPtr GetNativeWindowHandle(Node context)
+    {
+        Viewport viewport = context?.GetViewport();
+        if (viewport == null)
+            return IntPtr.Zero;
+
+        Window window = viewport.GetWindow();
+        if (window == null)
+            return IntPtr.Zero;
+
+        return (IntPtr)DisplayServer.WindowGetNativeHandle(
+            DisplayServer.HandleType.WindowHandle,
+            window.GetWindowId());
+    }
+
+    private static class Win32Input
+    {
+        public const int VK_LBUTTON = 0x01;
+        public const int VK_RBUTTON = 0x02;
+        public const int VK_MBUTTON = 0x04;
+        public const int VK_SHIFT = 0x10;
+        public const int VK_CONTROL = 0x11;
+        public const int VK_W = 0x57;
+        public const int VK_A = 0x41;
+        public const int VK_S = 0x53;
+        public const int VK_D = 0x44;
+        public const int VK_E = 0x45;
+        public const int VK_Q = 0x51;
+
+        [StructLayout(LayoutKind.Sequential)]
+        public struct Point
+        {
+            public int X;
+            public int Y;
+        }
+
+        [DllImport("user32.dll")]
+        public static extern short GetAsyncKeyState(int virtualKey);
+
+        [DllImport("user32.dll")]
+        public static extern bool GetCursorPos(out Point point);
+
+        [DllImport("user32.dll")]
+        public static extern IntPtr SetCapture(IntPtr hwnd);
+
+        [DllImport("user32.dll")]
+        public static extern bool ReleaseCapture();
+
+        [DllImport("user32.dll")]
+        public static extern IntPtr GetFocus();
+
+        [DllImport("user32.dll")]
+        public static extern IntPtr WindowFromPoint(Point point);
+
+        [DllImport("user32.dll")]
+        public static extern IntPtr GetParent(IntPtr hwnd);
+
+        public static bool IsKeyDown(int virtualKey) => (GetAsyncKeyState(virtualKey) & 0x8000) != 0;
+
+        public static bool HasKeyboardFocus(IntPtr hwnd) => hwnd != IntPtr.Zero && GetFocus() == hwnd;
+
+        public static bool IsMouseOverWindow(IntPtr hwnd)
+        {
+            if (hwnd == IntPtr.Zero || !GetCursorPos(out Point screen))
+                return false;
+
+            return IsSameOrDescendant(hwnd, WindowFromPoint(screen));
+        }
+
+        private static bool IsSameOrDescendant(IntPtr ancestor, IntPtr window)
+        {
+            while (window != IntPtr.Zero)
+            {
+                if (window == ancestor)
+                    return true;
+                window = GetParent(window);
+            }
+
+            return false;
+        }
+
+        public static bool IsAnyMouseButtonDown() =>
+            IsKeyDown(VK_LBUTTON) || IsKeyDown(VK_RBUTTON) || IsKeyDown(VK_MBUTTON);
+
+        public static bool TryGetScreenCursorPosition(out Vector2 position)
+        {
+            position = default;
+            if (!GetCursorPos(out Point screen))
+                return false;
+
+            position = new Vector2(screen.X, screen.Y);
+            return true;
+        }
     }
 
     // -------------------------------------------------------------------------
@@ -731,8 +1002,8 @@ public partial class LevelViewerCamera : Camera3D
             return;
         }
 
-        // Fall through to camera look / pan
-        if (_mouseLookActive || _panning)
+        // Fall through to camera look / pan (embedded mode polls Win32 input in _Process instead).
+        if (!EmbeddedInOpenCage && (_mouseLookActive || _panning))
         {
             HandleMouseMotion(motion);
             GetViewport().SetInputAsHandled();

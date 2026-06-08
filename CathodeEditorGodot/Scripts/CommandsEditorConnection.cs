@@ -1588,6 +1588,7 @@ public partial class CommandsEditorConnection : Node3D
             TryFillEntityMetadata(packet);
 
         SendMessage(packet);
+        ScheduleEmbeddedInputFocusRestore();
     }
 
     private void SendSelectionToEditorWithPendingEphemeralDelete(
@@ -2163,4 +2164,40 @@ public partial class CommandsEditorConnection : Node3D
         foreach (SyncedParameter sync in packet.parameters)
             ParameterSync.ApplyToEntity(entity, sync, _scene.Content);
     }
+
+    private static bool IsEmbeddedInOpenCage =>
+        OS.GetEnvironment("OPENCAGE_EMBEDDED") == "1";
+
+    private void ScheduleEmbeddedInputFocusRestore()
+    {
+        if (!IsEmbeddedInOpenCage)
+            return;
+
+        Callable.From(RestoreEmbeddedInputFocus).CallDeferred();
+        SceneTreeTimer timer = GetTree().CreateTimer(0.05);
+        timer.Timeout += () => RestoreEmbeddedInputFocus();
+    }
+
+    private void RestoreEmbeddedInputFocus()
+    {
+        if (IsAnyMouseButtonPressed())
+            return;
+
+        Window window = GetViewport()?.GetWindow();
+        if (window != null && !window.HasFocus())
+            window.GrabFocus();
+    }
+
+    private static bool IsAnyMouseButtonPressed()
+    {
+        const int VK_LBUTTON = 0x01;
+        const int VK_RBUTTON = 0x02;
+        const int VK_MBUTTON = 0x04;
+        return IsKeyDown(VK_LBUTTON) || IsKeyDown(VK_RBUTTON) || IsKeyDown(VK_MBUTTON);
+    }
+
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    private static extern short GetAsyncKeyState(int virtualKey);
+
+    private static bool IsKeyDown(int virtualKey) => (GetAsyncKeyState(virtualKey) & 0x8000) != 0;
 }

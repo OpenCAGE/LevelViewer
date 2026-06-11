@@ -389,7 +389,7 @@ public partial class LevelViewerCamera : Camera3D
         if (!EmbeddedInOpenCage)
             return Input.IsKeyPressed(key);
 
-        if (!HasEmbeddedKeyboardFocus())
+        if (!ShouldAcceptEmbeddedKeyboardInput())
             return false;
 
         return key switch
@@ -405,11 +405,28 @@ public partial class LevelViewerCamera : Camera3D
         };
     }
 
-    private bool HasEmbeddedKeyboardFocus()
+    private bool ShouldAcceptEmbeddedKeyboardInput()
     {
         IntPtr hwnd = GetNativeWindowHandle(this);
-        if (hwnd != IntPtr.Zero && Win32Input.HasKeyboardFocus(hwnd))
+        if (hwnd == IntPtr.Zero)
+            return false;
+
+        if (_embeddedMouseCaptured)
             return true;
+
+        IntPtr focusHwnd = Win32Input.GetFocus();
+        if (focusHwnd != IntPtr.Zero && Win32Input.IsSameOrDescendant(hwnd, focusHwnd))
+            return true;
+
+        if (Win32Input.IsMouseOverWindow(hwnd))
+        {
+            if (focusHwnd == IntPtr.Zero)
+                return true;
+
+            IntPtr hostHwnd = Win32Input.GetParent(hwnd);
+            if (focusHwnd == hostHwnd)
+                return true;
+        }
 
         Window window = GetViewport()?.GetWindow();
         return window != null && window.HasFocus();
@@ -603,6 +620,7 @@ public partial class LevelViewerCamera : Camera3D
 
             Win32Input.SetCapture(hwnd);
             _embeddedMouseCaptured = true;
+            Win32Input.SetFocus(hwnd);
         }
 
         _mouseLookActive = rightDown;
@@ -826,8 +844,17 @@ public partial class LevelViewerCamera : Camera3D
 
     private void EnsureWindowFocus()
     {
-        if (EmbeddedInOpenCage && _embeddedMouseCaptured)
+        if (EmbeddedInOpenCage)
+        {
+            IntPtr hwnd = GetNativeWindowHandle(this);
+            if (hwnd == IntPtr.Zero)
+                return;
+
+            if (Win32Input.GetFocus() != hwnd
+                && (_embeddedMouseCaptured || Win32Input.IsMouseOverWindow(hwnd)))
+                Win32Input.SetFocus(hwnd);
             return;
+        }
 
         Viewport viewport = GetViewport();
         if (viewport == null)
@@ -890,6 +917,9 @@ public partial class LevelViewerCamera : Camera3D
         public static extern IntPtr GetFocus();
 
         [DllImport("user32.dll")]
+        public static extern IntPtr SetFocus(IntPtr hWnd);
+
+        [DllImport("user32.dll")]
         public static extern IntPtr WindowFromPoint(Point point);
 
         [DllImport("user32.dll")]
@@ -899,15 +929,7 @@ public partial class LevelViewerCamera : Camera3D
 
         public static bool HasKeyboardFocus(IntPtr hwnd) => hwnd != IntPtr.Zero && GetFocus() == hwnd;
 
-        public static bool IsMouseOverWindow(IntPtr hwnd)
-        {
-            if (hwnd == IntPtr.Zero || !GetCursorPos(out Point screen))
-                return false;
-
-            return IsSameOrDescendant(hwnd, WindowFromPoint(screen));
-        }
-
-        private static bool IsSameOrDescendant(IntPtr ancestor, IntPtr window)
+        public static bool IsSameOrDescendant(IntPtr ancestor, IntPtr window)
         {
             while (window != IntPtr.Zero)
             {
@@ -917,6 +939,14 @@ public partial class LevelViewerCamera : Camera3D
             }
 
             return false;
+        }
+
+        public static bool IsMouseOverWindow(IntPtr hwnd)
+        {
+            if (hwnd == IntPtr.Zero || !GetCursorPos(out Point screen))
+                return false;
+
+            return IsSameOrDescendant(hwnd, WindowFromPoint(screen));
         }
 
         public static bool IsAnyMouseButtonDown() =>

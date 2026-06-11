@@ -15,9 +15,12 @@ using System.Threading.Tasks;
 
 public partial class CommandsEditorConnection : Node3D
 {
+    private const int DefaultWebSocketPort = 1702;
+
     private ClientWebSocket _client;
     private AlienScene _scene;
     private CancellationTokenSource _connectionCts;
+    private readonly int _webSocketPort = ResolveWebSocketPort();
 
     private readonly object _lock = new object();
     private readonly SemaphoreSlim _sendLock = new SemaphoreSlim(1, 1);
@@ -948,7 +951,9 @@ public partial class CommandsEditorConnection : Node3D
 
             try
             {
-                await _client.ConnectAsync(new Uri("ws://localhost:1702/commands_editor"), cancellationToken);
+                await _client.ConnectAsync(
+                    new Uri($"ws://localhost:{_webSocketPort}/commands_editor"),
+                    cancellationToken);
                 GD.Print("Connected to Commands Editor!");
                 NotifyConnectionConnected();
 
@@ -2180,12 +2185,21 @@ public partial class CommandsEditorConnection : Node3D
 
     private void RestoreEmbeddedInputFocus()
     {
-        if (IsAnyMouseButtonPressed())
+        Window window = GetViewport()?.GetWindow();
+        if (window == null)
             return;
 
-        Window window = GetViewport()?.GetWindow();
-        if (window != null && !window.HasFocus())
-            window.GrabFocus();
+        IntPtr hwnd = (IntPtr)DisplayServer.WindowGetNativeHandle(
+            DisplayServer.HandleType.WindowHandle,
+            window.GetWindowId());
+        if (hwnd == IntPtr.Zero)
+            return;
+
+        if (IsAnyMouseButtonPressed() && GetCapture() != hwnd)
+            return;
+
+        if (GetFocus() != hwnd)
+            SetFocus(hwnd);
     }
 
     private static bool IsAnyMouseButtonPressed()
@@ -2196,8 +2210,42 @@ public partial class CommandsEditorConnection : Node3D
         return IsKeyDown(VK_LBUTTON) || IsKeyDown(VK_RBUTTON) || IsKeyDown(VK_MBUTTON);
     }
 
+    private static int ResolveWebSocketPort()
+    {
+        string envPort = OS.GetEnvironment("OPENCAGE_WS_PORT");
+        if (int.TryParse(envPort, out int parsedEnvPort) && parsedEnvPort > 0)
+            return parsedEnvPort;
+
+        string[] args = OS.GetCmdlineArgs();
+        for (int i = 0; i < args.Length; i++)
+        {
+            string arg = args[i];
+            if (arg.StartsWith("--opencage-ws-port=", StringComparison.Ordinal))
+            {
+                if (int.TryParse(arg.Substring("--opencage-ws-port=".Length), out int parsedArgPort) && parsedArgPort > 0)
+                    return parsedArgPort;
+            }
+            else if (arg == "--opencage-ws-port" && i + 1 < args.Length
+                && int.TryParse(args[i + 1], out int nextArgPort) && nextArgPort > 0)
+            {
+                return nextArgPort;
+            }
+        }
+
+        return DefaultWebSocketPort;
+    }
+
     [System.Runtime.InteropServices.DllImport("user32.dll")]
     private static extern short GetAsyncKeyState(int virtualKey);
+
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    private static extern IntPtr GetFocus();
+
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    private static extern IntPtr SetFocus(IntPtr hWnd);
+
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    private static extern IntPtr GetCapture();
 
     private static bool IsKeyDown(int virtualKey) => (GetAsyncKeyState(virtualKey) & 0x8000) != 0;
 }

@@ -1069,7 +1069,7 @@ public partial class AlienScene : Node3D
 
 	public void RefreshProxyHighlights(bool forceRebuild = true)
 	{
-		if (!_content.Loaded)
+		if (!_content.Loaded || !PreviewVisibilitySettings.HighlightProxies)
 		{
 			LevelViewerProxyHighlight.Clear();
 			LevelViewerSelection.ReapplyIfSelectionActive();
@@ -1129,7 +1129,7 @@ public partial class AlienScene : Node3D
 		LevelViewerSelection.Apply(entityNode);
 		try
 		{
-			if (PreviewVisibilitySettings.IsSteppedDownFromLevelRoot())
+			if (PreviewVisibilitySettings.HighlightProxies && PreviewVisibilitySettings.IsSteppedDownFromLevelRoot())
 			{
 				if (LevelViewerProxyHighlight.NeedsRebuild(PreviewVisibilitySettings.ActiveCompositeId))
 					LevelViewerProxyHighlight.Rebuild(this, _content.Level.Commands, PreviewVisibilitySettings.ActiveCompositeId);

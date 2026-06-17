@@ -72,6 +72,7 @@ namespace OpenCAGE.UnityConnection
         public bool hide_nested_script_entities = false;
         public bool model_reference_wireframe = false;
         public bool highlight_aliases = true;
+        public bool highlight_proxies = true;
         public float transform_grid_snap = 0f;
         public float rotation_snap_degrees = 0f;
         public Dictionary<uint, bool> box_render_filters = new Dictionary<uint, bool>();

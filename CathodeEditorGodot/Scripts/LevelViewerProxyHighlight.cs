@@ -45,7 +45,7 @@ public static class LevelViewerProxyHighlight
 			return;
 		}
 
-		if (!PreviewVisibilitySettings.IsSteppedDownFromLevelRoot())
+		if (!PreviewVisibilitySettings.HighlightProxies || !PreviewVisibilitySettings.IsSteppedDownFromLevelRoot())
 		{
 			_cacheValid = false;
 			return;

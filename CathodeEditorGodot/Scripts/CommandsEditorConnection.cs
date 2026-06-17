@@ -852,8 +852,10 @@ public partial class CommandsEditorConnection : Node3D
         _hideNestedScriptEntities = packet.hide_nested_script_entities;
         PreviewVisibilitySettings.HideNestedScriptEntities = _hideNestedScriptEntities;
 
-        bool highlightChanged = PreviewVisibilitySettings.HighlightAliases != packet.highlight_aliases;
+        bool highlightChanged = PreviewVisibilitySettings.HighlightAliases != packet.highlight_aliases
+            || PreviewVisibilitySettings.HighlightProxies != packet.highlight_proxies;
         PreviewVisibilitySettings.HighlightAliases = packet.highlight_aliases;
+        PreviewVisibilitySettings.HighlightProxies = packet.highlight_proxies;
 
         LevelViewerTransformSnap.GridSize = packet.transform_grid_snap > 0f ? packet.transform_grid_snap : 0f;
         LevelViewerTransformSnap.RotationDegrees = packet.rotation_snap_degrees > 0f ? packet.rotation_snap_degrees : 0f;

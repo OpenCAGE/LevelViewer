@@ -10,6 +10,8 @@ public static class PreviewVisibilitySettings
 
     public static bool HighlightAliases { get; set; } = true;
 
+    public static bool HighlightProxies { get; set; } = true;
+
     public enum DeepSelectModeKind
     {
         None,

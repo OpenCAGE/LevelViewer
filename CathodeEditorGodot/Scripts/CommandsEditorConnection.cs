@@ -1117,14 +1117,28 @@ public partial class CommandsEditorConnection : Node3D
         {
             case PreviewVisibilitySettings.DeepSelectModeKind.AdvancedDeepSelect:
                 ResetProgressiveDeepSelectState();
-                built = TryPickDeepSelectViaAlias(
-                    target,
-                    activeCompositeId,
-                    commands,
-                    deepSelectDepth: 0,
-                    out pathEntities,
-                    out pathComposites,
-                    out createdNewAlias);
+                {
+                    uint[] instancePath = PreviewVisibilitySettings.ActiveInstanceEntityPath ?? Array.Empty<uint>();
+                    if (LevelViewerPick.GetDeepSelectMaxDepth(target, activeCompositeId, instancePath) > 0)
+                    {
+                        built = TryPickDeepSelectViaAlias(
+                            target,
+                            activeCompositeId,
+                            commands,
+                            deepSelectDepth: 0,
+                            out pathEntities,
+                            out pathComposites,
+                            out createdNewAlias);
+                    }
+                    else
+                    {
+                        built = LevelViewerPick.TryBuildActiveCompositeSelectionPath(
+                            target,
+                            activeCompositeId,
+                            out pathEntities,
+                            out pathComposites);
+                    }
+                }
                 entitySelected = built;
                 break;
             case PreviewVisibilitySettings.DeepSelectModeKind.DeepSelect:
@@ -1918,7 +1932,7 @@ public partial class CommandsEditorConnection : Node3D
 
         bool samePick = ProgressiveDeepSelectTargetsMatch(target, activeCompositeId, instancePath);
 
-        int depth = samePick ? _progressiveDeepSelectDepth + 1 : 1;
+        int depth = samePick ? _progressiveDeepSelectDepth + 1 : 0;
         depth = Math.Min(depth, maxDepth);
 
         _progressiveDeepSelectLeafId = leafId;
@@ -1966,6 +1980,9 @@ public partial class CommandsEditorConnection : Node3D
             return false;
 
         uint[] instancePath = PreviewVisibilitySettings.ActiveInstanceEntityPath ?? Array.Empty<uint>();
+        if (LevelViewerPick.GetDeepSelectMaxDepth(target, ownerCompositeId, instancePath) <= 0)
+            return false;
+
         bool builtHierarchy = deepSelectDepth > 0
             ? LevelViewerPick.TryBuildDeepSelectAliasHierarchyPath(
                 target,

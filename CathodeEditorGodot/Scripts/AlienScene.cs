@@ -277,10 +277,35 @@ public partial class AlienScene : Node3D
 	{
 		_selectedEntity = null;
 		LevelViewerSelection.Clear();
+		LevelViewerLightRadius.Clear();
 		RefreshAliasHighlights(forceRebuild: false);
 		RefreshProxyHighlights(forceRebuild: false);
 		_selectionHud?.Hide();
 		OnSelectionChanged?.Invoke(null);
+	}
+
+	private void RefreshSelectedLightRadiusVisual()
+	{
+		if (_selectedEntity == null || !GodotObject.IsInstanceValid(_selectedEntity))
+		{
+			LevelViewerLightRadius.Clear();
+			return;
+		}
+
+		Node3D entityNode = LevelViewerPick.ResolveNearestEntityNode(_selectedEntity, _nodeEntities);
+		if (entityNode == null
+			|| !_nodeEntities.TryGetValue(entityNode, out Entity entity)
+			|| entity is not FunctionEntity function)
+		{
+			LevelViewerLightRadius.Clear();
+			return;
+		}
+
+		uint ownerCompositeId = entityNode.HasMeta(OwnerCompositeMetaKey)
+			? entityNode.GetMeta(OwnerCompositeMetaKey).AsUInt32()
+			: 0;
+
+		LevelViewerLightRadius.Apply(entityNode, function, ownerCompositeId);
 	}
 
 	private void ResetLevel()
@@ -1119,6 +1144,7 @@ public partial class AlienScene : Node3D
 		Node3D entityNode = TryResolveSelectionNode(entityPath, compositePath);
 		if (entityNode == _selectedEntity && entityNode != null)
 		{
+			RefreshSelectedLightRadiusVisual();
 			ShowEntitySelectionHud(entityPath, compositePath);
 			return;
 		}
@@ -1153,6 +1179,7 @@ public partial class AlienScene : Node3D
 		}
 
 		LevelViewerSelection.ReapplyIfSelectionActive();
+		RefreshSelectedLightRadiusVisual();
 
 		ShowEntitySelectionHud(entityPath, compositePath);
 		Callable.From(() => OnSelectionChanged?.Invoke(entityNode)).CallDeferred();
@@ -1458,6 +1485,12 @@ public partial class AlienScene : Node3D
 		}
 
 		LevelViewerPick.RegisterPickableSubtree(entityNode);
+		if (_selectedEntity != null && GodotObject.IsInstanceValid(_selectedEntity))
+		{
+			Node3D selectedEntityNode = LevelViewerPick.ResolveNearestEntityNode(_selectedEntity, _nodeEntities);
+			if (selectedEntityNode == entityNode)
+				RefreshSelectedLightRadiusVisual();
+		}
 	}
 
 	public void InvalidateFunctionEntityPreviewCache()
@@ -1551,6 +1584,8 @@ public partial class AlienScene : Node3D
 			preview.Refresh();
 			preview.RegisterPickablesWithOwner();
 		}
+
+		RefreshSelectedLightRadiusVisual();
 	}
 
 	private void ApplyVectorVisual(ParameterVisualContext context)

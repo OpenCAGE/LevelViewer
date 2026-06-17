@@ -1752,6 +1752,7 @@ public partial class AlienScene : Node3D
 	public void RemoveEntity(ShortGuid composite, ShortGuid entity)
 	{
 		string entityNodeName = entity.AsUInt32.ToString();
+		bool removed = false;
 		if (_compositeNodes.ContainsKey(composite))
 		{
 			foreach (Node3D compositeInstance in _compositeNodes[composite])
@@ -1777,10 +1778,14 @@ public partial class AlienScene : Node3D
 						entityNode.QueueFree();
 						_nodeEntities.Remove(entityNode);
 						_functionEntityPreviewsCacheDirty = true;
+						removed = true;
 					}
 				}
 			}
 		}
+
+		if (removed)
+			RefreshEntityHighlights(forceRebuild: true);
 	}
 
 	public void UpdateRenderable(ShortGuid composite, ShortGuid entity, List<Tuple<int, int>> renderables)

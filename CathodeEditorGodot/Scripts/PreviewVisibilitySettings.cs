@@ -22,14 +22,30 @@ public static class PreviewVisibilitySettings
     public static DeepSelectModeKind DeepSelectMode { get; set; }
 
     /// <summary>
-    /// The composite OpenCAGE is currently viewing (not necessarily the root composite loaded in the scene).
+    /// The composite OpenCAGE is currently viewing (not necessarily the level entry composite loaded in the scene).
     /// </summary>
     public static uint ActiveCompositeId { get; set; }
 
     /// <summary>
-    /// Entity IDs stepped through to reach the active composite instance (empty at the loaded root).
+    /// Commands.EntryPoints[0] for the loaded level — the level root composite, not the hierarchy folder root.
+    /// </summary>
+    public static uint LevelRootCompositeId { get; set; }
+
+    /// <summary>
+    /// Entity IDs stepped through to reach the active composite instance (empty at the level entry composite).
     /// </summary>
     public static uint[] ActiveInstanceEntityPath { get; private set; } = Array.Empty<uint>();
+
+    /// <summary>
+    /// True when viewing a nested composite instance below Commands.EntryPoints[0].
+    /// </summary>
+    public static bool IsSteppedDownFromLevelRoot()
+    {
+        if (LevelRootCompositeId != 0 && ActiveCompositeId != LevelRootCompositeId)
+            return true;
+
+        return ActiveInstanceEntityPath != null && ActiveInstanceEntityPath.Length > 0;
+    }
 
     public static void SyncFromEditorPath(List<uint> pathEntities, List<uint> pathComposites, bool entitySelected)
     {

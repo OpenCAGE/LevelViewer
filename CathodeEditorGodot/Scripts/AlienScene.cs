@@ -90,6 +90,8 @@ public partial class AlienScene : Node3D
 
 	private const int LoadUiRedrawFrameCount = 2;
 
+	private bool _isBulkPopulating;
+
 	private LoadPipelineStep _loadStep = LoadPipelineStep.None;
 	private int _loadUiFrameCounter;
 	private string _queuedLevelName = "";
@@ -244,7 +246,8 @@ public partial class AlienScene : Node3D
 			return false;
 
 		LevelViewerAliasHighlight.InvalidateCache();
-		RefreshAliasHighlights(forceRebuild: true);
+		LevelViewerProxyHighlight.InvalidateCache();
+		RefreshEntityHighlights(forceRebuild: true);
 		return true;
 	}
 
@@ -255,7 +258,8 @@ public partial class AlienScene : Node3D
 
 		LevelViewerEntityHide.ClearAll();
 		LevelViewerAliasHighlight.InvalidateCache();
-		RefreshAliasHighlights(forceRebuild: true);
+		LevelViewerProxyHighlight.InvalidateCache();
+		RefreshEntityHighlights(forceRebuild: true);
 	}
 
 	public void ResetCompositeScopedHides()
@@ -274,12 +278,17 @@ public partial class AlienScene : Node3D
 		_selectedEntity = null;
 		LevelViewerSelection.Clear();
 		RefreshAliasHighlights(forceRebuild: false);
+		RefreshProxyHighlights(forceRebuild: false);
 		_selectionHud?.Hide();
 		OnSelectionChanged?.Invoke(null);
 	}
 
 	private void ResetLevel()
 	{
+		PreviewVisibilitySettings.LevelRootCompositeId = 0;
+		_isBulkPopulating = false;
+		_loadStep = LoadPipelineStep.None;
+
 		PreviewVisualUtility.CleanupAllFunctionEntityPreviews(this);
 		ClearSelectedEntity();
 		LevelViewerSelection.Clear();
@@ -411,10 +420,18 @@ public partial class AlienScene : Node3D
 			return;
 		}
 
-		GD.Print("Loading level " + _queuedLevelName + "...");
+		ViewerLog.Print("Loading level " + _queuedLevelName + "...");
 		ResetLevel();
 		_levelName = _queuedLevelName;
 		_content.Load(_queuedLevelPath, _queuedLevelName);
+
+		if (_content.Loaded && _content.Level.Commands.EntryPoints[0] != null)
+		{
+			PreviewVisibilitySettings.LevelRootCompositeId = _content.Level.Commands.EntryPoints[0].shortGUID.AsUInt32;
+			Composite levelRoot = _content.Level.Commands.EntryPoints[0];
+			if (_queuedCompositeGuid == ShortGuid.Invalid)
+				_queuedCompositeGuid = levelRoot.shortGUID;
+		}
 
 		if (_queuedCompositeGuid != ShortGuid.Invalid && _content.Loaded)
 		{
@@ -438,11 +455,21 @@ public partial class AlienScene : Node3D
 			return;
 		}
 
-		PopulateCompositeInternal(_queuedComposite);
+		Composite comp = _queuedComposite;
 		_queuedComposite = null;
 		_queuedCompositeGuid = ShortGuid.Invalid;
-		_loadStep = LoadPipelineStep.None;
 
+		try
+		{
+			_isBulkPopulating = true;
+			PopulateCompositeInternal(comp);
+		}
+		finally
+		{
+			_isBulkPopulating = false;
+		}
+
+		_loadStep = LoadPipelineStep.None;
 		OnLoaded?.Invoke();
 		Callable.From(HideLoading).CallDeferred();
 	}
@@ -467,7 +494,7 @@ public partial class AlienScene : Node3D
 		_parentNode.AddToGroup(LevelViewerView.ContentGroup);
 		AddChild(_parentNode);
 
-		GD.Print("Loading composite " + comp?.name + "...");
+		ViewerLog.Print("Loading composite " + comp?.name + "...");
 		_loadedComposite = comp;
 		AddCompositeInstance(comp, _parentNode, null);
 
@@ -642,20 +669,23 @@ public partial class AlienScene : Node3D
 		return true;
 	}
 
-	private void AddCompositeInstance(Composite composite, Node3D compositeNode, Entity parentEntity)
+	private void RegisterCompositeNode(Composite composite, Node3D compositeNode)
 	{
-		if (composite == null) return;
+		if (composite == null || compositeNode == null)
+			return;
 
 		if (_compositeNodes.ContainsKey(composite.shortGUID))
-		{
 			_compositeNodes[composite.shortGUID].Add(compositeNode);
-		}
 		else
-		{
-			List<Node3D> compositeNodes = new List<Node3D>();
-			compositeNodes.Add(compositeNode);
-			_compositeNodes.Add(composite.shortGUID, compositeNodes);
-		}
+			_compositeNodes[composite.shortGUID] = new List<Node3D> { compositeNode };
+	}
+
+	private void AddCompositeInstance(Composite composite, Node3D compositeNode, Entity parentEntity)
+	{
+		if (composite == null)
+			return;
+
+		RegisterCompositeNode(composite, compositeNode);
 
 		foreach (Entity entity in composite.functions)
 			AddEntity(composite, entity, compositeNode);
@@ -665,8 +695,6 @@ public partial class AlienScene : Node3D
 			AddEntity(composite, entity, compositeNode);
 		foreach (Entity entity in composite.proxies)
 			AddEntity(composite, entity, compositeNode);
-
-		InvalidateFunctionEntityPreviewCache();
 	}
 
 	public void RemoveComposite(ShortGuid composite)
@@ -738,7 +766,11 @@ public partial class AlienScene : Node3D
 					EntityNodeUtil.SetPointed(aliasedNode, true);
 					aliasedNode.Position = position;
 					aliasedNode.RotationDegrees = rotation;
-					LevelViewerAliasHighlight.InvalidateCache();
+					if (!_isBulkPopulating)
+					{
+						LevelViewerAliasHighlight.InvalidateCache();
+						LevelViewerProxyHighlight.InvalidateCache();
+					}
 				}
 
 				break;
@@ -756,7 +788,11 @@ public partial class AlienScene : Node3D
 						proxiedNode.Position = position;
 						proxiedNode.RotationDegrees = rotation;
 					}
+
+					if (!_isBulkPopulating)
+						LevelViewerProxyHighlight.InvalidateCache();
 				}
+
 				break;
 			}
 			case EntityVariant.FUNCTION:
@@ -890,6 +926,84 @@ public partial class AlienScene : Node3D
 		return false;
 	}
 
+	public bool TryResolveProxyPointedSceneNode(
+		EntityOverride proxyOverride,
+		ProxyEntity proxy,
+		out Node3D pointedNode,
+		bool preferCached = true)
+	{
+		pointedNode = null;
+		if (proxyOverride == null
+			|| !GodotObject.IsInstanceValid(proxyOverride)
+			|| proxy?.proxy?.path == null
+			|| proxy.proxy.path.Length == 0)
+		{
+			return false;
+		}
+
+		if (preferCached
+			&& proxyOverride.PointedEntity != null
+			&& GodotObject.IsInstanceValid(proxyOverride.PointedEntity))
+		{
+			pointedNode = proxyOverride.PointedEntity;
+			return true;
+		}
+
+		pointedNode = GetEntityNode(EntityPathToGUIDList(proxy.proxy), ParentNode);
+		if (pointedNode != null)
+		{
+			proxyOverride.PointedEntity = pointedNode;
+			return true;
+		}
+
+		if (_content?.Level?.Commands == null)
+			return false;
+
+		CommandsUtils utils = _content.Level.Commands.Utils;
+		List<Tuple<Composite, Entity>> resolvedHierarchy = utils.ResolveProxy(proxy);
+		(Composite targetComposite, Entity targetEntity) = utils.GetResolvedTarget(resolvedHierarchy);
+		if (targetComposite == null || targetEntity == null)
+			return false;
+
+		if (!TryGetCachedEntityNodes(targetComposite.shortGUID, targetEntity.shortGUID, out List<Node3D> candidates))
+			return false;
+
+		for (int i = 0; i < candidates.Count; i++)
+		{
+			Node3D candidate = candidates[i];
+			if (candidate == null || !GodotObject.IsInstanceValid(candidate))
+				continue;
+
+			pointedNode = candidate;
+			proxyOverride.PointedEntity = pointedNode;
+			return true;
+		}
+
+		return false;
+	}
+
+	public void ForEachProxyInActiveComposite(Action<Composite, ProxyEntity> visitor)
+	{
+		if (visitor == null || _content?.Level?.Commands == null)
+			return;
+
+		uint activeCompositeId = PreviewVisibilitySettings.ActiveCompositeId;
+		if (activeCompositeId == 0)
+			return;
+
+		Composite composite = _content.Level.Commands.GetComposite(new ShortGuid(activeCompositeId));
+		if (composite == null)
+			return;
+
+		foreach (ProxyEntity proxy in composite.proxies)
+		{
+			if (proxy == null)
+				continue;
+
+			visitor(composite, proxy);
+		}
+	}
+
 	public void ForEachParameterizedAliasInActiveComposite(Action<Composite, AliasEntity> visitor)
 	{
 		if (visitor == null || _content?.Level?.Commands == null)
@@ -947,6 +1061,30 @@ public partial class AlienScene : Node3D
 		LevelViewerSelection.ReapplyIfSelectionActive();
 	}
 
+	public void RefreshEntityHighlights(bool forceRebuild = true)
+	{
+		RefreshProxyHighlights(forceRebuild);
+		RefreshAliasHighlights(forceRebuild);
+	}
+
+	public void RefreshProxyHighlights(bool forceRebuild = true)
+	{
+		if (!_content.Loaded)
+		{
+			LevelViewerProxyHighlight.Clear();
+			LevelViewerSelection.ReapplyIfSelectionActive();
+			return;
+		}
+
+		uint activeCompositeId = PreviewVisibilitySettings.ActiveCompositeId;
+		if (forceRebuild || LevelViewerProxyHighlight.NeedsRebuild(activeCompositeId))
+			LevelViewerProxyHighlight.Rebuild(this, _content.Level.Commands, activeCompositeId);
+		else
+			LevelViewerProxyHighlight.SyncWithSelection();
+
+		LevelViewerSelection.ReapplyIfSelectionActive();
+	}
+
 	public void RefreshCompositeFocus()
 	{
 		if (_parentNode == null || !_content.Loaded)
@@ -958,11 +1096,12 @@ public partial class AlienScene : Node3D
 		try
 		{
 			LevelViewerCompositeFocus.Refresh(_parentNode, _parentNode, _content.Level.Commands);
+			RefreshProxyHighlights(forceRebuild: false);
 			RefreshAliasHighlights(forceRebuild: false);
 		}
 		catch (System.Exception ex)
 		{
-			GD.PrintErr("[Viewer] Composite focus refresh failed: " + ex);
+			ViewerLog.PrintErr("[Viewer] Composite focus refresh failed: " + ex);
 		}
 	}
 
@@ -985,10 +1124,19 @@ public partial class AlienScene : Node3D
 		}
 
 		_selectedEntity = entityNode;
+		LevelViewerProxyHighlight.ReleaseNode(entityNode);
 		LevelViewerAliasHighlight.ReleaseNode(entityNode);
 		LevelViewerSelection.Apply(entityNode);
 		try
 		{
+			if (PreviewVisibilitySettings.IsSteppedDownFromLevelRoot())
+			{
+				if (LevelViewerProxyHighlight.NeedsRebuild(PreviewVisibilitySettings.ActiveCompositeId))
+					LevelViewerProxyHighlight.Rebuild(this, _content.Level.Commands, PreviewVisibilitySettings.ActiveCompositeId);
+				else
+					LevelViewerProxyHighlight.SyncWithSelection();
+			}
+
 			if (PreviewVisibilitySettings.HighlightAliases)
 			{
 				if (LevelViewerAliasHighlight.NeedsRebuild(PreviewVisibilitySettings.ActiveCompositeId))
@@ -1000,7 +1148,8 @@ public partial class AlienScene : Node3D
 		catch (System.Exception ex)
 		{
 			LevelViewerAliasHighlight.InvalidateCache();
-			GD.PrintErr("[Viewer] Alias highlight failed: " + ex);
+			LevelViewerProxyHighlight.InvalidateCache();
+			ViewerLog.PrintErr("[Viewer] Entity highlight failed: " + ex);
 		}
 
 		LevelViewerSelection.ReapplyIfSelectionActive();
@@ -1655,7 +1804,7 @@ public partial class AlienScene : Node3D
 		MeshHolder holder = GetModel(submesh);
 		if (holder == null || holder.MainMesh == null || holder.MainMesh.GetSurfaceCount() == 0)
 		{
-			GD.Print("Attempted to load non-parsed model. Skipping!");
+			ViewerLog.Print("Attempted to load non-parsed model. Skipping!");
 			return;
 		}
 
@@ -1962,7 +2111,7 @@ public partial class AlienScene : Node3D
 			Image.Format format = AlienSceneTextures.MapImageFormat(ptr.Texture.Format);
 			if (format == Image.Format.Max)
 			{
-				GD.PrintErr("Unsupported cubemap texture format: " + ptr.Texture.Format);
+				ViewerLog.PrintErr("Unsupported cubemap texture format: " + ptr.Texture.Format);
 				return null;
 			}
 

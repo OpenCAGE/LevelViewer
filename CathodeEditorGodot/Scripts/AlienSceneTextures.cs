@@ -165,14 +165,14 @@ public static class AlienSceneTextures
 		int expectedBase = GetBaseMipByteSize(width, height, format, sourceFormat);
 		if (upload == null)
 		{
-			GD.PrintErr($"Texture data too small for '{name}' ({sourceFormat}, {width}x{height}, bytes={content?.Length ?? 0}, expected base mip {expectedBase})");
+			ViewerLog.PrintErr($"Texture data too small for '{name}' ({sourceFormat}, {width}x{height}, bytes={content?.Length ?? 0}, expected base mip {expectedBase})");
 			return null;
 		}
 
 		Image image = Image.CreateFromData(width, height, false, format, upload);
 		if (image == null || image.IsEmpty())
 		{
-			GD.PrintErr($"Image.CreateFromData failed for '{name}' ({sourceFormat}, {width}x{height}, upload={upload.Length}, total={content.Length})");
+			ViewerLog.PrintErr($"Image.CreateFromData failed for '{name}' ({sourceFormat}, {width}x{height}, upload={upload.Length}, total={content.Length})");
 			return null;
 		}
 
@@ -192,7 +192,7 @@ public static class AlienSceneTextures
 		int expectedBase = AstcTextureDecode.GetCompressedByteSize(width, height, sourceFormat);
 		if (baseMip == null)
 		{
-			GD.PrintErr($"ASTC data too small for '{name}' ({sourceFormat}, {width}x{height}, bytes={content?.Length ?? 0}, expected {expectedBase})");
+			ViewerLog.PrintErr($"ASTC data too small for '{name}' ({sourceFormat}, {width}x{height}, bytes={content?.Length ?? 0}, expected {expectedBase})");
 			return null;
 		}
 
@@ -219,14 +219,14 @@ public static class AlienSceneTextures
 		byte[] rgba = AstcTextureDecode.DecodeToRgba8(baseMip, width, height, sourceFormat);
 		if (rgba == null)
 		{
-			GD.PrintErr($"ASTC CPU decode failed for '{name}' ({sourceFormat}, {width}x{height})");
+			ViewerLog.PrintErr($"ASTC CPU decode failed for '{name}' ({sourceFormat}, {width}x{height})");
 			return null;
 		}
 
 		Image image = Image.CreateFromData(width, height, false, Image.Format.Rgba8, rgba);
 		if (image == null || image.IsEmpty())
 		{
-			GD.PrintErr($"Image.CreateFromData failed after ASTC decode for '{name}' ({sourceFormat}, {width}x{height})");
+			ViewerLog.PrintErr($"Image.CreateFromData failed after ASTC decode for '{name}' ({sourceFormat}, {width}x{height})");
 			return null;
 		}
 

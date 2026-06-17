@@ -82,6 +82,6 @@ public static class LevelViewerSelection
 
     private static void ApplyMeshHighlight(MeshInstance3D meshInstance)
     {
-        LevelViewerHighlightOverlay.TryApplyOverlay(meshInstance, _savedOverlays, aliasHighlight: false);
+        LevelViewerHighlightOverlay.TryApplyOverlay(meshInstance, _savedOverlays, LevelViewerHighlightOverlay.HighlightOverlayMode.Selection);
     }
 }

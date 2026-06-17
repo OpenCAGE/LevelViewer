@@ -6,6 +6,13 @@ using System.Collections.Generic;
 /// </summary>
 public static class LevelViewerHighlightOverlay
 {
+    public enum HighlightOverlayMode
+    {
+        Selection,
+        Alias,
+        Proxy,
+    }
+
     private const float DefaultStrength = 0.55f;
     private const int RenderPriority = 2;
 
@@ -13,6 +20,8 @@ public static class LevelViewerHighlightOverlay
     private static ShaderMaterial _selectionBillboardOverlay;
     private static ShaderMaterial _aliasMeshOverlay;
     private static ShaderMaterial _aliasBillboardOverlay;
+    private static ShaderMaterial _proxyMeshOverlay;
+    private static ShaderMaterial _proxyBillboardOverlay;
 
     public static ShaderMaterial GetSelectionMeshOverlay()
         => GetOrCreate(ref _selectionMeshOverlay, "res://shaders/selection_highlight_overlay.gdshader", LevelViewerSelection.HighlightGreen);
@@ -26,19 +35,30 @@ public static class LevelViewerHighlightOverlay
     public static ShaderMaterial GetAliasBillboardOverlay()
         => GetOrCreate(ref _aliasBillboardOverlay, "res://shaders/selection_highlight_overlay_billboard.gdshader", LevelViewerAliasHighlight.HighlightOrange);
 
-    public static ShaderMaterial GetOverlayForMesh(Material sourceMaterial, bool aliasHighlight)
+    public static ShaderMaterial GetProxyMeshOverlay()
+        => GetOrCreate(ref _proxyMeshOverlay, "res://shaders/selection_highlight_overlay.gdshader", LevelViewerProxyHighlight.HighlightBlue);
+
+    public static ShaderMaterial GetProxyBillboardOverlay()
+        => GetOrCreate(ref _proxyBillboardOverlay, "res://shaders/selection_highlight_overlay_billboard.gdshader", LevelViewerProxyHighlight.HighlightBlue);
+
+    public static ShaderMaterial GetOverlayForMesh(Material sourceMaterial, HighlightOverlayMode mode)
     {
         bool billboard = PreviewVisualUtility.IsIconBillboardMaterial(sourceMaterial);
-        if (aliasHighlight)
-            return billboard ? GetAliasBillboardOverlay() : GetAliasMeshOverlay();
-
-        return billboard ? GetSelectionBillboardOverlay() : GetSelectionMeshOverlay();
+        switch (mode)
+        {
+            case HighlightOverlayMode.Alias:
+                return billboard ? GetAliasBillboardOverlay() : GetAliasMeshOverlay();
+            case HighlightOverlayMode.Proxy:
+                return billboard ? GetProxyBillboardOverlay() : GetProxyMeshOverlay();
+            default:
+                return billboard ? GetSelectionBillboardOverlay() : GetSelectionMeshOverlay();
+        }
     }
 
     public static bool TryApplyOverlay(
         MeshInstance3D meshInstance,
         Dictionary<MeshInstance3D, Material> savedOverlays,
-        bool aliasHighlight)
+        HighlightOverlayMode mode)
     {
         if (meshInstance == null || !GodotObject.IsInstanceValid(meshInstance))
             return false;
@@ -54,7 +74,7 @@ public static class LevelViewerHighlightOverlay
             return false;
 
         savedOverlays[meshInstance] = meshInstance.MaterialOverlay;
-        meshInstance.MaterialOverlay = GetOverlayForMesh(current, aliasHighlight);
+        meshInstance.MaterialOverlay = GetOverlayForMesh(current, mode);
         return true;
     }
 

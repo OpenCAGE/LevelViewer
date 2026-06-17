@@ -6,12 +6,12 @@ using System;
 using System.Collections.Generic;
 
 /// <summary>
-/// Orange additive overlay on instances targeted by parameterized aliases in the active composite.
-/// Uses the same MaterialOverlay path as selection highlights.
+/// Blue additive overlay on entities targeted by proxies in the active composite.
+/// Only applies when stepped into a nested composite instance below Commands.EntryPoints[0].
 /// </summary>
-public static class LevelViewerAliasHighlight
+public static class LevelViewerProxyHighlight
 {
-	public static readonly Color HighlightOrange = new(1f, 0.55f, 0.15f, 1f);
+	public static readonly Color HighlightBlue = new(0.3f, 0.55f, 1f, 1f);
 
 	private static readonly Dictionary<MeshInstance3D, Material> _savedOverlays = new();
 	private static readonly List<MeshInstance3D> _highlightMeshes = new();
@@ -45,39 +45,31 @@ public static class LevelViewerAliasHighlight
 			return;
 		}
 
-		Node3D contentRoot = scene.ParentNode;
-		if (contentRoot == null)
+		if (!PreviewVisibilitySettings.IsSteppedDownFromLevelRoot())
 		{
 			_cacheValid = false;
 			return;
 		}
 
 		HashSet<ulong> tintedMeshIds = new HashSet<ulong>();
-		scene.ForEachParameterizedAliasInActiveComposite((ownerComposite, alias) =>
+		scene.ForEachProxyInActiveComposite((ownerComposite, proxy) =>
 		{
-			if (!scene.TryGetEntitySceneNodes(ownerComposite.shortGUID, alias.shortGUID, out List<Node3D> aliasNodes))
+			if (!scene.TryGetEntitySceneNodes(ownerComposite.shortGUID, proxy.shortGUID, out List<Node3D> proxyNodes))
 				return;
 
-			for (int i = 0; i < aliasNodes.Count; i++)
+			for (int i = 0; i < proxyNodes.Count; i++)
 			{
-				if (aliasNodes[i] is not EntityOverride aliasOverride)
+				if (proxyNodes[i] is not EntityOverride proxyOverride)
 					continue;
 
-				if (!LevelViewerCompositeFocus.IsPickOwnerInScope(aliasOverride, commands))
-					continue;
-
-				if (!scene.TryResolveAliasPointedSceneNode(
-						aliasOverride,
-						alias,
-						ownerComposite,
+				if (!scene.TryResolveProxyPointedSceneNode(
+						proxyOverride,
+						proxy,
 						out Node3D pointedNode,
 						preferCached: true))
 				{
 					continue;
 				}
-
-				if (!LevelViewerCompositeFocus.IsNodeInScope(pointedNode, contentRoot, commands))
-					continue;
 
 				ApplyToNode(pointedNode, tintedMeshIds);
 			}
@@ -88,7 +80,6 @@ public static class LevelViewerAliasHighlight
 		_cacheValid = true;
 	}
 
-	/// <summary>Re-applies cached orange overlay while skipping the current selection subtree.</summary>
 	public static void SyncWithSelection() => ReapplyIfActive();
 
 	public static void Clear()
@@ -98,7 +89,6 @@ public static class LevelViewerAliasHighlight
 		_cacheValid = false;
 	}
 
-	/// <summary>Restores alias overlay under <paramref name="root"/> so selection green can take over.</summary>
 	public static void ReleaseNode(Node3D root)
 	{
 		if (root == null || !GodotObject.IsInstanceValid(root))
@@ -188,6 +178,9 @@ public static class LevelViewerAliasHighlight
 
 	private static void ApplyMeshHighlight(MeshInstance3D meshInstance)
 	{
-		LevelViewerHighlightOverlay.TryApplyOverlay(meshInstance, _savedOverlays, LevelViewerHighlightOverlay.HighlightOverlayMode.Alias);
+		LevelViewerHighlightOverlay.TryApplyOverlay(
+			meshInstance,
+			_savedOverlays,
+			LevelViewerHighlightOverlay.HighlightOverlayMode.Proxy);
 	}
 }

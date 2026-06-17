@@ -22,6 +22,7 @@ namespace OpenCAGE.UnityConnection
 
         RENDER_FILTERS_CHANGED,
         SETTINGS_CHANGED,
+        VIEWER_LOG,
         GENERIC_DATA_SYNC,
     }
 
@@ -74,5 +75,9 @@ namespace OpenCAGE.UnityConnection
         public float transform_grid_snap = 0f;
         public float rotation_snap_degrees = 0f;
         public Dictionary<uint, bool> box_render_filters = new Dictionary<uint, bool>();
+
+        // Level Viewer log line forwarded to OpenCAGE (VIEWER_LOG).
+        public string log_message = "";
+        public bool log_is_error = false;
     }
 }

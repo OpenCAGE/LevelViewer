@@ -126,10 +126,13 @@ public partial class CommandsEditorConnection : Node3D
     private uint _pendingEphemeralDeepSelectDeleteCompositeId;
     private uint _pendingEphemeralDeepSelectDeleteEntityId;
 
+    public bool IsWebSocketConnected => _client != null && _client.State == WebSocketState.Open;
+
     public override void _Ready()
     {
         _scene = GetNode<AlienScene>("../AlienScene");
         _connectionCts = new CancellationTokenSource();
+        ViewerLogBridge.RegisterConnection(this);
         if (_scene != null)
             _scene.OnSelectionChanged += OnSceneSelectionChanged;
         Callable.From(EnsureConnectionHud).CallDeferred();
@@ -184,6 +187,7 @@ public partial class CommandsEditorConnection : Node3D
 
     public override void _ExitTree()
     {
+        ViewerLogBridge.ClearConnection();
         _connectionCts?.Cancel();
         _connectionCts?.Dispose();
         _connectionCts = null;
@@ -220,7 +224,7 @@ public partial class CommandsEditorConnection : Node3D
         }
         catch (Exception ex)
         {
-            GD.PrintErr("[Viewer] PhysicsProcess failed: " + ex);
+            ViewerLog.PrintErr("[Viewer] PhysicsProcess failed: " + ex);
         }
     }
 
@@ -241,31 +245,31 @@ public partial class CommandsEditorConnection : Node3D
 
         if (_compositeLoaded && _scene.Content.Loaded && _pathComposites != null && _pathComposites.Count > 0)
         {
-            if (_scene.CompositeID != _pathComposites[0])
+            uint levelRootCompositeId = _scene.Content.Level.Commands.EntryPoints[0].shortGUID.AsUInt32;
+            if (levelRootCompositeId != 0 && _scene.CompositeID != levelRootCompositeId)
             {
-                uint compositeId = _pathComposites[0];
-                Callable.From(() => _scene.QueuePopulateComposite(new ShortGuid(compositeId))).CallDeferred();
+                Callable.From(() => _scene.QueuePopulateComposite(new ShortGuid(levelRootCompositeId))).CallDeferred();
             }
         }
 
         if (_addedEntity != null)
         {
-            GD.Print("Adding entity: " + _addedEntity.Item2.AsUInt32);
+            ViewerLog.Print("Adding entity: " + _addedEntity.Item2.AsUInt32);
             _scene.AddEntity(_addedEntity.Item1, _addedEntity.Item2);
             _addedEntity = null;
-            _scene.RefreshAliasHighlights();
+            _scene.RefreshEntityHighlights();
         }
 
         if (_removedEntity != null)
         {
-            GD.Print("Removing entity: " + _removedEntity.Item2.AsUInt32);
+            ViewerLog.Print("Removing entity: " + _removedEntity.Item2.AsUInt32);
             _scene.RemoveEntity(_removedEntity.Item1, _removedEntity.Item2);
             _removedEntity = null;
         }
 
         if (_removedComposite != ShortGuid.Invalid)
         {
-            GD.Print("Removing composite: " + _removedComposite.AsUInt32);
+            ViewerLog.Print("Removing composite: " + _removedComposite.AsUInt32);
             _scene.RemoveComposite(_removedComposite);
             _removedComposite = ShortGuid.Invalid;
         }
@@ -332,7 +336,7 @@ public partial class CommandsEditorConnection : Node3D
                 }
                 catch (Exception ex)
                 {
-                    GD.PrintErr("[Viewer] Composite focus refresh failed: " + ex);
+                    ViewerLog.PrintErr("[Viewer] Composite focus refresh failed: " + ex);
                 }
                 finally
                 {
@@ -368,7 +372,7 @@ public partial class CommandsEditorConnection : Node3D
         }
         catch (Exception ex)
         {
-            GD.PrintErr("[Viewer] HandleMessage deserialize failed: " + ex.Message
+            ViewerLog.PrintErr("[Viewer] HandleMessage deserialize failed: " + ex.Message
                 + " | payloadLen=" + (data?.Length ?? 0));
             WebSocketPacketLog.LogReceiveFailed(data?.Length ?? 0, ex.Message);
             return;
@@ -376,7 +380,7 @@ public partial class CommandsEditorConnection : Node3D
 
         if (packet == null)
         {
-            GD.PrintErr("[Viewer] HandleMessage received null packet | payloadLen=" + (data?.Length ?? 0));
+            ViewerLog.PrintErr("[Viewer] HandleMessage received null packet | payloadLen=" + (data?.Length ?? 0));
             WebSocketPacketLog.LogReceiveFailed(data?.Length ?? 0, "null packet");
             return;
         }
@@ -385,7 +389,7 @@ public partial class CommandsEditorConnection : Node3D
 
         if (packet.version != new Packet().version)
         {
-            GD.PrintErr("Your Commands Editor is utilising a different API version than this Godot client!!\nPlease ensure both are up to date.");
+            ViewerLog.PrintErr("Your Commands Editor is utilising a different API version than this Godot client!!\nPlease ensure both are up to date.");
             return;
         }
 
@@ -759,17 +763,17 @@ public partial class CommandsEditorConnection : Node3D
             }
             catch (Exception ex)
             {
-                GD.PrintErr("[Viewer] Parameter sync failed: " + ex);
+                ViewerLog.PrintErr("[Viewer] Parameter sync failed: " + ex);
             }
         }
 
         try
         {
-            _scene.RefreshAliasHighlights();
+            _scene.RefreshEntityHighlights();
         }
         catch (Exception ex)
         {
-            GD.PrintErr("[Viewer] Alias refresh after sync failed: " + ex);
+            ViewerLog.PrintErr("[Viewer] Alias refresh after sync failed: " + ex);
         }
     }
 
@@ -858,7 +862,7 @@ public partial class CommandsEditorConnection : Node3D
             _scene.SetModelReferenceWireframe(packet.model_reference_wireframe);
 
         if (highlightChanged && _scene != null)
-            _scene.RefreshAliasHighlights();
+            _scene.RefreshEntityHighlights();
 
         return hideNestedChanged;
     }
@@ -947,14 +951,15 @@ public partial class CommandsEditorConnection : Node3D
             _client?.Dispose();
             _client = new ClientWebSocket();
 
-            GD.Print("Trying to connect to Commands Editor...");
+            ViewerLog.Print("Trying to connect to Commands Editor...");
 
             try
             {
                 await _client.ConnectAsync(
                     new Uri($"ws://localhost:{_webSocketPort}/commands_editor"),
                     cancellationToken);
-                GD.Print("Connected to Commands Editor!");
+                ViewerLog.Print("Connected to Commands Editor!");
+                ViewerLogBridge.NotifyConnected();
                 NotifyConnectionConnected();
 
                 await ReceiveLoopAsync(_client, cancellationToken);
@@ -965,13 +970,13 @@ public partial class CommandsEditorConnection : Node3D
             }
             catch (Exception ex)
             {
-                GD.PrintErr("WebSocket connection error: " + ex.Message);
+                ViewerLog.PrintErr("WebSocket connection error: " + ex.Message);
             }
 
             if (cancellationToken.IsCancellationRequested)
                 break;
 
-            GD.Print("Disconnected from Commands Editor!");
+            ViewerLog.Print("Disconnected from Commands Editor!");
             NotifyConnectionDisconnected();
 
             try
@@ -1009,6 +1014,18 @@ public partial class CommandsEditorConnection : Node3D
         }
     }
 
+    public void SendViewerLog(string message, bool isError)
+    {
+        if (string.IsNullOrWhiteSpace(message))
+            return;
+
+        SendMessage(new Packet(PacketEvent.VIEWER_LOG)
+        {
+            log_message = message,
+            log_is_error = isError,
+        });
+    }
+
     public async void SendMessage(Packet content)
     {
         await SendMessageAsync(content);
@@ -1034,7 +1051,7 @@ public partial class CommandsEditorConnection : Node3D
             }
             catch (Exception ex)
             {
-                GD.PrintErr("Failed to send websocket message: " + ex.Message);
+                ViewerLog.PrintErr("Failed to send websocket message: " + ex.Message);
             }
         }
         finally
@@ -1695,7 +1712,7 @@ public partial class CommandsEditorConnection : Node3D
         if (target != null && GodotObject.IsInstanceValid(target))
             LevelViewerPick.InvalidatePickBounds(target);
 
-        GD.Print("[DragDiag] commit | entity=" + (target?.Name ?? "?")
+        ViewerLog.Print("[DragDiag] commit | entity=" + (target?.Name ?? "?")
             + " | pos=" + (target?.Position.ToString() ?? "?"));
     }
 
@@ -1741,7 +1758,7 @@ public partial class CommandsEditorConnection : Node3D
                 if (positionAdded)
                 {
                     CommitEphemeralDeepSelectAlias(compositeId.AsUInt32, entityId.AsUInt32);
-                    _scene.RefreshAliasHighlights();
+                    _scene.RefreshEntityHighlights();
                 }
             }
             else

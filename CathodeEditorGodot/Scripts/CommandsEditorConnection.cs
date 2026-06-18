@@ -612,15 +612,15 @@ public partial class CommandsEditorConnection : Node3D
                 break;
             }
             case PacketEvent.COMPOSITE_SELECTED:
-            case PacketEvent.COMPOSITE_RELOADED:
-            {
-                uint compositeId = packet.composite;
-                if (compositeId == 0)
-                    break;
-
-                Callable.From(() => _scene?.QueuePopulateComposite(new ShortGuid(compositeId))).CallDeferred();
+                if (ShouldQueueScenePopulate(packet))
+                {
+                    uint compositeId = packet.composite;
+                    Callable.From(() => _scene?.QueuePopulateComposite(new ShortGuid(compositeId))).CallDeferred();
+                }
                 break;
-            }
+            case PacketEvent.COMPOSITE_RELOADED:
+                // Legacy: hierarchy navigation now uses GENERIC_DATA_SYNC from OpenCAGE.
+                break;
         }
     }
 
@@ -878,6 +878,18 @@ public partial class CommandsEditorConnection : Node3D
         if (changed)
             MarkCompositeFocusDirty();
         return changed;
+    }
+
+    /// <summary>
+    /// Full scene repopulate is only for composite-browser root switches (COMPOSITE_SELECTED with a
+    /// single composite in the path). Hierarchy drill sends GENERIC_DATA_SYNC with instance steps.
+    /// </summary>
+    private static bool ShouldQueueScenePopulate(Packet packet)
+    {
+        if (packet.packet_event != PacketEvent.COMPOSITE_SELECTED || packet.composite == 0)
+            return false;
+
+        return packet.path_composites == null || packet.path_composites.Count <= 1;
     }
 
     private void MarkCompositeFocusDirty()

@@ -62,7 +62,9 @@ public partial class LevelViewerCamera : Camera3D
     private bool _panning;
     private static readonly bool EmbeddedInOpenCage = DetectEmbeddedInOpenCage();
     private Vector2? _embeddedLastScreenMousePos;
+    private Vector2? _embeddedLookAnchorScreen;
     private bool _embeddedMouseCaptured;
+    private bool _embeddedCursorHiddenForLook;
 
     private LevelViewerSelectionHud _gizmoModeHud;
     private LevelViewerSelectionHud _deepSelectHud;
@@ -599,6 +601,9 @@ public partial class LevelViewerCamera : Camera3D
         bool ctrlDown = Win32Input.IsKeyDown(Win32Input.VK_CONTROL);
         bool dragActive = rightDown || middleDown;
 
+        if (!rightDown)
+            EndEmbeddedMouseLook();
+
         if (!dragActive)
         {
             ReleaseEmbeddedMouseCapture();
@@ -608,11 +613,58 @@ public partial class LevelViewerCamera : Camera3D
             return;
         }
 
+        _mouseLookActive = rightDown;
+        _panning = middleDown && !ctrlDown;
+
+        if (_mouseLookActive)
+        {
+            ProcessEmbeddedMouseLook(hwnd);
+            return;
+        }
+
+        ProcessEmbeddedMousePan(hwnd, deltaSeconds);
+    }
+
+    private void ProcessEmbeddedMouseLook(IntPtr hwnd)
+    {
         if (!_embeddedMouseCaptured)
         {
             if (!Win32Input.IsMouseOverWindow(hwnd))
             {
-                _mouseLookActive = false;
+                _embeddedLastScreenMousePos = null;
+                return;
+            }
+
+            BeginEmbeddedMouseLook(hwnd);
+            return;
+        }
+
+        if (_embeddedLookAnchorScreen == null)
+        {
+            BeginEmbeddedMouseLook(hwnd);
+            return;
+        }
+
+        if (!Win32Input.TryGetScreenCursorPosition(out Vector2 screenPos))
+            return;
+
+        Vector2 anchor = _embeddedLookAnchorScreen.Value;
+        Vector2 relative = screenPos - anchor;
+        if (relative.LengthSquared() > 0f)
+        {
+            ApplyLookRelative(relative);
+            Win32Input.SetCursorScreenPosition(anchor);
+        }
+
+        _embeddedLastScreenMousePos = anchor;
+    }
+
+    private void ProcessEmbeddedMousePan(IntPtr hwnd, float deltaSeconds)
+    {
+        if (!_embeddedMouseCaptured)
+        {
+            if (!Win32Input.IsMouseOverWindow(hwnd))
+            {
                 _panning = false;
                 _embeddedLastScreenMousePos = null;
                 return;
@@ -622,9 +674,6 @@ public partial class LevelViewerCamera : Camera3D
             _embeddedMouseCaptured = true;
             Win32Input.SetFocus(hwnd);
         }
-
-        _mouseLookActive = rightDown;
-        _panning = middleDown && !ctrlDown;
 
         if (!Win32Input.TryGetScreenCursorPosition(out Vector2 screenPos))
             return;
@@ -638,12 +687,42 @@ public partial class LevelViewerCamera : Camera3D
         Vector2 relative = screenPos - _embeddedLastScreenMousePos.Value;
         _embeddedLastScreenMousePos = screenPos;
 
-        ApplyLookRelative(relative);
         ApplyPanRelative(relative, relative / deltaSeconds, deltaSeconds);
+    }
+
+    private void BeginEmbeddedMouseLook(IntPtr hwnd)
+    {
+        if (hwnd == IntPtr.Zero)
+            return;
+
+        if (!Win32Input.TryGetClientCenterScreen(hwnd, out Vector2 anchor))
+            return;
+
+        _embeddedLookAnchorScreen = anchor;
+        _embeddedLastScreenMousePos = anchor;
+        Win32Input.SetCursorScreenPosition(anchor);
+        Win32Input.PushHideCursor();
+        _embeddedCursorHiddenForLook = true;
+
+        Win32Input.SetCapture(hwnd);
+        _embeddedMouseCaptured = true;
+        Win32Input.SetFocus(hwnd);
+    }
+
+    private void EndEmbeddedMouseLook()
+    {
+        if (!_embeddedCursorHiddenForLook)
+            return;
+
+        Win32Input.PopHideCursor();
+        _embeddedCursorHiddenForLook = false;
+        _embeddedLookAnchorScreen = null;
     }
 
     private void ReleaseEmbeddedMouseCapture()
     {
+        EndEmbeddedMouseLook();
+
         if (!_embeddedMouseCaptured)
             return;
 
@@ -895,6 +974,15 @@ public partial class LevelViewerCamera : Camera3D
         public const int VK_Q = 0x51;
 
         [StructLayout(LayoutKind.Sequential)]
+        public struct Rect
+        {
+            public int Left;
+            public int Top;
+            public int Right;
+            public int Bottom;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
         public struct Point
         {
             public int X;
@@ -906,6 +994,18 @@ public partial class LevelViewerCamera : Camera3D
 
         [DllImport("user32.dll")]
         public static extern bool GetCursorPos(out Point point);
+
+        [DllImport("user32.dll")]
+        public static extern bool SetCursorPos(int x, int y);
+
+        [DllImport("user32.dll")]
+        public static extern bool GetClientRect(IntPtr hwnd, out Rect rect);
+
+        [DllImport("user32.dll")]
+        public static extern bool ClientToScreen(IntPtr hwnd, ref Point point);
+
+        [DllImport("user32.dll")]
+        public static extern int ShowCursor(bool show);
 
         [DllImport("user32.dll")]
         public static extern IntPtr SetCapture(IntPtr hwnd);
@@ -960,6 +1060,58 @@ public partial class LevelViewerCamera : Camera3D
 
             position = new Vector2(screen.X, screen.Y);
             return true;
+        }
+
+        public static void SetCursorScreenPosition(Vector2 screen)
+        {
+            SetCursorPos((int)Mathf.Round(screen.X), (int)Mathf.Round(screen.Y));
+        }
+
+        public static bool TryGetClientCenterScreen(IntPtr hwnd, out Vector2 center)
+        {
+            center = default;
+            if (hwnd == IntPtr.Zero || !GetClientRect(hwnd, out Rect rect))
+                return false;
+
+            var clientCenter = new Point
+            {
+                X = (rect.Left + rect.Right) / 2,
+                Y = (rect.Top + rect.Bottom) / 2,
+            };
+
+            if (!ClientToScreen(hwnd, ref clientCenter))
+                return false;
+
+            center = new Vector2(clientCenter.X, clientCenter.Y);
+            return true;
+        }
+
+        private static int _cursorHideDepth;
+
+        public static void PushHideCursor()
+        {
+            if (_cursorHideDepth == 0)
+            {
+                while (ShowCursor(false) >= 0)
+                {
+                }
+            }
+
+            _cursorHideDepth++;
+        }
+
+        public static void PopHideCursor()
+        {
+            if (_cursorHideDepth <= 0)
+                return;
+
+            _cursorHideDepth--;
+            if (_cursorHideDepth != 0)
+                return;
+
+            while (ShowCursor(true) < 0)
+            {
+            }
         }
     }
 

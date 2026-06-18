@@ -129,6 +129,7 @@ public partial class CommandsEditorConnection : Node3D
 
     public override void _Ready()
     {
+        LevelViewerEmbeddedFocus.ConfigureEmbeddedStartup();
         _scene = GetNode<AlienScene>("../AlienScene");
         _connectionCts = new CancellationTokenSource();
         ViewerLogBridge.RegisterConnection(this);
@@ -2340,6 +2341,9 @@ public partial class CommandsEditorConnection : Node3D
             return;
 
         if (IsAnyMouseButtonPressed() && GetCapture() != hwnd)
+            return;
+
+        if (!LevelViewerEmbeddedFocus.IsMouseOverMainWindow())
             return;
 
         if (GetFocus() != hwnd)

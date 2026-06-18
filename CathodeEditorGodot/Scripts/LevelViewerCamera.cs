@@ -245,6 +245,12 @@ public partial class LevelViewerCamera : Camera3D
             return;
         }
 
+        if (LevelViewerRenderIdleThrottle.IsRenderIdle)
+        {
+            ReleaseEmbeddedMouseCapture();
+            return;
+        }
+
         float deltaSeconds = (float)delta;
         Vector3 positionBefore = GlobalPosition;
 

@@ -1,12 +1,26 @@
 using Godot;
 using System;
+using System.Collections.Generic;
 using CATHODE;
 
 /// <summary>
-/// Loads Cathode TEX4 data into Godot Image/Texture2D (decompress + channel fixes).
+/// Loads Cathode TEX4 data into Godot Image/Texture2D (GPU-compressed where possible).
 /// </summary>
 public static class AlienSceneTextures
 {
+	private static readonly Dictionary<Texture2D, bool> _transparencyCache = new Dictionary<Texture2D, bool>();
+
+	public static void ClearTransparencyCache()
+	{
+		_transparencyCache.Clear();
+	}
+
+	public static void RegisterTransparency(Texture2D texture, bool hasTransparency)
+	{
+		if (texture != null)
+			_transparencyCache[texture] = hasTransparency;
+	}
+
 	public static Image.Format MapImageFormat(Textures.TextureFormat format)
 	{
 		switch (format)
@@ -116,23 +130,6 @@ public static class AlienSceneTextures
 		return baseOnly;
 	}
 
-	/// <summary>
-	/// Picks streamed mips when loaded, otherwise persistent (matches OpenCAGE CathodeLibExtensions.ToDDS).
-	/// </summary>
-	public static Textures.TEX4.Texture GetTextureDataPart(Textures.TEX4 texture)
-	{
-		if (texture == null)
-			return null;
-
-		if (texture.TextureStreamed?.Content != null && texture.TextureStreamed.Content.Length > 0)
-			return texture.TextureStreamed;
-
-		if (texture.TexturePersistent?.Content != null && texture.TexturePersistent.Content.Length > 0)
-			return texture.TexturePersistent;
-
-		return null;
-	}
-
 	public static Texture2D CreateTextureFromTexPart(Textures.TEX4.Texture texPart, Textures.TextureFormat sourceFormat, string name)
 	{
 		if (texPart?.Content == null || texPart.Content.Length == 0)
@@ -147,12 +144,15 @@ public static class AlienSceneTextures
 		if (width <= 0 || height <= 0)
 			return null;
 
+		bool hasTransparency = DetectTransparencyFromContent(texPart.Content, width, height, sourceFormat);
 		Image image = CreateImageFromRaw(texPart.Content, width, height, format, sourceFormat, name);
 		if (image == null)
 			return null;
 
 		Texture2D texture = ImageTexture.CreateFromImage(image);
 		texture.ResourceName = name;
+		texture.ResourceLocalToScene = false;
+		_transparencyCache[texture] = hasTransparency;
 		return texture;
 	}
 
@@ -176,13 +176,20 @@ public static class AlienSceneTextures
 			return null;
 		}
 
+		// Keep block-compressed data on the GPU; decompressing every environment map to RGBA8+mips dominates RAM.
 		if (IsBlockCompressed(format))
-			image.Decompress();
+		{
+			if (sourceFormat == Textures.TextureFormat.A4R4G4B4)
+				image.Decompress();
+		}
+		else
+		{
+			if (sourceFormat == Textures.TextureFormat.A8R8G8B8)
+				SwizzleBgraToRgba(image);
 
-		if (sourceFormat == Textures.TextureFormat.A8R8G8B8)
-			SwizzleBgraToRgba(image);
+			image.GenerateMipmaps();
+		}
 
-		image.GenerateMipmaps();
 		return image;
 	}
 
@@ -201,14 +208,10 @@ public static class AlienSceneTextures
 
 		Image.Format godotAstc = MapImageFormat(sourceFormat);
 		Image image = Image.CreateFromData(width, height, false, godotAstc, baseMip);
-		if (image != null && !image.IsEmpty())
+		if (image != null && !image.IsEmpty() && image.Decompress() == Error.Ok && image.GetFormat() == Image.Format.Rgba8)
 		{
-			image.Decompress();
-			if (image.GetFormat() == Image.Format.Rgba8)
-			{
-				image.GenerateMipmaps();
-				return image;
-			}
+			image.GenerateMipmaps();
+			return image;
 		}
 
 		return CreateImageFromAstcCpuDecode(baseMip, width, height, sourceFormat, name);
@@ -243,13 +246,83 @@ public static class AlienSceneTextures
 
 	/// <summary>
 	/// Sparse scan for non-opaque pixels (matches OpenCAGE MaterialApplier.ImageSourceHasTransparency).
+	/// Uses the one-time cache from conversion; avoids GetImage() decompressing GPU textures again.
 	/// </summary>
 	public static bool HasTransparency(Texture2D texture)
 	{
 		if (texture == null)
 			return false;
 
+		if (_transparencyCache.TryGetValue(texture, out bool cached))
+			return cached;
+
 		Image image = texture.GetImage();
+		if (image == null || image.IsEmpty())
+			return false;
+
+		return ScanImageForTransparency(image);
+	}
+
+	/// <summary>One-time alpha scan from Cathode source bytes before Content is released.</summary>
+	public static bool DetectTransparencyFromContent(byte[] content, int width, int height, Textures.TextureFormat sourceFormat)
+	{
+		if (content == null || content.Length == 0 || width <= 0 || height <= 0)
+			return false;
+
+		Image.Format format = MapImageFormat(sourceFormat);
+		if (format == Image.Format.Max && !AstcTextureDecode.IsAstcFormat(sourceFormat))
+			return false;
+
+		if (format == Image.Format.Rgb8 || format == Image.Format.L8 || format == Image.Format.Rf)
+			return false;
+
+		if (sourceFormat == Textures.TextureFormat.DXT1 || sourceFormat == Textures.TextureFormat.X8R8G8B8)
+			return false;
+
+		Image probe = CreateProbeImage(content, width, height, format, sourceFormat);
+		if (probe == null)
+			return false;
+
+		return ScanImageForTransparency(probe);
+	}
+
+	private static Image CreateProbeImage(byte[] content, int width, int height, Image.Format format, Textures.TextureFormat sourceFormat)
+	{
+		if (AstcTextureDecode.IsAstcFormat(sourceFormat))
+		{
+			byte[] baseMip = ExtractBaseMipData(content, width, height, Image.Format.Max, sourceFormat);
+			if (baseMip == null)
+				return null;
+
+			byte[] rgba = AstcTextureDecode.DecodeToRgba8(baseMip, width, height, sourceFormat);
+			if (rgba == null)
+				return null;
+
+			return Image.CreateFromData(width, height, false, Image.Format.Rgba8, rgba);
+		}
+
+		byte[] upload = ExtractBaseMipData(content, width, height, format, sourceFormat);
+		if (upload == null)
+			return null;
+
+		Image image = Image.CreateFromData(width, height, false, format, upload);
+		if (image == null || image.IsEmpty())
+			return null;
+
+		if (IsBlockCompressed(format))
+			image.Decompress();
+
+		if (sourceFormat == Textures.TextureFormat.A8R8G8B8)
+			SwizzleBgraToRgba(image);
+
+		if (image.GetFormat() != Image.Format.Rgba8)
+			image.Convert(Image.Format.Rgba8);
+
+		return image;
+	}
+
+	private static bool ScanImageForTransparency(Image image)
+	{
 		if (image == null || image.IsEmpty())
 			return false;
 
@@ -263,11 +336,6 @@ public static class AlienSceneTextures
 		if (image.GetFormat() != Image.Format.Rgba8)
 			image.Convert(Image.Format.Rgba8);
 
-		return ImageDataHasTransparency(image);
-	}
-
-	private static bool ImageDataHasTransparency(Image image)
-	{
 		byte[] pixels = image.GetData();
 		if (pixels == null || pixels.Length < 4)
 			return false;

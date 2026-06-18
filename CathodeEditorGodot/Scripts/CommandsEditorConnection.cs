@@ -136,6 +136,7 @@ public partial class CommandsEditorConnection : Node3D
         if (_scene != null)
             _scene.OnSelectionChanged += OnSceneSelectionChanged;
         Callable.From(EnsureTransformGizmo).CallDeferred();
+        SetPhysicsProcess(false);
         _ = ReconnectLoopAsync(_connectionCts.Token);
     }
 
@@ -208,7 +209,23 @@ public partial class CommandsEditorConnection : Node3D
 
     public override void _Process(double delta)
     {
+        if (LevelViewerRenderIdleThrottle.IsSuspended)
+        {
+            Callable.From(() => SetProcess(false)).CallDeferred();
+            return;
+        }
+
         FlushPendingParameterSyncs();
+    }
+
+    public override void _UnhandledInput(InputEvent @event)
+    {
+        if (@event is InputEventMouseButton or InputEventMouseMotion or InputEventKey)
+        {
+            if (!IsProcessing())
+                SetProcess(true);
+            LevelViewerRenderIdleThrottle.NotifyUserActivity();
+        }
     }
 
     public override void _PhysicsProcess(double delta)
@@ -221,10 +238,44 @@ public partial class CommandsEditorConnection : Node3D
         {
             ViewerLog.PrintErr("[Viewer] PhysicsProcess failed: " + ex);
         }
+        finally
+        {
+            if (!HasPendingPhysicsWork())
+                SetPhysicsProcess(false);
+        }
+    }
+
+    private void WakePhysicsProcess()
+    {
+        if (!IsPhysicsProcessing())
+            Callable.From(() => SetPhysicsProcess(true)).CallDeferred();
+    }
+
+    private bool HasPendingPhysicsWork()
+    {
+        if (!_incomingMessages.IsEmpty)
+            return true;
+        if (_levelName != "" && _didLoadLevel)
+            return true;
+        if (_addedEntity != null || _removedEntity != null || _removedComposite != ShortGuid.Invalid)
+            return true;
+        if (_forceSelectionApply || _currentEntityGOID != _currentEntity)
+            return true;
+
+        lock (_lock)
+        {
+            if (_renderFiltersDirty || _compositeFocusDirty)
+                return true;
+        }
+
+        return false;
     }
 
     private void PhysicsProcessInternal()
     {
+        if (LevelViewerRenderIdleThrottle.IsSuspended && _incomingMessages.IsEmpty)
+            return;
+
         while (_incomingMessages.TryDequeue(out string message))
             HandleMessage(message);
 
@@ -1024,6 +1075,8 @@ public partial class CommandsEditorConnection : Node3D
             if (result.EndOfMessage)
             {
                 _incomingMessages.Enqueue(messageBuilder.ToString());
+                WakePhysicsProcess();
+                LevelViewerRenderIdleThrottle.NotifyUserActivity();
                 messageBuilder.Clear();
             }
         }

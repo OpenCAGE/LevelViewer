@@ -30,13 +30,17 @@ public partial class AlienScene : Node3D
 	public int ModelReferenceMeshCount => _modelReferenceMeshes.Count;
 	public string CompositeName => _loadedComposite == null ? "" : _loadedComposite.name;
 
+	// Shared Godot texture cache: one entry per Cathode TEX4 instance.
 	private Dictionary<Textures.TEX4, TexOrCube> _texturesGlobal = new Dictionary<Textures.TEX4, TexOrCube>();
 	private Dictionary<Textures.TEX4, TexOrCube> _texturesLevel = new Dictionary<Textures.TEX4, TexOrCube>();
 	private Dictionary<Materials.Material, ShaderMaterial> _materials = new Dictionary<Materials.Material, ShaderMaterial>();
 	private Dictionary<Materials.Material, ShaderMaterial> _wireframeMaterials = new Dictionary<Materials.Material, ShaderMaterial>();
 	private Dictionary<ShaderMaterial, bool> _materialSupport = new Dictionary<ShaderMaterial, bool>();
 	private Dictionary<MeshInstance3D, Materials.Material> _modelReferenceMeshes = new Dictionary<MeshInstance3D, Materials.Material>();
-	private Dictionary<Models.CS2.Component.LOD.Submesh, MeshHolder> _modelMeshes = new Dictionary<Models.CS2.Component.LOD.Submesh, MeshHolder>();
+	// Shared Godot mesh cache: one ArrayMesh per models write index (shared by all instances).
+	private readonly Dictionary<int, MeshHolder> _modelMeshesByWriteIndex = new Dictionary<int, MeshHolder>();
+	private readonly Dictionary<Models.CS2.Component.LOD.Submesh, int> _submeshWriteIndexByReference =
+		new Dictionary<Models.CS2.Component.LOD.Submesh, int>(ReferenceEqualityComparer.Instance);
 	private MeshInstance3D[] _largeScenePolicyMeshes = System.Array.Empty<MeshInstance3D>();
 	private int _largeScenePolicyIndex;
 	private bool _largeScenePolicyRunning;
@@ -111,6 +115,14 @@ public partial class AlienScene : Node3D
 	{
 		AdvanceLoadPipeline();
 		AdvanceLargeSceneRenderPolicyBatch();
+		UpdateLoadPipelineProcessing();
+	}
+
+	private void UpdateLoadPipelineProcessing()
+	{
+		bool needsProcess = _loadStep != LoadPipelineStep.None || _largeScenePolicyRunning;
+		if (IsProcessing() != needsProcess)
+			SetProcess(needsProcess);
 	}
 
 	public void RegisterParameterVisualHandler(DataType dataType, ParameterVisualHandler handler)
@@ -338,9 +350,12 @@ public partial class AlienScene : Node3D
 		}
 		_texturesLevel.Clear();
 
-		foreach (KeyValuePair<Models.CS2.Component.LOD.Submesh, MeshHolder> kvp in _modelMeshes)
+		AlienSceneTextures.ClearTransparencyCache();
+
+		foreach (KeyValuePair<int, MeshHolder> kvp in _modelMeshesByWriteIndex)
 			kvp.Value.MainMesh?.Dispose();
-		_modelMeshes.Clear();
+		_modelMeshesByWriteIndex.Clear();
+		_submeshWriteIndexByReference.Clear();
 
 		_compositeNodes.Clear();
 		_nodeEntities.Clear();
@@ -396,6 +411,7 @@ public partial class AlienScene : Node3D
 	{
 		_loadStep = LoadPipelineStep.WaitUiBeforeLevelLoad;
 		_loadUiFrameCounter = 0;
+		SetProcess(true);
 		RequestShowLoading(message);
 	}
 
@@ -404,6 +420,7 @@ public partial class AlienScene : Node3D
 		_queuedComposite = comp;
 		_loadStep = LoadPipelineStep.WaitUiBeforeCompositePopulate;
 		_loadUiFrameCounter = 0;
+		SetProcess(true);
 		RequestShowLoading(message);
 	}
 
@@ -448,6 +465,8 @@ public partial class AlienScene : Node3D
 		ResetLevel();
 		_levelName = _queuedLevelName;
 		_content.Load(_queuedLevelPath, _queuedLevelName);
+		LevelViewerShaderBytecode.ClearAsync(_content.Level?.Shaders?.Entries);
+		BuildSubmeshWriteIndexCache();
 
 		if (_content.Loaded && _content.Level.Commands.EntryPoints[0] != null)
 		{
@@ -470,6 +489,7 @@ public partial class AlienScene : Node3D
 
 		_loadStep = LoadPipelineStep.None;
 		ViewerPopulateBridge.NotifySkipped();
+		UpdateLoadPipelineProcessing();
 	}
 
 	private void ExecutePopulateComposite()
@@ -504,6 +524,7 @@ public partial class AlienScene : Node3D
 		OnLoaded?.Invoke();
 		ViewerPopulateBridge.NotifyFinished();
 		Callable.From(HideLoading).CallDeferred();
+		UpdateLoadPipelineProcessing();
 	}
 
 	private static string GetPopulateDisplayLabel(Composite comp)
@@ -554,6 +575,12 @@ public partial class AlienScene : Node3D
 
 		FinishBulkPopulateVisuals();
 		ModelReferenceRenderSettings.FinalizeLevelLoad(_modelReferenceMeshes.Count);
+		ReleaseCathodeBinarySourceData();
+		ViewerLog.Print(
+			"Scene resources: "
+			+ _modelReferenceMeshes.Count + " mesh instances, "
+			+ _modelMeshesByWriteIndex.Count + " unique meshes, "
+			+ (_texturesLevel.Count + _texturesGlobal.Count) + " cached textures.");
 		QueueLargeSceneRenderPolicyApply();
 		Callable.From(RefreshCompositeFocus).CallDeferred();
 	}
@@ -1821,8 +1848,9 @@ public partial class AlienScene : Node3D
 	{
 		ModelReferenceRenderSettings.SetWireframe(enabled);
 		if (!enabled)
-			HideAllWireframeOverlays();
-		ApplyModelReferenceWireframeToMeshes();
+			DestroyAllWireframeOverlays();
+		else
+			ApplyModelReferenceWireframeToMeshes();
 	}
 
 	public void RepositionEntity(ShortGuid composite, ShortGuid entity, Vector3 position, Vector3 rotationDegrees, bool fromPointer, bool pointedPos)
@@ -1953,6 +1981,7 @@ public partial class AlienScene : Node3D
 		_largeScenePolicyMeshes = _modelReferenceMeshes.Keys.ToArray();
 		_largeScenePolicyIndex = 0;
 		_largeScenePolicyRunning = _largeScenePolicyMeshes.Length > 0;
+		SetProcess(true);
 	}
 
 	private void CancelLargeSceneRenderPolicy()
@@ -1986,6 +2015,7 @@ public partial class AlienScene : Node3D
 		{
 			_largeScenePolicyRunning = false;
 			_largeScenePolicyMeshes = System.Array.Empty<MeshInstance3D>();
+			UpdateLoadPipelineProcessing();
 		}
 	}
 
@@ -2010,29 +2040,115 @@ public partial class AlienScene : Node3D
 		return false;
 	}
 
+	private void BuildSubmeshWriteIndexCache()
+	{
+		_submeshWriteIndexByReference.Clear();
+		Models models = _content?.Level?.Models;
+		if (models?.Entries == null)
+			return;
+
+		foreach (Models.CS2 model in models.Entries)
+		{
+			if (model?.Components == null)
+				continue;
+
+			foreach (Models.CS2.Component component in model.Components)
+			{
+				if (component?.LODs == null)
+					continue;
+
+				foreach (Models.CS2.Component.LOD lod in component.LODs)
+				{
+					if (lod?.Submeshes == null)
+						continue;
+
+					foreach (Models.CS2.Component.LOD.Submesh submesh in lod.Submeshes)
+					{
+						if (submesh == null)
+							continue;
+
+						int writeIndex = models.GetWriteIndex(submesh);
+						if (writeIndex >= 0)
+							_submeshWriteIndexByReference[submesh] = writeIndex;
+					}
+				}
+			}
+		}
+	}
+
+	private bool TryResolveSubmeshWriteIndex(Models.CS2.Component.LOD.Submesh submesh, out int writeIndex)
+	{
+		writeIndex = -1;
+		if (submesh == null)
+			return false;
+
+		if (_submeshWriteIndexByReference.TryGetValue(submesh, out writeIndex))
+			return writeIndex >= 0;
+
+		Models models = _content?.Level?.Models;
+		if (models == null)
+			return false;
+
+		writeIndex = models.GetWriteIndex(submesh);
+		if (writeIndex >= 0)
+			_submeshWriteIndexByReference[submesh] = writeIndex;
+
+		return writeIndex >= 0;
+	}
+
 	private MeshHolder GetModel(Models.CS2.Component.LOD.Submesh submesh)
 	{
 		if (submesh == null)
 			return null;
 
-		if (!_modelMeshes.ContainsKey(submesh))
+		if (TryResolveSubmeshWriteIndex(submesh, out int writeIndex)
+			&& _modelMeshesByWriteIndex.TryGetValue(writeIndex, out MeshHolder cached))
 		{
-			Models.CS2.Component.LOD lod = _content.Level.Models.FindModelLOD(submesh);
-			Models.CS2 mesh = _content.Level.Models.FindModel(submesh);
-			string modelName = ((mesh == null) ? "?" : mesh.Name) + ": " + ((lod == null) ? "?" : lod.Name);
-			ArrayMesh arrayMesh = submesh.ToArrayMesh();
-			arrayMesh.ResourceName = modelName;
-
-			submesh.Data = null;
-
-			MeshHolder holder = new MeshHolder
-			{
-				MainMesh = arrayMesh,
-				DefaultMaterial = submesh.Material,
-			};
-			_modelMeshes.Add(submesh, holder);
+			return cached;
 		}
-		return _modelMeshes[submesh];
+
+		Models models = _content?.Level?.Models;
+		Models.CS2.Component.LOD.Submesh sourceSubmesh = submesh;
+		if (writeIndex >= 0 && models != null)
+		{
+			Models.CS2.Component.LOD.Submesh canonical = models.GetAtWriteIndex(writeIndex);
+			if (canonical != null)
+				sourceSubmesh = canonical;
+		}
+
+		if (sourceSubmesh.Data == null || sourceSubmesh.Data.Length == 0)
+		{
+			if (writeIndex >= 0 && _modelMeshesByWriteIndex.TryGetValue(writeIndex, out cached))
+				return cached;
+
+			ViewerLog.PrintErr("Submesh mesh data is not available and no Godot cache exists.");
+			return null;
+		}
+
+		Models.CS2.Component.LOD lod = models.FindModelLOD(sourceSubmesh);
+		Models.CS2 mesh = models.FindModel(sourceSubmesh);
+		string modelName = ((mesh == null) ? "?" : mesh.Name) + ": " + ((lod == null) ? "?" : lod.Name);
+		ArrayMesh arrayMesh = sourceSubmesh.ToArrayMesh();
+		if (arrayMesh == null || arrayMesh.GetSurfaceCount() == 0)
+		{
+			arrayMesh?.Dispose();
+			return null;
+		}
+
+		arrayMesh.ResourceName = modelName;
+		arrayMesh.ResourceLocalToScene = false;
+		sourceSubmesh.Data = null;
+
+		MeshHolder holder = new MeshHolder
+		{
+			MainMesh = arrayMesh,
+			DefaultMaterial = sourceSubmesh.Material,
+		};
+
+		if (writeIndex >= 0)
+			_modelMeshesByWriteIndex[writeIndex] = holder;
+
+		return holder;
 	}
 
 	private bool IsMaterialSupported(Materials.Material material)
@@ -2152,17 +2268,24 @@ public partial class AlienScene : Node3D
 		return overlay;
 	}
 
-	private void HideAllWireframeOverlays()
+	private void DestroyAllWireframeOverlays()
 	{
 		SceneTree tree = GetTree();
-		if (tree == null)
-			return;
-
-		foreach (Node node in tree.GetNodesInGroup("model_reference_wireframe_overlay"))
+		if (tree != null)
 		{
-			if (node is MeshInstance3D meshInstance && GodotObject.IsInstanceValid(meshInstance))
-				meshInstance.Visible = false;
+			foreach (Node node in tree.GetNodesInGroup("model_reference_wireframe_overlay"))
+			{
+				if (node is Node3D node3D && GodotObject.IsInstanceValid(node3D))
+					node3D.QueueFree();
+			}
 		}
+
+		foreach (KeyValuePair<Materials.Material, ShaderMaterial> entry in _wireframeMaterials)
+		{
+			if (entry.Value != null && GodotObject.IsInstanceValid(entry.Value))
+				entry.Value.Dispose();
+		}
+		_wireframeMaterials.Clear();
 	}
 
 	private void ApplyModelReferenceWireframeToMeshes()
@@ -2206,17 +2329,18 @@ public partial class AlienScene : Node3D
 		if (ptr == null || ptr.Location == TexturePtr.Source.NONE || ptr.Texture == null)
 			return null;
 
-		if (!((ptr.Location == TexturePtr.Source.GLOBAL && !_texturesGlobal.ContainsKey(ptr.Texture)) ||
-			  (ptr.Location == TexturePtr.Source.LEVEL && !_texturesLevel.ContainsKey(ptr.Texture))))
-		{
-			if (ptr.Location == TexturePtr.Source.GLOBAL)
-				return _texturesGlobal[ptr.Texture];
-			return _texturesLevel[ptr.Texture];
-		}
+		Dictionary<Textures.TEX4, TexOrCube> cache = ptr.Location == TexturePtr.Source.GLOBAL
+			? _texturesGlobal
+			: _texturesLevel;
 
-		if (ptr.Texture == null) return null;
-		Textures.TEX4.Texture texPart = AlienSceneTextures.GetTextureDataPart(ptr.Texture);
-		if (texPart == null)
+		if (cache.TryGetValue(ptr.Texture, out TexOrCube cached))
+			return cached;
+
+		Textures.TEX4.Texture texPart = ptr.Texture.TextureStreamed == null
+			? ptr.Texture.TexturePersistent
+			: ptr.Texture.TextureStreamed;
+
+		if (texPart == null || texPart.Content == null || texPart.Content.Length == 0)
 			return null;
 
 		TexOrCube tex = new TexOrCube();
@@ -2240,24 +2364,81 @@ public partial class AlienScene : Node3D
 				ptr.Texture.Format,
 				ptr.Texture.Name);
 			if (image != null && !image.IsEmpty())
+			{
 				tex.Texture = ImageTexture.CreateFromImage(image);
+				if (tex.Texture != null)
+				{
+					tex.Texture.ResourceLocalToScene = false;
+					AlienSceneTextures.RegisterTransparency(
+						tex.Texture,
+						AlienSceneTextures.DetectTransparencyFromContent(
+							texPart.Content,
+							(int)texPart.Width,
+							(int)texPart.Height,
+							ptr.Texture.Format));
+				}
+			}
 		}
 		else
 		{
 			tex.Texture = AlienSceneTextures.CreateTextureFromTexPart(texPart, ptr.Texture.Format, ptr.Texture.Name);
 		}
 
+		if (tex.Texture == null)
+			return null;
+
 		if (ptr.Texture.TextureStreamed != null)
 			ptr.Texture.TextureStreamed.Content = null;
 		if (ptr.Texture.TexturePersistent != null)
 			ptr.Texture.TexturePersistent.Content = null;
 
-		if (ptr.Location == TexturePtr.Source.GLOBAL)
-			_texturesGlobal.Add(ptr.Texture, tex);
-		else
-			_texturesLevel.Add(ptr.Texture, tex);
-
+		cache.Add(ptr.Texture, tex);
 		return tex;
+	}
+
+	private void ReleaseCathodeBinarySourceData()
+	{
+		Models models = _content?.Level?.Models;
+		if (models?.Entries != null)
+		{
+			foreach (Models.CS2 model in models.Entries)
+			{
+				if (model?.Components == null)
+					continue;
+
+				foreach (Models.CS2.Component component in model.Components)
+				{
+					if (component?.LODs == null)
+						continue;
+
+					foreach (Models.CS2.Component.LOD lod in component.LODs)
+					{
+						if (lod?.Submeshes == null)
+							continue;
+
+						foreach (Models.CS2.Component.LOD.Submesh submesh in lod.Submeshes)
+							submesh.Data = null;
+					}
+				}
+			}
+		}
+
+		ReleaseTextureSourceContent(_content?.Level?.Textures);
+		ReleaseTextureSourceContent(LevelContent.Global?.Textures);
+	}
+
+	private static void ReleaseTextureSourceContent(Textures textures)
+	{
+		if (textures?.Entries == null)
+			return;
+
+		foreach (Textures.TEX4 entry in textures.Entries)
+		{
+			if (entry?.TextureStreamed != null)
+				entry.TextureStreamed.Content = null;
+			if (entry?.TexturePersistent != null)
+				entry.TexturePersistent.Content = null;
+		}
 	}
 
 }
@@ -2277,16 +2458,6 @@ public class LevelContent
 		if (Global == null)
 			Global = new Global(aiPath + "\\DATA\\ENV\\GLOBAL", new PAK2(aiPath + "\\DATA\\GLOBAL\\ANIMATION.PAK"));
 		Level = new Level(aiPath + "\\DATA\\ENV\\" + levelName, Global);
-
-		foreach (Shaders.Shader shader in Level.Shaders.Entries)
-		{
-			shader.VertexShader = null;
-			shader.PixelShader = null;
-			shader.HullShader = null;
-			shader.DomainShader = null;
-			shader.GeometryShader = null;
-			shader.ComputeShader = null;
-		}
 	}
 
 	public void Reset()

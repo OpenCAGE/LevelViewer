@@ -97,10 +97,8 @@ public partial class LevelViewerCamera : Camera3D
 
         if (EmbeddedInOpenCage)
         {
-            ProcessMode = ProcessModeEnum.Always;
-            Window window = GetViewport()?.GetWindow();
-            if (window != null)
-                window.ProcessMode = ProcessModeEnum.Always;
+            // Embedded in OpenCAGE: inherit process mode so low_processor_mode can idle.
+            // Input wake is handled via _UnhandledInput below and Win32 polling when not suspended.
         }
     }
 
@@ -123,6 +121,9 @@ public partial class LevelViewerCamera : Camera3D
 
     public override void _UnhandledInput(InputEvent @event)
     {
+        if (!IsProcessing())
+            SetProcess(true);
+
         LevelViewerRenderIdleThrottle.NotifyUserActivity();
 
         if (@event is InputEventMouseButton or InputEventKey)
@@ -237,6 +238,13 @@ public partial class LevelViewerCamera : Camera3D
 
     public override void _Process(double delta)
     {
+        LevelViewerRenderIdleThrottle.Update();
+        if (LevelViewerRenderIdleThrottle.IsSuspended)
+        {
+            Callable.From(() => SetProcess(false)).CallDeferred();
+            return;
+        }
+
         float deltaSeconds = (float)delta;
         Vector3 positionBefore = GlobalPosition;
 
@@ -244,12 +252,14 @@ public partial class LevelViewerCamera : Camera3D
             ProcessEmbeddedMouseDrag(deltaSeconds);
 
         ApplyKeyboardMovement(deltaSeconds);
-        LevelViewerRenderIdleThrottle.Update(delta);
+
         if (ShouldShowCameraPosition())
             UpdatePositionHud(positionBefore);
         else
             HidePositionHud();
-        UpdateHudFade(deltaSeconds);
+
+        if (_speedHudTimer > 0f || _positionHudTimer > 0f)
+            UpdateHudFade(deltaSeconds);
     }
 
     /// <summary>Sync internal yaw/pitch after external framing (LookAt, etc.).</summary>

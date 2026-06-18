@@ -84,6 +84,7 @@ public partial class LevelViewerTransformGizmo : Node3D
     {
         TopLevel = true;   // position ourselves in world space, not relative to parent
         Visible  = false;
+        SetProcess(false);
     }
 
     public void SetMode(GizmoMode mode)
@@ -729,6 +730,7 @@ public partial class LevelViewerTransformGizmo : Node3D
     {
         Visible = _mode != GizmoMode.None
                && _target != null && GodotObject.IsInstanceValid(_target);
+        SetProcess(Visible);
     }
 
     /// <summary>Orient a CylinderMesh node so its +Y axis points along <paramref name="dir"/>.</summary>

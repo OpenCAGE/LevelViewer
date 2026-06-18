@@ -89,10 +89,18 @@ public partial class ModelReferencePreview : FunctionEntityPreview
 
     private List<Tuple<int, int>> GetRenderableIndexes()
     {
-        if (_scene.Content.RemappedResources.TryGetValue(Entity, out List<Tuple<int, int>> remapped))
+        return GetRenderableIndexes(_scene.Content, Entity);
+    }
+
+    public static List<Tuple<int, int>> GetRenderableIndexes(LevelContent content, Entity entity)
+    {
+        if (content?.Level == null || entity == null)
+            return new List<Tuple<int, int>>();
+
+        if (content.RemappedResources.TryGetValue(entity, out List<Tuple<int, int>> remapped))
             return remapped;
 
-        Parameter resourceParam = Entity.GetParameter(ResourceParameter);
+        Parameter resourceParam = entity.GetParameter(ResourceParameter);
         if (resourceParam?.content == null || resourceParam.content.dataType != DataType.RESOURCE)
             return new List<Tuple<int, int>>();
 
@@ -102,7 +110,7 @@ public partial class ModelReferencePreview : FunctionEntityPreview
             return new List<Tuple<int, int>>();
 
         List<Tuple<int, int>> indexes = new List<Tuple<int, int>>();
-        Level level = _scene.Content.Level;
+        Level level = content.Level;
         for (int i = 0; i < renderable.RenderableInstance.Count; i++)
         {
             int modelIndex = level.Models.GetWriteIndex(renderable.RenderableInstance[i].Model);
@@ -111,6 +119,7 @@ public partial class ModelReferencePreview : FunctionEntityPreview
                 continue;
             indexes.Add(new Tuple<int, int>(modelIndex, materialIndex));
         }
+
         return indexes;
     }
 }

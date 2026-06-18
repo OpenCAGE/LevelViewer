@@ -91,6 +91,9 @@ public partial class AlienScene : Node3D
 	private const int LoadUiRedrawFrameCount = 2;
 
 	private bool _isBulkPopulating;
+	private bool _deferMeshTreeActivation;
+	private bool _wiringCompositeLinks;
+	private readonly List<Node3D> _deferredPickOwners = new List<Node3D>();
 
 	private LoadPipelineStep _loadStep = LoadPipelineStep.None;
 	private int _loadUiFrameCounter;
@@ -385,7 +388,10 @@ public partial class AlienScene : Node3D
 		if (comp == null)
 			return;
 		if (_loadedComposite != null && _loadedComposite.shortGUID == guid)
+		{
+			ViewerPopulateBridge.NotifySkipped();
 			return;
+		}
 		if (_loadStep != LoadPipelineStep.None)
 			return;
 
@@ -470,6 +476,7 @@ public partial class AlienScene : Node3D
 		}
 
 		_loadStep = LoadPipelineStep.None;
+		ViewerPopulateBridge.NotifySkipped();
 	}
 
 	private void ExecutePopulateComposite()
@@ -484,25 +491,44 @@ public partial class AlienScene : Node3D
 		_queuedComposite = null;
 		_queuedCompositeGuid = ShortGuid.Invalid;
 
+		ViewerPopulateBridge.NotifyStarted(GetPopulateDisplayLabel(comp));
+
 		try
 		{
 			_isBulkPopulating = true;
+			_deferMeshTreeActivation = true;
+			FunctionEntityPreview.DeferVisualRefresh = true;
 			PopulateCompositeInternal(comp);
 		}
 		finally
 		{
+			FunctionEntityPreview.DeferVisualRefresh = false;
+			_deferMeshTreeActivation = false;
 			_isBulkPopulating = false;
 		}
 
 		_loadStep = LoadPipelineStep.None;
 		OnLoaded?.Invoke();
+		ViewerPopulateBridge.NotifyFinished();
 		Callable.From(HideLoading).CallDeferred();
+	}
+
+	private static string GetPopulateDisplayLabel(Composite comp)
+	{
+		if (comp == null)
+			return "composite";
+
+		if (!string.IsNullOrWhiteSpace(comp.name))
+			return comp.name;
+
+		return comp.shortGUID.ToString();
 	}
 
 	private void PopulateCompositeInternal(Composite comp)
 	{
 		_compositeNodes.Clear();
 		_nodeEntities.Clear();
+		_deferredPickOwners.Clear();
 		ClearEntityNodeCache();
 		PreviewVisualUtility.CleanupAllFunctionEntityPreviews(this);
 		ClearSelectedEntity();
@@ -523,11 +549,69 @@ public partial class AlienScene : Node3D
 		_loadedComposite = comp;
 		AddCompositeInstance(comp, _parentNode, null);
 
-		InvalidateFunctionEntityPreviewCache();
-		RefreshRenderFilters();
-		RefreshCompositeFocus();
+		_wiringCompositeLinks = true;
+		try
+		{
+			WireCompositeAliasProxies(comp, _parentNode);
+		}
+		finally
+		{
+			_wiringCompositeLinks = false;
+		}
+
+		FinishBulkPopulateVisuals();
 		ModelReferenceRenderSettings.FinalizeLevelLoad(_modelReferenceMeshes.Count);
 		QueueLargeSceneRenderPolicyApply();
+		Callable.From(RefreshCompositeFocus).CallDeferred();
+	}
+
+	private void FinishBulkPopulateVisuals()
+	{
+		InvalidateFunctionEntityPreviewCache();
+		EnsureFunctionEntityPreviewCache();
+
+		for (int i = 0; i < _cachedFunctionEntityPreviews.Length; i++)
+		{
+			FunctionEntityPreview preview = _cachedFunctionEntityPreviews[i];
+			if (preview == null)
+			{
+				_functionEntityPreviewsCacheDirty = true;
+				continue;
+			}
+
+			preview.Refresh();
+			preview.RegisterPickablesWithOwner();
+		}
+
+		FinalizeBulkPickRegistration();
+		ActivateDeferredMeshes();
+		RefreshSelectedLightRadiusVisual();
+	}
+
+	private void FinalizeBulkPickRegistration()
+	{
+		for (int i = 0; i < _deferredPickOwners.Count; i++)
+		{
+			Node3D owner = _deferredPickOwners[i];
+			if (owner != null && GodotObject.IsInstanceValid(owner))
+				LevelViewerPick.RegisterPickableSubtree(owner);
+		}
+
+		_deferredPickOwners.Clear();
+	}
+
+	private void ActivateDeferredMeshes()
+	{
+		foreach (MeshInstance3D mesh in _modelReferenceMeshes.Keys)
+		{
+			if (mesh == null || !GodotObject.IsInstanceValid(mesh))
+				continue;
+
+			mesh.Visible = true;
+			MeshInstance3D overlay = FindWireframeOverlay(mesh);
+			if (overlay != null)
+				overlay.Visible = ModelReferenceRenderSettings.WireframeEnabled;
+		}
 	}
 
 	/// <summary>Moves level root so the initial focus point sits near the origin for stable rendering.</summary>
@@ -716,10 +800,86 @@ public partial class AlienScene : Node3D
 			AddEntity(composite, entity, compositeNode);
 		foreach (Entity entity in composite.variables)
 			AddEntity(composite, entity, compositeNode);
+
+		if (!_isBulkPopulating)
+		{
+			foreach (Entity entity in composite.aliases)
+				AddEntity(composite, entity, compositeNode);
+			foreach (Entity entity in composite.proxies)
+				AddEntity(composite, entity, compositeNode);
+		}
+	}
+
+	/// <summary>Wires aliases/proxies after the full composite instance tree exists.</summary>
+	private void WireCompositeAliasProxies(Composite composite, Node3D instanceRoot)
+	{
+		if (composite == null || instanceRoot == null)
+			return;
+
 		foreach (Entity entity in composite.aliases)
-			AddEntity(composite, entity, compositeNode);
+			AddEntity(composite, entity, instanceRoot);
 		foreach (Entity entity in composite.proxies)
-			AddEntity(composite, entity, compositeNode);
+			AddEntity(composite, entity, instanceRoot);
+
+		foreach (Entity entity in composite.functions)
+		{
+			if (entity is not FunctionEntity function || function.function.IsFunctionType)
+				continue;
+
+			Composite nestedComposite = _content.Level.Commands.GetComposite(function.function);
+			if (nestedComposite == null)
+				continue;
+
+			Node3D nestedRoot = instanceRoot.GetNodeOrNull<Node3D>(entity.shortGUID.AsUInt32.ToString());
+			if (nestedRoot != null)
+				WireCompositeAliasProxies(nestedComposite, nestedRoot);
+		}
+	}
+
+	private void ApplyAliasOrProxyOverrides(Composite composite, Entity entity, Node3D entityNode)
+	{
+		switch (entity.variant)
+		{
+			case EntityVariant.ALIAS:
+			{
+				AliasEntity alias = (AliasEntity)entity;
+				EntityOverride aliasOverride = (EntityOverride)entityNode;
+				if (TryResolveAliasPointedSceneNode(aliasOverride, alias, composite, out Node3D aliasedNode)
+					&& alias.GetParameter("position") != null)
+				{
+					EntityNodeUtil.SetPointed(aliasedNode, true);
+					aliasedNode.Position = entityNode.Position;
+					aliasedNode.RotationDegrees = entityNode.RotationDegrees;
+					if (!_isBulkPopulating)
+					{
+						LevelViewerAliasHighlight.InvalidateCache();
+						LevelViewerProxyHighlight.InvalidateCache();
+					}
+				}
+
+				break;
+			}
+			case EntityVariant.PROXY:
+			{
+				ProxyEntity proxy = (ProxyEntity)entity;
+				Node3D proxiedNode = GetEntityNode(EntityPathToGUIDList(proxy.proxy), ParentNode);
+				if (proxiedNode != null)
+				{
+					((EntityOverride)entityNode).PointedEntity = proxiedNode;
+					if (proxy.GetParameter("position") != null)
+					{
+						EntityNodeUtil.SetPointed(proxiedNode, true);
+						proxiedNode.Position = entityNode.Position;
+						proxiedNode.RotationDegrees = entityNode.RotationDegrees;
+					}
+
+					if (!_isBulkPopulating)
+						LevelViewerProxyHighlight.InvalidateCache();
+				}
+
+				break;
+			}
+		}
 	}
 
 	public void RemoveComposite(ShortGuid composite)
@@ -758,6 +918,12 @@ public partial class AlienScene : Node3D
 
 	private void AddEntity(Composite composite, Entity entity, Node3D parentNode)
 	{
+		if (_isBulkPopulating && !_wiringCompositeLinks
+			&& (entity.variant == EntityVariant.ALIAS || entity.variant == EntityVariant.PROXY))
+		{
+			return;
+		}
+
 		GetEntityTransform(entity, out Vector3 position, out Vector3 rotation);
 
 		Node3D entityNode;
@@ -782,44 +948,9 @@ public partial class AlienScene : Node3D
 		switch (entity.variant)
 		{
 			case EntityVariant.ALIAS:
-			{
-				AliasEntity alias = (AliasEntity)entity;
-				EntityOverride aliasOverride = (EntityOverride)entityNode;
-				if (TryResolveAliasPointedSceneNode(aliasOverride, alias, composite, out Node3D aliasedNode)
-					&& alias.GetParameter("position") != null)
-				{
-					EntityNodeUtil.SetPointed(aliasedNode, true);
-					aliasedNode.Position = position;
-					aliasedNode.RotationDegrees = rotation;
-					if (!_isBulkPopulating)
-					{
-						LevelViewerAliasHighlight.InvalidateCache();
-						LevelViewerProxyHighlight.InvalidateCache();
-					}
-				}
-
-				break;
-			}
 			case EntityVariant.PROXY:
-			{
-				ProxyEntity proxy = (ProxyEntity)entity;
-				Node3D proxiedNode = GetEntityNode(EntityPathToGUIDList(proxy.proxy), ParentNode);
-				if (proxiedNode != null)
-				{
-					((EntityOverride)entityNode).PointedEntity = proxiedNode;
-					if (proxy.GetParameter("position") != null)
-					{
-						EntityNodeUtil.SetPointed(proxiedNode, true);
-						proxiedNode.Position = position;
-						proxiedNode.RotationDegrees = rotation;
-					}
-
-					if (!_isBulkPopulating)
-						LevelViewerProxyHighlight.InvalidateCache();
-				}
-
+				ApplyAliasOrProxyOverrides(composite, entity, entityNode);
 				break;
-			}
 			case EntityVariant.FUNCTION:
 			{
 				FunctionEntity function = (FunctionEntity)entity;
@@ -834,7 +965,11 @@ public partial class AlienScene : Node3D
 				{
 					if (FunctionEntityPreviewSetup.TryAddPreview(this, function, entityNode, _content.Level.Commands.Utils, composite.shortGUID))
 						_functionEntityPreviewsCacheDirty = true;
-					LevelViewerPick.RegisterPickableSubtree(entityNode);
+
+					if (_isBulkPopulating)
+						_deferredPickOwners.Add(entityNode);
+					else
+						LevelViewerPick.RegisterPickableSubtree(entityNode);
 				}
 
 				break;
@@ -1868,6 +2003,13 @@ public partial class AlienScene : Node3D
 		if (ModelReferenceRenderSettings.WireframeEnabled)
 			UpdateWireframeOverlay(meshInstance, material);
 		LevelViewerPick.RegisterPickableMesh(meshInstance, parent);
+		if (_deferMeshTreeActivation)
+		{
+			meshInstance.Visible = false;
+			MeshInstance3D overlay = FindWireframeOverlay(meshInstance);
+			if (overlay != null)
+				overlay.Visible = false;
+		}
 	}
 
 	private void QueueLargeSceneRenderPolicyApply()

@@ -6,6 +6,9 @@ using Godot;
 /// </summary>
 public abstract partial class FunctionEntityPreview : Node3D
 {
+    /// <summary>While true, <see cref="Setup"/> skips <see cref="Refresh"/> until bulk population finishes.</summary>
+    internal static bool DeferVisualRefresh { get; set; }
+
     public FunctionEntity Entity { get; private set; }
     public uint OwnerCompositeId { get; private set; }
 
@@ -13,8 +16,11 @@ public abstract partial class FunctionEntityPreview : Node3D
     {
         Entity = entity;
         OwnerCompositeId = ownerCompositeId;
-        Refresh();
-        RegisterPickablesWithOwner();
+        if (!DeferVisualRefresh)
+        {
+            Refresh();
+            RegisterPickablesWithOwner();
+        }
     }
 
     public abstract void Refresh();

@@ -23,6 +23,8 @@ namespace OpenCAGE.UnityConnection
         RENDER_FILTERS_CHANGED,
         SETTINGS_CHANGED,
         VIEWER_LOG,
+        VIEWER_POPULATE_STARTED,
+        VIEWER_POPULATE_FINISHED,
         GENERIC_DATA_SYNC,
     }
 
@@ -40,6 +42,9 @@ namespace OpenCAGE.UnityConnection
         //Setup metadata
         public string level_name = "";
         public string system_folder = "";
+
+        // Matched on VIEWER_POPULATE_* packets to ignore reordered websocket messages.
+        public uint populate_token = 0;
 
         //Selection metadata
         public List<uint> path_entities = new List<uint>();

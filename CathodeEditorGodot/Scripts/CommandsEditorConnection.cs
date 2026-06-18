@@ -102,7 +102,6 @@ public partial class CommandsEditorConnection : Node3D
     private int _renderFiltersGeneration = 0;
     private HashSet<uint> _renderFiltersChangedFunctionTypes = null;
 
-    private LevelViewerConnectionHud _connectionHud;
     /// <summary>Composite path depth last seen from OpenCAGE packets (detect editor navigating back).</summary>
     private int _syncedCompositePathDepth;
 
@@ -133,9 +132,9 @@ public partial class CommandsEditorConnection : Node3D
         _scene = GetNode<AlienScene>("../AlienScene");
         _connectionCts = new CancellationTokenSource();
         ViewerLogBridge.RegisterConnection(this);
+        ViewerPopulateBridge.RegisterConnection(this);
         if (_scene != null)
             _scene.OnSelectionChanged += OnSceneSelectionChanged;
-        Callable.From(EnsureConnectionHud).CallDeferred();
         Callable.From(EnsureTransformGizmo).CallDeferred();
         _ = ReconnectLoopAsync(_connectionCts.Token);
     }
@@ -188,13 +187,10 @@ public partial class CommandsEditorConnection : Node3D
     public override void _ExitTree()
     {
         ViewerLogBridge.ClearConnection();
+        ViewerPopulateBridge.ClearConnection();
         _connectionCts?.Cancel();
         _connectionCts?.Dispose();
         _connectionCts = null;
-
-        if (_connectionHud != null && GodotObject.IsInstanceValid(_connectionHud))
-            _connectionHud.QueueFree();
-        _connectionHud = null;
 
         if (_scene != null)
             _scene.OnSelectionChanged -= OnSceneSelectionChanged;
@@ -213,7 +209,6 @@ public partial class CommandsEditorConnection : Node3D
     public override void _Process(double delta)
     {
         FlushPendingParameterSyncs();
-        _connectionHud?.UpdateFade((float)delta);
     }
 
     public override void _PhysicsProcess(double delta)
@@ -241,15 +236,6 @@ public partial class CommandsEditorConnection : Node3D
 
             if (!ShouldSkipLevelReload(level, pathToAi))
                 Callable.From(() => _scene.QueueLoadLevel(level, pathToAi)).CallDeferred();
-        }
-
-        if (_compositeLoaded && _scene.Content.Loaded && _pathComposites != null && _pathComposites.Count > 0)
-        {
-            uint levelRootCompositeId = _scene.Content.Level.Commands.EntryPoints[0].shortGUID.AsUInt32;
-            if (levelRootCompositeId != 0 && _scene.CompositeID != levelRootCompositeId)
-            {
-                Callable.From(() => _scene.QueuePopulateComposite(new ShortGuid(levelRootCompositeId))).CallDeferred();
-            }
         }
 
         if (_addedEntity != null)
@@ -625,6 +611,16 @@ public partial class CommandsEditorConnection : Node3D
                 }).CallDeferred();
                 break;
             }
+            case PacketEvent.COMPOSITE_SELECTED:
+            case PacketEvent.COMPOSITE_RELOADED:
+            {
+                uint compositeId = packet.composite;
+                if (compositeId == 0)
+                    break;
+
+                Callable.From(() => _scene?.QueuePopulateComposite(new ShortGuid(compositeId))).CallDeferred();
+                break;
+            }
         }
     }
 
@@ -915,35 +911,6 @@ public partial class CommandsEditorConnection : Node3D
         _renderFiltersGeneration++;
     }
 
-    private void EnsureConnectionHud()
-    {
-        if (_connectionHud != null && GodotObject.IsInstanceValid(_connectionHud))
-            return;
-
-        Node host = GetTree().CurrentScene ?? this;
-        if (host == null || !GodotObject.IsInstanceValid(host))
-            return;
-
-        _connectionHud = new LevelViewerConnectionHud();
-        _connectionHud.AttachTo(host);
-        _connectionHud.ShowWaiting();
-    }
-
-    private void NotifyConnectionWaiting()
-    {
-        Callable.From(() => _connectionHud?.ShowWaiting()).CallDeferred();
-    }
-
-    private void NotifyConnectionConnected()
-    {
-        Callable.From(() => _connectionHud?.ShowConnected()).CallDeferred();
-    }
-
-    private void NotifyConnectionDisconnected()
-    {
-        Callable.From(() => _connectionHud?.ShowDisconnected()).CallDeferred();
-    }
-
     private async Task ReconnectLoopAsync(CancellationToken cancellationToken)
     {
         await Task.Yield();
@@ -962,7 +929,6 @@ public partial class CommandsEditorConnection : Node3D
                     cancellationToken);
                 ViewerLog.Print("Connected to Commands Editor!");
                 ViewerLogBridge.NotifyConnected();
-                NotifyConnectionConnected();
 
                 await ReceiveLoopAsync(_client, cancellationToken);
             }
@@ -979,7 +945,6 @@ public partial class CommandsEditorConnection : Node3D
                 break;
 
             ViewerLog.Print("Disconnected from Commands Editor!");
-            NotifyConnectionDisconnected();
 
             try
             {
@@ -989,8 +954,6 @@ public partial class CommandsEditorConnection : Node3D
             {
                 break;
             }
-
-            NotifyConnectionWaiting();
         }
     }
 
@@ -1026,6 +989,35 @@ public partial class CommandsEditorConnection : Node3D
             log_message = message,
             log_is_error = isError,
         });
+    }
+
+    public void NotifyViewerPopulateStarted(string levelName, uint populateToken)
+    {
+        SendMessageBlocking(new Packet(PacketEvent.VIEWER_POPULATE_STARTED)
+        {
+            level_name = levelName ?? string.Empty,
+            populate_token = populateToken,
+        });
+    }
+
+    public void NotifyViewerPopulateFinished(uint populateToken)
+    {
+        SendMessageBlocking(new Packet(PacketEvent.VIEWER_POPULATE_FINISHED)
+        {
+            populate_token = populateToken,
+        });
+    }
+
+    private void SendMessageBlocking(Packet content)
+    {
+        try
+        {
+            SendMessageAsync(content).GetAwaiter().GetResult();
+        }
+        catch (Exception ex)
+        {
+            ViewerLog.PrintErr("Failed to send websocket message: " + ex.Message);
+        }
     }
 
     public async void SendMessage(Packet content)

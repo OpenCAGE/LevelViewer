@@ -856,6 +856,9 @@ public partial class CommandsEditorConnection : Node3D
         LevelViewerTransformSnap.GridSize = packet.transform_grid_snap > 0f ? packet.transform_grid_snap : 0f;
         LevelViewerTransformSnap.RotationDegrees = packet.rotation_snap_degrees > 0f ? packet.rotation_snap_degrees : 0f;
 
+        ApplyDeepSelectModeFromPacket(packet.deep_select_mode);
+        ApplyGizmoModeFromPacket(packet.gizmo_mode);
+
         if (packet.model_reference_wireframe != ModelReferenceRenderSettings.WireframeEnabled)
             _scene.SetModelReferenceWireframe(packet.model_reference_wireframe);
 
@@ -863,6 +866,41 @@ public partial class CommandsEditorConnection : Node3D
             _scene.RefreshEntityHighlights();
 
         return hideNestedChanged;
+    }
+
+    private void ApplyDeepSelectModeFromPacket(int mode)
+    {
+        PreviewVisibilitySettings.DeepSelectModeKind next = mode switch
+        {
+            1 => PreviewVisibilitySettings.DeepSelectModeKind.DeepSelect,
+            2 => PreviewVisibilitySettings.DeepSelectModeKind.AdvancedDeepSelect,
+            _ => PreviewVisibilitySettings.DeepSelectModeKind.None,
+        };
+
+        if (PreviewVisibilitySettings.DeepSelectMode == next)
+            return;
+
+        ResetProgressiveDeepSelectPickState();
+        PreviewVisibilitySettings.DeepSelectMode = next;
+    }
+
+    private void ApplyGizmoModeFromPacket(int mode)
+    {
+        LevelViewerTransformGizmo.GizmoMode next = mode switch
+        {
+            1 => LevelViewerTransformGizmo.GizmoMode.TranslateWorld,
+            2 => LevelViewerTransformGizmo.GizmoMode.RotateLocal,
+            3 => LevelViewerTransformGizmo.GizmoMode.RotateWorld,
+            4 => LevelViewerTransformGizmo.GizmoMode.TranslateLocal,
+            _ => LevelViewerTransformGizmo.GizmoMode.None,
+        };
+
+        EnsureTransformGizmo();
+        if (_transformGizmo == null || _transformGizmo.Mode == next)
+            return;
+
+        _transformGizmo.SetMode(next);
+        SyncTransformGizmoToSelection();
     }
 
     private bool ApplyActiveComposite(Packet packet)
@@ -1035,6 +1073,19 @@ public partial class CommandsEditorConnection : Node3D
     public async void SendMessage(Packet content)
     {
         await SendMessageAsync(content);
+    }
+
+    public void SendViewportModeToEditor()
+    {
+        int gizmoMode = _transformGizmo != null
+            ? (int)_transformGizmo.Mode
+            : (int)LevelViewerTransformGizmo.GizmoMode.None;
+
+        SendMessage(new Packet(PacketEvent.VIEWPORT_MODE_CHANGED)
+        {
+            deep_select_mode = (int)PreviewVisibilitySettings.DeepSelectMode,
+            gizmo_mode = gizmoMode,
+        });
     }
 
     private async Task SendMessageAsync(Packet content)

@@ -3,7 +3,7 @@ using System;
 using System.Runtime.InteropServices;
 
 /// <summary>
-/// Free camera: WASD/QE move; RMB look; MMB pan; LMB select entity; Ctrl+MMB step into composite instance; - step back hierarchy; 0 toggles deep select; H hide selected; Shift+H unhide all; scroll adjusts speed; Z frames selection.
+/// Free camera: WASD/QE move; RMB look; MMB pan; LMB select entity; Ctrl+MMB step into composite instance; - step back hierarchy; 0/8/9 set regular/deep/advanced deep select; 1-4 transform/rotate world/local, 5 none; H hide selected; Shift+H unhide all; scroll adjusts speed; Z frames selection.
 /// MoveSpeed is world units per second (framerate-independent via delta).
 /// </summary>
 public partial class LevelViewerCamera : Camera3D
@@ -66,9 +66,6 @@ public partial class LevelViewerCamera : Camera3D
     private bool _embeddedMouseCaptured;
     private bool _embeddedCursorHiddenForLook;
 
-    private LevelViewerSelectionHud _gizmoModeHud;
-    private LevelViewerSelectionHud _deepSelectHud;
-
     private CanvasLayer _hudLayer;
     private PanelContainer _speedPanel;
     private PanelContainer _positionPanel;
@@ -92,7 +89,6 @@ public partial class LevelViewerCamera : Camera3D
 
         SyncAnglesFromTransform();
         Callable.From(SetupHud).CallDeferred();
-        Callable.From(SetupGizmoModeHud).CallDeferred();
 
         _alienScene = GetNodeOrNull<AlienScene>(AlienScenePath);
         _commandsEditorConnection = GetNodeOrNull<CommandsEditorConnection>(CommandsEditorConnectionPath);
@@ -148,12 +144,12 @@ public partial class LevelViewerCamera : Camera3D
                 }
                 else if (keyEvent.Keycode == Key.Key1)
                 {
-                    SetGizmoMode(LevelViewerTransformGizmo.GizmoMode.Translate);
+                    SetGizmoMode(LevelViewerTransformGizmo.GizmoMode.TranslateWorld);
                     GetViewport().SetInputAsHandled();
                 }
                 else if (keyEvent.Keycode == Key.Key2)
                 {
-                    SetGizmoMode(LevelViewerTransformGizmo.GizmoMode.RotateLocal);
+                    SetGizmoMode(LevelViewerTransformGizmo.GizmoMode.TranslateLocal);
                     GetViewport().SetInputAsHandled();
                 }
                 else if (keyEvent.Keycode == Key.Key3)
@@ -163,12 +159,27 @@ public partial class LevelViewerCamera : Camera3D
                 }
                 else if (keyEvent.Keycode == Key.Key4)
                 {
+                    SetGizmoMode(LevelViewerTransformGizmo.GizmoMode.RotateLocal);
+                    GetViewport().SetInputAsHandled();
+                }
+                else if (keyEvent.Keycode == Key.Key5)
+                {
                     SetGizmoMode(LevelViewerTransformGizmo.GizmoMode.None);
                     GetViewport().SetInputAsHandled();
                 }
                 else if (keyEvent.Keycode == Key.Key0)
                 {
-                    ToggleDeepSelectMode();
+                    SetDeepSelectMode(PreviewVisibilitySettings.DeepSelectModeKind.None);
+                    GetViewport().SetInputAsHandled();
+                }
+                else if (keyEvent.Keycode == Key.Key8)
+                {
+                    SetDeepSelectMode(PreviewVisibilitySettings.DeepSelectModeKind.DeepSelect);
+                    GetViewport().SetInputAsHandled();
+                }
+                else if (keyEvent.Keycode == Key.Key9)
+                {
+                    SetDeepSelectMode(PreviewVisibilitySettings.DeepSelectModeKind.AdvancedDeepSelect);
                     GetViewport().SetInputAsHandled();
                 }
                 else if (keyEvent.Keycode == Key.Minus)
@@ -239,7 +250,6 @@ public partial class LevelViewerCamera : Camera3D
         else
             HidePositionHud();
         UpdateHudFade(deltaSeconds);
-        _gizmoModeHud?.UpdateFade(deltaSeconds);
     }
 
     /// <summary>Sync internal yaw/pitch after external framing (LookAt, etc.).</summary>
@@ -1139,17 +1149,7 @@ public partial class LevelViewerCamera : Camera3D
         gizmo.SetMode(mode);
 
         _commandsEditorConnection?.SyncTransformGizmoToSelection(this);
-
-        string label = mode switch
-        {
-            LevelViewerTransformGizmo.GizmoMode.Translate    => "Translate",
-            LevelViewerTransformGizmo.GizmoMode.RotateLocal  => "Rotate (Local)",
-            LevelViewerTransformGizmo.GizmoMode.RotateWorld  => "Rotate (World)",
-            _                                                => "None",
-        };
-
-        EnsureGizmoModeHud();
-        _gizmoModeHud?.ShowEntity("Gizmo: " + label);
+        _commandsEditorConnection?.SendViewportModeToEditor();
     }
 
     private bool TryGizmoMouseDown(Vector2 pos)
@@ -1192,77 +1192,13 @@ public partial class LevelViewerCamera : Camera3D
         }
     }
 
-    private void SetupGizmoModeHud()
+    private void SetDeepSelectMode(PreviewVisibilitySettings.DeepSelectModeKind mode)
     {
-        if (_gizmoModeHud != null && GodotObject.IsInstanceValid(_gizmoModeHud))
+        if (PreviewVisibilitySettings.DeepSelectMode == mode)
             return;
 
-        Node host = GetTree()?.CurrentScene ?? this;
-        if (host == null || !GodotObject.IsInstanceValid(host))
-            return;
-
-        _gizmoModeHud = new LevelViewerSelectionHud();
-        _gizmoModeHud.Name = "GizmoModeHud";
-        _gizmoModeHud.AttachTo(host);
-        // Position below the entity selection HUD (which sits at OffsetTop=12)
-        _gizmoModeHud.SetPanelTopOffset(58f, 120f);
-    }
-
-    private void EnsureGizmoModeHud()
-    {
-        if (_gizmoModeHud == null || !GodotObject.IsInstanceValid(_gizmoModeHud))
-            SetupGizmoModeHud();
-    }
-
-    private void ToggleDeepSelectMode()
-    {
         _commandsEditorConnection?.ResetProgressiveDeepSelectPickState();
-        PreviewVisibilitySettings.DeepSelectMode = PreviewVisibilitySettings.DeepSelectMode switch
-        {
-            PreviewVisibilitySettings.DeepSelectModeKind.None => PreviewVisibilitySettings.DeepSelectModeKind.DeepSelect,
-            PreviewVisibilitySettings.DeepSelectModeKind.DeepSelect => PreviewVisibilitySettings.DeepSelectModeKind.AdvancedDeepSelect,
-            _ => PreviewVisibilitySettings.DeepSelectModeKind.None,
-        };
-        UpdateDeepSelectHud();
-    }
-
-    private void UpdateDeepSelectHud()
-    {
-        string label = PreviewVisibilitySettings.DeepSelectMode switch
-        {
-            PreviewVisibilitySettings.DeepSelectModeKind.DeepSelect => "DEEP SELECT",
-            PreviewVisibilitySettings.DeepSelectModeKind.AdvancedDeepSelect => "ADVANCED DEEP SELECT",
-            _ => null,
-        };
-
-        if (label == null)
-        {
-            _deepSelectHud?.Hide();
-            return;
-        }
-
-        EnsureDeepSelectHud();
-        _deepSelectHud?.ShowPersistent(label, new Color(0.95f, 0.22f, 0.22f));
-    }
-
-    private void SetupDeepSelectHud()
-    {
-        if (_deepSelectHud != null && GodotObject.IsInstanceValid(_deepSelectHud))
-            return;
-
-        Node host = GetTree()?.CurrentScene ?? this;
-        if (host == null || !GodotObject.IsInstanceValid(host))
-            return;
-
-        _deepSelectHud = new LevelViewerSelectionHud();
-        _deepSelectHud.Name = "DeepSelectHud";
-        _deepSelectHud.AttachTo(host);
-        _deepSelectHud.SetPanelTopRight();
-    }
-
-    private void EnsureDeepSelectHud()
-    {
-        if (_deepSelectHud == null || !GodotObject.IsInstanceValid(_deepSelectHud))
-            SetupDeepSelectHud();
+        PreviewVisibilitySettings.DeepSelectMode = mode;
+        _commandsEditorConnection?.SendViewportModeToEditor();
     }
 }

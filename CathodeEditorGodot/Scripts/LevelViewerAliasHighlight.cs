@@ -104,10 +104,17 @@ public static class LevelViewerAliasHighlight
 		if (root == null || !GodotObject.IsInstanceValid(root))
 			return;
 
-		_meshCollectBuffer.Clear();
-		CollectMeshes(root, _meshCollectBuffer);
-		for (int i = 0; i < _meshCollectBuffer.Count; i++)
-			ReleaseMeshForSelection(_meshCollectBuffer[i]);
+		for (int i = _highlightMeshes.Count - 1; i >= 0; i--)
+		{
+			MeshInstance3D mesh = _highlightMeshes[i];
+			if (mesh == null || !GodotObject.IsInstanceValid(mesh))
+				continue;
+
+			if (mesh != root && !root.IsAncestorOf(mesh))
+				continue;
+
+			ReleaseMeshForSelection(mesh);
+		}
 	}
 
 	public static void ReapplyIfActive()

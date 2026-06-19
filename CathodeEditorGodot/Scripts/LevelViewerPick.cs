@@ -67,6 +67,55 @@ public static class LevelViewerPick
 
 	public static int PickOwnerCount => _pickablesByOwner.Count;
 
+	public static bool OwnerHasPickMeshes(Node3D owner)
+	{
+		return owner != null
+			&& _pickablesByOwner.TryGetValue(owner, out List<MeshInstance3D> meshes)
+			&& meshes != null
+			&& meshes.Count > 0;
+	}
+
+	public static bool TryCopyPickMeshesForOwner(Node3D owner, List<MeshInstance3D> destination)
+	{
+		if (destination == null || owner == null || !GodotObject.IsInstanceValid(owner))
+			return false;
+
+		if (!_pickablesByOwner.TryGetValue(owner, out List<MeshInstance3D> meshes) || meshes == null || meshes.Count == 0)
+			return false;
+
+		for (int i = 0; i < meshes.Count; i++)
+		{
+			MeshInstance3D mesh = meshes[i];
+			if (mesh != null && GodotObject.IsInstanceValid(mesh))
+				destination.Add(mesh);
+		}
+
+		return destination.Count > 0;
+	}
+
+	/// <summary>
+	/// Collects registered pick meshes for <paramref name="root"/> and nested entity nodes under it.
+	/// Walks the entity tree only — not every mesh in the scene subtree.
+	/// </summary>
+	public static void CollectPickMeshesForEntitySubtree(Node3D root, List<MeshInstance3D> destination)
+	{
+		if (root == null || destination == null || !GodotObject.IsInstanceValid(root))
+			return;
+
+		TryCopyPickMeshesForOwner(root, destination);
+
+		foreach (Node child in root.GetChildren())
+		{
+			if (child is not Node3D child3D || !GodotObject.IsInstanceValid(child3D))
+				continue;
+
+			if (!child3D.HasMeta(AlienScene.OwnerCompositeMetaKey))
+				continue;
+
+			CollectPickMeshesForEntitySubtree(child3D, destination);
+		}
+	}
+
 	public static void SetOwnerSuppressed(Node3D owner, bool suppressed)
 	{
 		if (owner == null || !GodotObject.IsInstanceValid(owner))

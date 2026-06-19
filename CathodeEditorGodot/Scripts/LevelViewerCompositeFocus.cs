@@ -2,6 +2,7 @@ using CATHODE;
 using CATHODE.Scripting;
 using CATHODE.Scripting.Internal;
 using Godot;
+using System;
 using System.Collections.Generic;
 
 /// <summary>
@@ -22,14 +23,15 @@ public static class LevelViewerCompositeFocus
 	private static ShaderMaterial _cachedDimmedTransparentDoubleSided;
 	private static readonly Dictionary<MeshInstance3D, Material> _savedMaterialOverrides = new();
 	private static readonly Dictionary<MeshInstance3D, bool> _meshDimmedState = new();
-	private static readonly HashSet<MeshInstance3D> _dimmedPickables = new();
+	private static readonly Dictionary<Material, Material> _dimmedMaterialBySource = new();
+	private static readonly Dictionary<Node3D, uint[]> _ownerEntityChainCache = new();
+	private static readonly List<uint> _entityChainBuildBuffer = new();
 	private static readonly HashSet<uint> _compositesInScope = new();
 	private static uint _scopeCacheActiveCompositeId;
 	private static uint[] _lastFocusInstancePath = Array.Empty<uint>();
 	private static Node3D _scopeAnchorNode;
 	private static IReadOnlyDictionary<Node3D, Entity> _scopeNodeEntities;
 	private static Node _scopeContentRoot;
-
 	public static bool HasActiveComposite => PreviewVisibilitySettings.ActiveCompositeId != 0;
 
 	public static void SetScopeEvaluationContext(IReadOnlyDictionary<Node3D, Entity> nodeEntities, Node contentRoot)
@@ -161,9 +163,9 @@ public static class LevelViewerCompositeFocus
 
 		if (_scopeNodeEntities != null
 			&& _scopeContentRoot != null
-			&& TryBuildOwnerEntityIdChain(owner, _scopeContentRoot, _scopeNodeEntities, out List<uint> chain))
+			&& TryGetOwnerEntityChain(owner, out uint[] chain))
 		{
-			if (chain.Count < focusPath.Length)
+			if (chain.Length < focusPath.Length)
 				return false;
 
 			for (int i = 0; i < focusPath.Length; i++)
@@ -176,32 +178,6 @@ public static class LevelViewerCompositeFocus
 		}
 
 		return IsUnderScopeAnchor(owner);
-	}
-
-	private static bool TryBuildOwnerEntityIdChain(
-		Node3D owner,
-		Node contentRoot,
-		IReadOnlyDictionary<Node3D, Entity> nodeEntities,
-		out List<uint> entityIds)
-	{
-		entityIds = new List<uint>();
-		if (owner == null || contentRoot == null || nodeEntities == null)
-			return false;
-
-		Node current = owner;
-		while (current != null && current != contentRoot)
-		{
-			if (current is Node3D node3D && nodeEntities.TryGetValue(node3D, out Entity entity))
-				entityIds.Add(entity.shortGUID.AsUInt32);
-
-			current = current.GetParent();
-		}
-
-		if (entityIds.Count == 0)
-			return false;
-
-		entityIds.Reverse();
-		return true;
 	}
 
 	private static bool IsUnderScopeAnchor(Node node)
@@ -246,7 +222,17 @@ public static class LevelViewerCompositeFocus
 		_lastFocusInstancePath = (uint[])instancePath.Clone();
 
 		if (activeCompositeChanged || focusPathChanged)
-			ApplyFocusFromPickRegistry(commands);
+		{
+			if (!activeCompositeChanged
+				&& focusPathChanged
+				&& TryApplyIncrementalFocusPathChange(previousFocusPath, instancePath, commands))
+			{
+			}
+			else
+			{
+				ApplyFocusFromPickRegistry(commands);
+			}
+		}
 
 		LevelViewerPick.InvalidateScopedPickables();
 	}
@@ -272,67 +258,226 @@ public static class LevelViewerCompositeFocus
 		_lastFocusInstancePath = Array.Empty<uint>();
 		_scopeAnchorNode = null;
 		_meshDimmedState.Clear();
-		_dimmedPickables.Clear();
+		_dimmedMaterialBySource.Clear();
+		_ownerEntityChainCache.Clear();
 		ClearScopeEvaluationContext();
 	}
 
 	private static void RestoreAllDimmedMeshes()
 	{
+		bool wireframeEnabled = ModelReferenceRenderSettings.WireframeEnabled;
 		foreach (KeyValuePair<MeshInstance3D, Material> entry in _savedMaterialOverrides)
 		{
 			if (entry.Key != null && GodotObject.IsInstanceValid(entry.Key))
 			{
 				entry.Key.MaterialOverride = entry.Value;
-				SetWireframeOverlayVisible(entry.Key, true);
+				if (wireframeEnabled)
+					SetWireframeOverlayVisible(entry.Key, true);
 			}
 		}
 
-		foreach (MeshInstance3D mesh in _dimmedPickables)
-		{
-			if (mesh != null && GodotObject.IsInstanceValid(mesh) && !mesh.IsInGroup(LevelViewerPick.PickableGroup))
-				mesh.AddToGroup(LevelViewerPick.PickableGroup);
-		}
-
 		_savedMaterialOverrides.Clear();
-		_dimmedPickables.Clear();
 	}
 
 	private static void ApplyFocusFromPickRegistry(Commands commands)
 	{
+		_ownerEntityChainCache.Clear();
+		ApplyFocusToPickOwners(commands, null, null);
+	}
+
+	private static bool TryApplyIncrementalFocusPathChange(
+		uint[] previousPath,
+		uint[] newPath,
+		Commands commands)
+	{
+		previousPath ??= Array.Empty<uint>();
+		newPath ??= Array.Empty<uint>();
+
+		bool extension = IsStrictPathPrefix(previousPath, newPath)
+			|| (previousPath.Length == 0 && newPath.Length > 0);
+		bool retraction = IsStrictPathPrefix(newPath, previousPath) && newPath.Length < previousPath.Length;
+		if (!extension && !retraction)
+			return false;
+
+		ApplyFocusToPickOwners(commands, previousPath, newPath);
+		return true;
+	}
+
+	private static void ApplyFocusToPickOwners(
+		Commands commands,
+		uint[] previousFocusPath,
+		uint[] newFocusPath)
+	{
+		bool incremental = previousFocusPath != null && newFocusPath != null;
+		uint[] evaluatePath = incremental ? newFocusPath : PreviewVisibilitySettings.CompositeFocusInstancePath ?? Array.Empty<uint>();
+		previousFocusPath ??= Array.Empty<uint>();
+
+		int meshesDimmed = 0;
+		int meshesUndimmed = 0;
+		int meshesUnchanged = 0;
+
+		_ownerEntityChainCache.Clear();
+
 		LevelViewerPick.ForEachPickOwner((owner, meshes) =>
 		{
 			if (LevelViewerSelection.IsUnderSelection(owner))
 				return;
 
-			bool shouldDim = !IsPickOwnerInScope(owner, commands);
-			for (int i = 0; i < meshes.Count; i++)
-			{
-				MeshInstance3D mesh = meshes[i];
-				if (mesh == null || !GodotObject.IsInstanceValid(mesh) || mesh.IsInGroup(WireframeOverlayGroup))
-					continue;
+			bool compositeInScope = IsOwnerCompositeInScopeForOwner(owner);
+			bool nowInScope = compositeInScope && MatchesFocusInstancePath(owner, evaluatePath);
 
-				ApplyMeshFocusState(mesh, shouldDim);
+			if (incremental)
+			{
+				bool wasInScope = compositeInScope && MatchesFocusInstancePath(owner, previousFocusPath);
+				if (wasInScope == nowInScope)
+					return;
 			}
+
+			ApplyOwnerMeshFocusState(meshes, !nowInScope, ref meshesDimmed, ref meshesUndimmed, ref meshesUnchanged);
 		});
 	}
 
-	private static void ApplyMeshFocusState(MeshInstance3D mesh, bool shouldDim)
+	private static bool IsOwnerCompositeInScopeForOwner(Node3D owner)
+	{
+		if (!owner.HasMeta(AlienScene.OwnerCompositeMetaKey))
+			return true;
+
+		uint ownerCompositeId = owner.GetMeta(AlienScene.OwnerCompositeMetaKey).AsUInt32();
+		return _compositesInScope.Contains(ownerCompositeId);
+	}
+
+	private static bool MatchesFocusInstancePath(Node3D owner, uint[] focusPath)
+	{
+		if (focusPath.Length == 0)
+			return true;
+
+		if (!TryGetOwnerEntityChain(owner, out uint[] chain))
+			return IsUnderScopeAnchor(owner);
+
+		if (chain.Length < focusPath.Length)
+			return false;
+
+		for (int i = 0; i < focusPath.Length; i++)
+		{
+			if (chain[i] != focusPath[i])
+				return false;
+		}
+
+		return true;
+	}
+
+	private static bool TryGetOwnerEntityChain(Node3D owner, out uint[] chain)
+	{
+		if (owner != null && _ownerEntityChainCache.TryGetValue(owner, out chain))
+			return chain.Length > 0;
+
+		if (!TryBuildOwnerEntityIdChain(owner, _scopeContentRoot, _scopeNodeEntities, _entityChainBuildBuffer))
+		{
+			chain = Array.Empty<uint>();
+			if (owner != null)
+				_ownerEntityChainCache[owner] = chain;
+			return false;
+		}
+
+		chain = _entityChainBuildBuffer.ToArray();
+		if (owner != null)
+			_ownerEntityChainCache[owner] = chain;
+		return true;
+	}
+
+	private static bool TryBuildOwnerEntityIdChain(
+		Node3D owner,
+		Node contentRoot,
+		IReadOnlyDictionary<Node3D, Entity> nodeEntities,
+		List<uint> entityIds)
+	{
+		entityIds.Clear();
+		if (owner == null || contentRoot == null || nodeEntities == null)
+			return false;
+
+		Node current = owner;
+		while (current != null && current != contentRoot)
+		{
+			if (current is Node3D node3D && nodeEntities.TryGetValue(node3D, out Entity entity))
+				entityIds.Add(entity.shortGUID.AsUInt32);
+
+			current = current.GetParent();
+		}
+
+		if (entityIds.Count == 0)
+			return false;
+
+		entityIds.Reverse();
+		return true;
+	}
+
+	private static bool IsStrictPathPrefix(uint[] prefix, uint[] path)
+	{
+		if (prefix == null || path == null || prefix.Length == 0 || prefix.Length >= path.Length)
+			return false;
+
+		for (int i = 0; i < prefix.Length; i++)
+		{
+			if (prefix[i] != path[i])
+				return false;
+		}
+
+		return true;
+	}
+
+	private static void ApplyOwnerMeshFocusState(
+		IReadOnlyList<MeshInstance3D> meshes,
+		bool shouldDim,
+		ref int meshesDimmed,
+		ref int meshesUndimmed,
+		ref int meshesUnchanged)
+	{
+		for (int i = 0; i < meshes.Count; i++)
+		{
+			MeshInstance3D mesh = meshes[i];
+			if (mesh == null || !GodotObject.IsInstanceValid(mesh) || mesh.IsInGroup(WireframeOverlayGroup))
+				continue;
+
+			switch (ApplyMeshFocusState(mesh, shouldDim))
+			{
+				case MeshFocusChange.Dimmed:
+					meshesDimmed++;
+					break;
+				case MeshFocusChange.Undimmed:
+					meshesUndimmed++;
+					break;
+				case MeshFocusChange.Unchanged:
+					meshesUnchanged++;
+					break;
+			}
+		}
+	}
+
+	private enum MeshFocusChange
+	{
+		Unchanged,
+		Dimmed,
+		Undimmed,
+	}
+
+	private static MeshFocusChange ApplyMeshFocusState(MeshInstance3D mesh, bool shouldDim)
 	{
 		if (shouldDim)
 		{
 			if (_meshDimmedState.TryGetValue(mesh, out bool wasDimmed) && wasDimmed)
-				return;
+				return MeshFocusChange.Unchanged;
 
 			SetMeshDimmed(mesh, true);
 			_meshDimmedState[mesh] = true;
-			return;
+			return MeshFocusChange.Dimmed;
 		}
 
 		if (_meshDimmedState.TryGetValue(mesh, out bool wasDimmedOut) && !wasDimmedOut && !IsMeshVisuallyDimmed(mesh))
-			return;
+			return MeshFocusChange.Unchanged;
 
 		SetMeshDimmed(mesh, false);
 		_meshDimmedState[mesh] = false;
+		return MeshFocusChange.Undimmed;
 	}
 
 	private static void SetMeshDimmed(MeshInstance3D mesh, bool dimmed)
@@ -340,17 +485,13 @@ public static class LevelViewerCompositeFocus
 		if (dimmed)
 		{
 			DimMesh(mesh);
-			SetWireframeOverlayVisible(mesh, false);
-			if (mesh.IsInGroup(LevelViewerPick.PickableGroup))
-			{
-				mesh.RemoveFromGroup(LevelViewerPick.PickableGroup);
-				_dimmedPickables.Add(mesh);
-			}
-
+			if (ModelReferenceRenderSettings.WireframeEnabled)
+				SetWireframeOverlayVisible(mesh, false);
 			return;
 		}
 
-		SetWireframeOverlayVisible(mesh, true);
+		if (ModelReferenceRenderSettings.WireframeEnabled)
+			SetWireframeOverlayVisible(mesh, true);
 		RestoreMesh(mesh);
 	}
 
@@ -361,28 +502,29 @@ public static class LevelViewerCompositeFocus
 			meshInstance.MaterialOverride = saved;
 			_savedMaterialOverrides.Remove(meshInstance);
 		}
-
-		if (_dimmedPickables.Remove(meshInstance) && !meshInstance.IsInGroup(LevelViewerPick.PickableGroup))
-			meshInstance.AddToGroup(LevelViewerPick.PickableGroup);
 	}
 
 	private static void DimMesh(MeshInstance3D meshInstance)
 	{
-		if (!_savedMaterialOverrides.ContainsKey(meshInstance))
-		{
-			Material current = meshInstance.MaterialOverride ?? meshInstance.GetActiveMaterial(0);
-			if (current == null)
-				return;
+		if (_savedMaterialOverrides.ContainsKey(meshInstance))
+			return;
 
-			_savedMaterialOverrides[meshInstance] = meshInstance.MaterialOverride;
-			meshInstance.MaterialOverride = GetSharedDimmedMaterial(current);
-		}
+		Material current = meshInstance.MaterialOverride ?? meshInstance.GetActiveMaterial(0);
+		if (current == null)
+			return;
+
+		_savedMaterialOverrides[meshInstance] = meshInstance.MaterialOverride;
+		meshInstance.MaterialOverride = GetSharedDimmedMaterial(current);
 	}
 
 	private static Material GetSharedDimmedMaterial(Material original)
 	{
+		if (_dimmedMaterialBySource.TryGetValue(original, out Material cached))
+			return cached;
+
 		bool doubleSided = IsDoubleSidedMaterial(original);
 		bool transparent = IsTransparentMaterial(original, out _);
+		Material dimmed;
 
 		if (transparent)
 		{
@@ -390,23 +532,29 @@ public static class LevelViewerCompositeFocus
 			{
 				_cachedDimmedTransparentDoubleSided ??= CreateSharedDimmedMaterial(
 					GetDimmedTransparentDoubleSidedShader(), transparent: true);
-				return _cachedDimmedTransparentDoubleSided;
+				dimmed = _cachedDimmedTransparentDoubleSided;
 			}
-
-			_cachedDimmedTransparent ??= CreateSharedDimmedMaterial(
-				GetDimmedTransparentShader(), transparent: true);
-			return _cachedDimmedTransparent;
+			else
+			{
+				_cachedDimmedTransparent ??= CreateSharedDimmedMaterial(
+					GetDimmedTransparentShader(), transparent: true);
+				dimmed = _cachedDimmedTransparent;
+			}
 		}
-
-		if (doubleSided)
+		else if (doubleSided)
 		{
 			_cachedDimmedOpaqueDoubleSided ??= CreateSharedDimmedMaterial(
 				GetDimmedDoubleSidedShader(), transparent: false);
-			return _cachedDimmedOpaqueDoubleSided;
+			dimmed = _cachedDimmedOpaqueDoubleSided;
+		}
+		else
+		{
+			_cachedDimmedOpaque ??= CreateSharedDimmedMaterial(GetDimmedShader(), transparent: false);
+			dimmed = _cachedDimmedOpaque;
 		}
 
-		_cachedDimmedOpaque ??= CreateSharedDimmedMaterial(GetDimmedShader(), transparent: false);
-		return _cachedDimmedOpaque;
+		_dimmedMaterialBySource[original] = dimmed;
+		return dimmed;
 	}
 
 	private static ShaderMaterial CreateSharedDimmedMaterial(Shader shader, bool transparent)

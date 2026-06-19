@@ -1531,7 +1531,12 @@ public partial class AlienScene : Node3D
 		{
 			LevelViewerCompositeFocus.SetScopeEvaluationContext(_nodeEntities, _parentNode);
 			Node3D focusAnchor = TryResolveInstanceFocusAnchor(PreviewVisibilitySettings.CompositeFocusInstancePath);
-			LevelViewerCompositeFocus.Refresh(_parentNode, _parentNode, _content.Level.Commands, focusAnchor, _nodeEntities);
+			LevelViewerCompositeFocus.Refresh(
+				_parentNode,
+				_parentNode,
+				_content.Level.Commands,
+				focusAnchor,
+				_nodeEntities);
 			RefreshProxyHighlights(forceRebuild: false);
 			RefreshAliasHighlights(forceRebuild: false);
 		}
@@ -1552,49 +1557,57 @@ public partial class AlienScene : Node3D
 			return;
 		}
 
-		Node3D entityNode = TryResolveSelectionNode(entityPath, compositePath);
-		if (entityNode == _selectedEntity && entityNode != null)
-		{
-			RefreshSelectedLightRadiusVisual();
-			return;
-		}
-
-		_selectedEntity = entityNode;
-		LevelViewerProxyHighlight.ReleaseNode(entityNode);
-		LevelViewerAliasHighlight.ReleaseNode(entityNode);
-		LevelViewerSelection.Apply(entityNode);
 		try
 		{
-			if (PreviewVisibilitySettings.HighlightProxies && PreviewVisibilitySettings.IsSteppedDownFromLevelRoot())
+			Node3D entityNode = TryResolveSelectionNode(entityPath, compositePath);
+			if (entityNode == _selectedEntity && entityNode != null)
 			{
-				if (LevelViewerProxyHighlight.NeedsRebuild(PreviewVisibilitySettings.ActiveCompositeId))
-					LevelViewerProxyHighlight.Rebuild(this, _content.Level.Commands, PreviewVisibilitySettings.ActiveCompositeId);
-				else
-					LevelViewerProxyHighlight.SyncWithSelection();
+				RefreshSelectedLightRadiusVisual();
+				return;
 			}
 
-			if (PreviewVisibilitySettings.HighlightAliases)
+			_selectedEntity = entityNode;
+			LevelViewerProxyHighlight.ReleaseNode(entityNode);
+			LevelViewerAliasHighlight.ReleaseNode(entityNode);
+			LevelViewerSelection.Apply(entityNode);
+
+			try
 			{
-				if (LevelViewerAliasHighlight.NeedsRebuild(PreviewVisibilitySettings.ActiveCompositeId))
-					LevelViewerAliasHighlight.Rebuild(this, _content.Level.Commands, PreviewVisibilitySettings.ActiveCompositeId);
-				else
-					LevelViewerAliasHighlight.SyncWithSelection();
+				if (PreviewVisibilitySettings.HighlightProxies && PreviewVisibilitySettings.IsSteppedDownFromLevelRoot())
+				{
+					if (LevelViewerProxyHighlight.NeedsRebuild(PreviewVisibilitySettings.ActiveCompositeId))
+						LevelViewerProxyHighlight.Rebuild(this, _content.Level.Commands, PreviewVisibilitySettings.ActiveCompositeId);
+					else
+						LevelViewerProxyHighlight.SyncWithSelection();
+				}
+
+				if (PreviewVisibilitySettings.HighlightAliases)
+				{
+					if (LevelViewerAliasHighlight.NeedsRebuild(PreviewVisibilitySettings.ActiveCompositeId))
+						LevelViewerAliasHighlight.Rebuild(this, _content.Level.Commands, PreviewVisibilitySettings.ActiveCompositeId);
+					else
+						LevelViewerAliasHighlight.SyncWithSelection();
+				}
 			}
+			catch (System.Exception ex)
+			{
+				LevelViewerAliasHighlight.InvalidateCache();
+				LevelViewerProxyHighlight.InvalidateCache();
+				ViewerLog.PrintErr("[Viewer] Entity highlight failed: " + ex);
+			}
+
+			LevelViewerSelection.ReapplyIfSelectionActive();
+			RefreshSelectedLightRadiusVisual();
+
+			Callable.From(() => OnSelectionChanged?.Invoke(entityNode)).CallDeferred();
+
+			if (focusSelected && entityNode != null)
+				Callable.From(() => FocusSelectedEntity(entityNode)).CallDeferred();
 		}
 		catch (System.Exception ex)
 		{
-			LevelViewerAliasHighlight.InvalidateCache();
-			LevelViewerProxyHighlight.InvalidateCache();
-			ViewerLog.PrintErr("[Viewer] Entity highlight failed: " + ex);
+			ViewerLog.PrintErr("[Viewer] Selection highlight failed: " + ex);
 		}
-
-		LevelViewerSelection.ReapplyIfSelectionActive();
-		RefreshSelectedLightRadiusVisual();
-
-		Callable.From(() => OnSelectionChanged?.Invoke(entityNode)).CallDeferred();
-
-		if (focusSelected && entityNode != null)
-			Callable.From(() => FocusSelectedEntity(entityNode)).CallDeferred();
 	}
 
 	private void FocusSelectedEntity(Node3D target)

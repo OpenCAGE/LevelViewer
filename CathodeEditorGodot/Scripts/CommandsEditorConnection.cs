@@ -477,6 +477,7 @@ public partial class CommandsEditorConnection : Node3D
             return;
         }
 
+        bool refreshCompositeFocusNow = false;
         lock (_lock)
         {
             _levelName = packet.level_name;
@@ -520,7 +521,7 @@ public partial class CommandsEditorConnection : Node3D
             if (navigationChanged)
             {
                 ResetProgressiveDeepSelectState();
-                MarkCompositeFocusDirty();
+                refreshCompositeFocusNow = true;
                 _scene?.ResetCompositeScopedHides();
             }
 
@@ -549,6 +550,9 @@ public partial class CommandsEditorConnection : Node3D
             else if (nestedVisibilityOnly)
                 MarkNestedVisibilityDirty(previousActiveCompositeId);
         }
+
+        if (refreshCompositeFocusNow)
+            ApplyCompositeFocusNow();
 
         switch (packet.packet_event)
         {
@@ -965,8 +969,6 @@ public partial class CommandsEditorConnection : Node3D
 
         bool changed = PreviewVisibilitySettings.ActiveCompositeId != activeCompositeId;
         PreviewVisibilitySettings.ActiveCompositeId = activeCompositeId;
-        if (changed)
-            MarkCompositeFocusDirty();
         return changed;
     }
 

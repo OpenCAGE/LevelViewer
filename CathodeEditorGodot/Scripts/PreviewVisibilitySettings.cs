@@ -67,10 +67,10 @@ public static class PreviewVisibilitySettings
 
     public static void SyncFromEditorPath(List<uint> pathEntities, List<uint> pathComposites, bool entitySelected)
     {
-        uint[] previousInstancePath = ActiveInstanceEntityPath;
         ActiveInstanceEntityPath = BuildInstanceEntityPath(pathEntities, pathComposites, entitySelected);
-        if (!InstancePathsEqual(previousInstancePath, ActiveInstanceEntityPath))
-            CompositeFocusInstancePath = ActiveInstanceEntityPath;
+        CompositeFocusInstancePath = ActiveInstanceEntityPath != null
+            ? (uint[])ActiveInstanceEntityPath.Clone()
+            : Array.Empty<uint>();
     }
 
     public static uint[] BuildInstanceEntityPath(List<uint> pathEntities, List<uint> pathComposites, bool entitySelected)

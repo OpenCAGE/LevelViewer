@@ -14,6 +14,7 @@ public static class LevelViewerRenderIdleThrottle
 	private static bool _suspended;
 	private static bool _embeddedMode;
 	private static bool _renderIdle;
+	private static int _loadActiveCount;
 
 	public static bool IsIdle
 	{
@@ -42,8 +43,27 @@ public static class LevelViewerRenderIdleThrottle
 			Restore();
 	}
 
+	/// <summary>While &gt; 0, idle throttling is disabled so level load can run at full frame rate.</summary>
+	public static void SetLoadActive(bool active)
+	{
+		if (active)
+		{
+			_loadActiveCount++;
+			_lastActivitySeconds = Time.GetTicksMsec() / 1000.0;
+			if (_suspended || _renderIdle)
+				Restore();
+			return;
+		}
+
+		if (_loadActiveCount > 0)
+			_loadActiveCount--;
+	}
+
 	public static void Update()
 	{
+		if (_loadActiveCount > 0)
+			return;
+
 		double now = Time.GetTicksMsec() / 1000.0;
 		double idleSeconds = now - _lastActivitySeconds;
 		if (_suspended || _renderIdle)

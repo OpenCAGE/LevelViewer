@@ -38,24 +38,66 @@ public partial class ModelReferencePreview : FunctionEntityPreview
         // Model references are not gated by hide-nested; avoid respawning meshes.
     }
 
-    public override void Refresh()
+    public override void RegisterPickablesWithOwner()
     {
-        if (_scene == null || Entity == null)
+        Node3D owner = GetParent() as Node3D;
+        if (owner == null || !GodotObject.IsInstanceValid(owner))
             return;
 
-        Node3D renderTarget = GetRenderTarget();
-        _scene.ClearRenderableChildren(renderTarget);
-
-        foreach (Tuple<int, int> renderable in GetRenderableIndexes())
-        {
-            _scene.SpawnRenderable(
-                renderTarget,
-                _scene.Content.Level.Models.GetAtWriteIndex(renderable.Item1),
-                _scene.Content.Level.Materials.GetAtWriteIndex(renderable.Item2));
-        }
+        LevelViewerPick.RegisterPickableSubtree(owner);
     }
 
-    public static FunctionEntity ResolveModelReferenceEntity(Entity entity, Composite composite, Commands commands)
+	public override void Refresh()
+	{
+		if (_scene == null || Entity == null)
+			return;
+
+		Node3D renderTarget = GetRenderTarget();
+		_scene.ClearRenderableChildren(renderTarget);
+		SpawnAllRenderables(renderTarget);
+	}
+
+	/// <summary>First bulk spawn after deferred setup — render target has no mesh children yet.</summary>
+	internal void SpawnRenderablesForBulkLoad()
+	{
+		if (_scene == null || Entity == null)
+			return;
+
+		Node3D renderTarget = GetRenderTarget();
+		if (renderTarget == null)
+			return;
+
+		SpawnAllRenderables(renderTarget);
+	}
+
+	internal void SpawnAllRenderables(Node3D renderTarget)
+	{
+		if (_scene == null || renderTarget == null)
+			return;
+
+		foreach (Tuple<int, int> renderable in GetRenderableIndexes())
+		{
+			SpawnSingleRenderable(
+				renderTarget,
+				renderable.Item1,
+				renderable.Item2);
+		}
+	}
+
+	internal void SpawnSingleRenderable(Node3D renderTarget, int modelWriteIndex, int materialWriteIndex)
+	{
+		if (_scene == null || renderTarget == null || modelWriteIndex < 0 || materialWriteIndex < 0)
+			return;
+
+		_scene.SpawnRenderable(
+			renderTarget,
+			_scene.Content.Level.Models.GetAtWriteIndex(modelWriteIndex),
+			_scene.Content.Level.Materials.GetAtWriteIndex(materialWriteIndex));
+	}
+
+	internal Node3D GetPopulateRenderTarget() => GetRenderTarget();
+
+	public static FunctionEntity ResolveModelReferenceEntity(Entity entity, Composite composite, Commands commands)
     {
         if (entity is FunctionEntity function && function.function.AsFunctionType == FunctionType.ModelReference)
             return function;

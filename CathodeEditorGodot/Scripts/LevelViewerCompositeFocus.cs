@@ -27,8 +27,22 @@ public static class LevelViewerCompositeFocus
 	private static uint _scopeCacheActiveCompositeId;
 	private static uint[] _lastFocusInstancePath = Array.Empty<uint>();
 	private static Node3D _scopeAnchorNode;
+	private static IReadOnlyDictionary<Node3D, Entity> _scopeNodeEntities;
+	private static Node _scopeContentRoot;
 
 	public static bool HasActiveComposite => PreviewVisibilitySettings.ActiveCompositeId != 0;
+
+	public static void SetScopeEvaluationContext(IReadOnlyDictionary<Node3D, Entity> nodeEntities, Node contentRoot)
+	{
+		_scopeNodeEntities = nodeEntities;
+		_scopeContentRoot = contentRoot;
+	}
+
+	public static void ClearScopeEvaluationContext()
+	{
+		_scopeNodeEntities = null;
+		_scopeContentRoot = null;
+	}
 
 	public static void RebuildScopeCache(Commands commands)
 	{
@@ -109,6 +123,13 @@ public static class LevelViewerCompositeFocus
 		if (!IsOwnerCompositeInScope(ownerCompositeId, commands))
 			return false;
 
+		if (node is Node3D node3D
+			&& _scopeNodeEntities != null
+			&& LevelViewerPick.ResolveNearestEntityNode(node3D, _scopeNodeEntities) is Node3D nearestEntity)
+		{
+			return IsPickOwnerInScope(nearestEntity, commands);
+		}
+
 		return IsUnderScopeAnchor(node);
 	}
 
@@ -125,22 +146,82 @@ public static class LevelViewerCompositeFocus
 				return false;
 		}
 
+		return IsOwnerUnderFocusInstancePath(owner);
+	}
+
+	/// <summary>
+	/// True when the owner's entity-id chain from the level root starts with the focus instance path.
+	/// Distinguishes sibling composite instances that share a blueprint but have different placements.
+	/// </summary>
+	private static bool IsOwnerUnderFocusInstancePath(Node3D owner)
+	{
+		uint[] focusPath = PreviewVisibilitySettings.CompositeFocusInstancePath ?? Array.Empty<uint>();
+		if (focusPath.Length == 0)
+			return true;
+
+		if (_scopeNodeEntities != null
+			&& _scopeContentRoot != null
+			&& TryBuildOwnerEntityIdChain(owner, _scopeContentRoot, _scopeNodeEntities, out List<uint> chain))
+		{
+			if (chain.Count < focusPath.Length)
+				return false;
+
+			for (int i = 0; i < focusPath.Length; i++)
+			{
+				if (chain[i] != focusPath[i])
+					return false;
+			}
+
+			return true;
+		}
+
 		return IsUnderScopeAnchor(owner);
+	}
+
+	private static bool TryBuildOwnerEntityIdChain(
+		Node3D owner,
+		Node contentRoot,
+		IReadOnlyDictionary<Node3D, Entity> nodeEntities,
+		out List<uint> entityIds)
+	{
+		entityIds = new List<uint>();
+		if (owner == null || contentRoot == null || nodeEntities == null)
+			return false;
+
+		Node current = owner;
+		while (current != null && current != contentRoot)
+		{
+			if (current is Node3D node3D && nodeEntities.TryGetValue(node3D, out Entity entity))
+				entityIds.Add(entity.shortGUID.AsUInt32);
+
+			current = current.GetParent();
+		}
+
+		if (entityIds.Count == 0)
+			return false;
+
+		entityIds.Reverse();
+		return true;
 	}
 
 	private static bool IsUnderScopeAnchor(Node node)
 	{
-		uint[] instancePath = PreviewVisibilitySettings.ActiveInstanceEntityPath ?? Array.Empty<uint>();
+		uint[] instancePath = PreviewVisibilitySettings.CompositeFocusInstancePath ?? Array.Empty<uint>();
 		if (instancePath.Length == 0)
 			return true;
 
 		if (_scopeAnchorNode == null || !GodotObject.IsInstanceValid(_scopeAnchorNode))
 			return false;
 
-		return node == _scopeAnchorNode || IsDescendantOf(node, _scopeAnchorNode);
+		return node == _scopeAnchorNode || _scopeAnchorNode.IsAncestorOf(node);
 	}
 
-	public static void Refresh(Node3D sceneRoot, Node contentRoot, Commands commands)
+	public static void Refresh(
+		Node3D sceneRoot,
+		Node contentRoot,
+		Commands commands,
+		Node3D scopeAnchorOverride = null,
+		IReadOnlyDictionary<Node3D, Entity> nodeEntities = null)
 	{
 		if (!HasActiveComposite || sceneRoot == null || !GodotObject.IsInstanceValid(sceneRoot) || commands == null)
 		{
@@ -148,19 +229,39 @@ public static class LevelViewerCompositeFocus
 			return;
 		}
 
+		_scopeNodeEntities = nodeEntities ?? _scopeNodeEntities;
+		_scopeContentRoot = contentRoot;
 		uint activeId = PreviewVisibilitySettings.ActiveCompositeId;
-		uint[] instancePath = PreviewVisibilitySettings.ActiveInstanceEntityPath ?? Array.Empty<uint>();
-		if (_scopeCacheActiveCompositeId != activeId
-			|| !PreviewVisibilitySettings.InstancePathsEqual(_lastFocusInstancePath, instancePath))
-		{
-			_meshDimmedState.Clear();
-		}
+		uint[] instancePath = PreviewVisibilitySettings.CompositeFocusInstancePath ?? Array.Empty<uint>();
+		uint[] previousFocusPath = _lastFocusInstancePath;
+		uint previousScopeComposite = _scopeCacheActiveCompositeId;
+		bool activeCompositeChanged = previousScopeComposite != 0 && previousScopeComposite != activeId;
+		bool focusPathChanged = !PreviewVisibilitySettings.InstancePathsEqual(previousFocusPath, instancePath);
+
+		if (activeCompositeChanged)
+			ResetDimStateForScopeChange();
 
 		RebuildScopeCache(commands);
-		_scopeAnchorNode = ResolveScopeAnchorNode(contentRoot, instancePath);
+		_scopeAnchorNode = scopeAnchorOverride ?? ResolveScopeAnchorNode(contentRoot, instancePath);
 		_lastFocusInstancePath = (uint[])instancePath.Clone();
+
+		if (activeCompositeChanged || focusPathChanged)
+			ApplyFocusFromPickRegistry(commands);
+
 		LevelViewerPick.InvalidateScopedPickables();
-		ApplyFocusFromPickRegistry(commands);
+	}
+
+	/// <summary>Clears all dimmed materials/pick state before re-applying a new drill scope.</summary>
+	private static void ResetDimStateForScopeChange()
+	{
+		RestoreAllDimmedMeshes();
+		_meshDimmedState.Clear();
+	}
+
+	/// <summary>True when composite focus has this mesh greyed out (used to avoid re-pickable registration).</summary>
+	public static bool IsMeshVisuallyDimmed(MeshInstance3D mesh)
+	{
+		return mesh != null && _savedMaterialOverrides.ContainsKey(mesh);
 	}
 
 	public static void Clear()
@@ -172,6 +273,7 @@ public static class LevelViewerCompositeFocus
 		_scopeAnchorNode = null;
 		_meshDimmedState.Clear();
 		_dimmedPickables.Clear();
+		ClearScopeEvaluationContext();
 	}
 
 	private static void RestoreAllDimmedMeshes()
@@ -192,6 +294,7 @@ public static class LevelViewerCompositeFocus
 		}
 
 		_savedMaterialOverrides.Clear();
+		_dimmedPickables.Clear();
 	}
 
 	private static void ApplyFocusFromPickRegistry(Commands commands)
@@ -215,15 +318,21 @@ public static class LevelViewerCompositeFocus
 
 	private static void ApplyMeshFocusState(MeshInstance3D mesh, bool shouldDim)
 	{
-		if (_meshDimmedState.TryGetValue(mesh, out bool wasDimmed) && wasDimmed == shouldDim)
+		if (shouldDim)
+		{
+			if (_meshDimmedState.TryGetValue(mesh, out bool wasDimmed) && wasDimmed)
+				return;
+
+			SetMeshDimmed(mesh, true);
+			_meshDimmedState[mesh] = true;
+			return;
+		}
+
+		if (_meshDimmedState.TryGetValue(mesh, out bool wasDimmedOut) && !wasDimmedOut && !IsMeshVisuallyDimmed(mesh))
 			return;
 
-		if (shouldDim)
-			SetMeshDimmed(mesh, true);
-		else
-			SetMeshDimmed(mesh, false);
-
-		_meshDimmedState[mesh] = shouldDim;
+		SetMeshDimmed(mesh, false);
+		_meshDimmedState[mesh] = false;
 	}
 
 	private static void SetMeshDimmed(MeshInstance3D mesh, bool dimmed)
@@ -259,15 +368,15 @@ public static class LevelViewerCompositeFocus
 
 	private static void DimMesh(MeshInstance3D meshInstance)
 	{
-		if (_savedMaterialOverrides.ContainsKey(meshInstance))
-			return;
+		if (!_savedMaterialOverrides.ContainsKey(meshInstance))
+		{
+			Material current = meshInstance.MaterialOverride ?? meshInstance.GetActiveMaterial(0);
+			if (current == null)
+				return;
 
-		Material current = meshInstance.MaterialOverride ?? meshInstance.GetActiveMaterial(0);
-		if (current == null)
-			return;
-
-		_savedMaterialOverrides[meshInstance] = meshInstance.MaterialOverride;
-		meshInstance.MaterialOverride = GetSharedDimmedMaterial(current);
+			_savedMaterialOverrides[meshInstance] = meshInstance.MaterialOverride;
+			meshInstance.MaterialOverride = GetSharedDimmedMaterial(current);
+		}
 	}
 
 	private static Material GetSharedDimmedMaterial(Material original)
@@ -423,23 +532,6 @@ public static class LevelViewerCompositeFocus
 		}
 
 		return current as Node3D;
-	}
-
-	private static bool IsDescendantOf(Node node, Node ancestor)
-	{
-		if (node == null || ancestor == null)
-			return false;
-
-		Node current = node;
-		while (current != null)
-		{
-			if (current == ancestor)
-				return true;
-
-			current = current.GetParent();
-		}
-
-		return false;
 	}
 
 	private static uint ResolveOwnerCompositeId(Node start, Node contentRoot)

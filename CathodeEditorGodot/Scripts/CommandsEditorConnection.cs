@@ -988,6 +988,21 @@ public partial class CommandsEditorConnection : Node3D
         {
             _compositeFocusDirty = true;
         }
+
+        WakePhysicsProcess();
+    }
+
+    private void ApplyCompositeFocusNow()
+    {
+        if (_scene == null || !_scene.Content.Loaded)
+            return;
+
+        _scene.RefreshCompositeFocus();
+        lock (_lock)
+        {
+            _compositeFocusDirty = false;
+            _compositeFocusRefreshScheduled = false;
+        }
     }
 
     private void MarkRenderFiltersDirty(HashSet<uint> changedFunctionTypes)
@@ -1221,6 +1236,7 @@ public partial class CommandsEditorConnection : Node3D
         List<uint> pathComposites = null;
         bool entitySelected;
         bool createdNewAlias = false;
+        int deepSelectDepth = 0;
 
         switch (PreviewVisibilitySettings.DeepSelectMode)
         {
@@ -1252,7 +1268,7 @@ public partial class CommandsEditorConnection : Node3D
                 break;
             case PreviewVisibilitySettings.DeepSelectModeKind.DeepSelect:
             {
-                int deepSelectDepth = ResolveProgressiveDeepSelectDepth(target, activeCompositeId);
+                deepSelectDepth = ResolveProgressiveDeepSelectDepth(target, activeCompositeId);
                 if (deepSelectDepth > 0)
                 {
                     built = TryPickDeepSelectViaAlias(
@@ -1290,6 +1306,20 @@ public partial class CommandsEditorConnection : Node3D
 
         if (!built)
             return;
+
+        if (PreviewVisibilitySettings.DeepSelectMode == PreviewVisibilitySettings.DeepSelectModeKind.DeepSelect)
+        {
+            UpdateCompositeFocusForDeepSelectPick(target, activeCompositeId, deepSelectDepth);
+        }
+        else if (PreviewVisibilitySettings.DeepSelectMode == PreviewVisibilitySettings.DeepSelectModeKind.AdvancedDeepSelect
+            && !PreviewVisibilitySettings.InstancePathsEqual(
+                PreviewVisibilitySettings.CompositeFocusInstancePath,
+                PreviewVisibilitySettings.ActiveInstanceEntityPath))
+        {
+            // LMB only selects aliases; grey-out follows OpenCAGE drill scope (Ctrl+MMB / hierarchy).
+            PreviewVisibilitySettings.ResetCompositeFocusToActiveInstancePath();
+            MarkCompositeFocusDirty();
+        }
 
         uint nextSelectedEntity = entitySelected && pathEntities != null && pathEntities.Count > 0
             ? pathEntities[pathEntities.Count - 1]
@@ -1428,9 +1458,11 @@ public partial class CommandsEditorConnection : Node3D
         if (PreviewVisibilitySettings.DeepSelectMode == PreviewVisibilitySettings.DeepSelectModeKind.DeepSelect)
             ResetProgressiveDeepSelectState();
 
+        UpdateCompositeFocusForDrillPath(pathEntities, pathComposites, entitySelected);
         ApplyLocalSelection(pathEntities, pathComposites, entitySelected);
         SendSelectionToEditorWithPendingEphemeralDelete(pathEntities, pathComposites, entitySelected);
         ApplySelectionNow();
+        ApplyCompositeFocusNow();
     }
 
     private bool TryMergePreservedSelectionIntoDrillPath(
@@ -1648,6 +1680,65 @@ public partial class CommandsEditorConnection : Node3D
                 MarkCompositeFocusDirty();
                 _scene?.ResetCompositeScopedHides();
             }
+        }
+    }
+
+    private void UpdateCompositeFocusForDrillPath(
+        List<uint> pathEntities,
+        List<uint> pathComposites,
+        bool entitySelected)
+    {
+        if (pathEntities == null || pathComposites == null || pathEntities.Count == 0)
+            return;
+
+        uint[] focusPath = PreviewVisibilitySettings.BuildInstanceEntityPath(
+            pathEntities,
+            pathComposites,
+            entitySelected);
+        if (PreviewVisibilitySettings.InstancePathsEqual(
+                focusPath,
+                PreviewVisibilitySettings.CompositeFocusInstancePath))
+        {
+            return;
+        }
+
+        PreviewVisibilitySettings.SetCompositeFocusInstancePath(focusPath);
+        MarkCompositeFocusDirty();
+    }
+
+    private void UpdateCompositeFocusForDeepSelectPick(
+        LevelViewerPick.SelectionTarget target,
+        uint activeCompositeId,
+        int deepSelectDepth)
+    {
+        if (_scene?.Content?.Level?.Commands == null)
+            return;
+
+        if (PreviewVisibilitySettings.DeepSelectMode != PreviewVisibilitySettings.DeepSelectModeKind.DeepSelect)
+            return;
+
+        Commands commands = _scene.Content.Level.Commands;
+        uint[] instancePath = PreviewVisibilitySettings.ActiveInstanceEntityPath ?? Array.Empty<uint>();
+
+        if (deepSelectDepth <= 0)
+        {
+            PreviewVisibilitySettings.ResetCompositeFocusToActiveInstancePath();
+            MarkCompositeFocusDirty();
+            return;
+        }
+
+        if (LevelViewerPick.TryBuildProgressiveDeepDrillPath(
+                target,
+                activeCompositeId,
+                instancePath,
+                deepSelectDepth,
+                commands,
+                out List<uint> drillEntities,
+                out List<uint> drillComposites))
+        {
+            PreviewVisibilitySettings.SetCompositeFocusInstancePath(
+                PreviewVisibilitySettings.BuildInstanceEntityPath(drillEntities, drillComposites, entitySelected: false));
+            MarkCompositeFocusDirty();
         }
     }
 

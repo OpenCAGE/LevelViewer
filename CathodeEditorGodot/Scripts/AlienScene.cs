@@ -3,9 +3,11 @@ using CATHODE.Scripting;
 using CATHODE.Scripting.Internal;
 using CathodeLib;
 using Godot;
+using OpenCAGE;
 using OpenCAGE.UnityConnection;
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Linq;
 
@@ -30,9 +32,9 @@ public partial class AlienScene : Node3D
 	public int ModelReferenceMeshCount => _modelReferenceMeshes.Count;
 	public string CompositeName => _loadedComposite == null ? "" : _loadedComposite.name;
 
-	// Shared Godot texture cache: one entry per Cathode TEX4 instance.
-	private Dictionary<Textures.TEX4, TexOrCube> _texturesGlobal = new Dictionary<Textures.TEX4, TexOrCube>();
-	private Dictionary<Textures.TEX4, TexOrCube> _texturesLevel = new Dictionary<Textures.TEX4, TexOrCube>();
+	// Shared Godot texture cache: one entry per Cathode TEX4 write index.
+	private Dictionary<int, TexOrCube> _texturesGlobalByIndex = new Dictionary<int, TexOrCube>();
+	private Dictionary<int, TexOrCube> _texturesLevelByIndex = new Dictionary<int, TexOrCube>();
 	private Dictionary<Materials.Material, ShaderMaterial> _materials = new Dictionary<Materials.Material, ShaderMaterial>();
 	private Dictionary<Materials.Material, ShaderMaterial> _wireframeMaterials = new Dictionary<Materials.Material, ShaderMaterial>();
 	private Dictionary<ShaderMaterial, bool> _materialSupport = new Dictionary<ShaderMaterial, bool>();
@@ -97,6 +99,13 @@ public partial class AlienScene : Node3D
 	private bool _deferMeshTreeActivation;
 	private bool _wiringCompositeLinks;
 	private readonly List<Node3D> _deferredPickOwners = new List<Node3D>();
+	private readonly List<FunctionEntityPreview> _bulkPopulatePreviews = new List<FunctionEntityPreview>();
+	private readonly List<ModelReferencePreview> _bulkModelReferencePreviews = new List<ModelReferencePreview>();
+	private readonly List<BulkMeshSpawnJob> _bulkMeshSpawnJobs = new List<BulkMeshSpawnJob>();
+	private Dictionary<uint, List<Tuple<int, int>>> _modelRefRenderablesByEntityId;
+	private bool _bulkMeshSpawning;
+	private bool _deferBulkPickRegistration;
+	private readonly List<(MeshInstance3D Mesh, Node3D Owner)> _bulkPickableMeshes = new List<(MeshInstance3D, Node3D)>();
 
 	private LoadPipelineStep _loadStep = LoadPipelineStep.None;
 	private int _loadUiFrameCounter;
@@ -120,7 +129,8 @@ public partial class AlienScene : Node3D
 
 	private void UpdateLoadPipelineProcessing()
 	{
-		bool needsProcess = _loadStep != LoadPipelineStep.None || _largeScenePolicyRunning;
+		bool needsProcess = _loadStep != LoadPipelineStep.None
+			|| _largeScenePolicyRunning;
 		if (IsProcessing() != needsProcess)
 			SetProcess(needsProcess);
 	}
@@ -219,23 +229,24 @@ public partial class AlienScene : Node3D
 		if (selectedNode == null || !GodotObject.IsInstanceValid(selectedNode) || _parentNode == null)
 			return false;
 
-		Node3D entityNode = LevelViewerPick.ResolveNearestEntityNode(selectedNode, _nodeEntities);
-		if (entityNode == null || !_nodeEntities.TryGetValue(entityNode, out Entity entity))
-			return false;
-
-		if (entity is not FunctionEntity function)
+		Node3D entityNode = LevelViewerPick.ResolveNearestEntityNode(selectedNode, _nodeEntities) ?? selectedNode;
+		if (!_nodeEntities.TryGetValue(entityNode, out Entity entity))
 			return false;
 
 		Commands commands = _content?.Level?.Commands;
 		if (commands != null && LevelViewerPick.IsCompositeInstanceEntity(entity, commands))
-			return true;
+			return PreviewVisualUtility.HasValidWorldAnchor(entityNode);
 
 		uint ownerCompositeId = entityNode.HasMeta(OwnerCompositeMetaKey)
 			? entityNode.GetMeta(OwnerCompositeMetaKey).AsUInt32()
 			: 0;
 
-		return PreviewVisualUtility.SupportsTransformGizmo(function, ownerCompositeId)
-			&& PreviewVisualUtility.HasValidWorldAnchor(selectedNode);
+		FunctionEntity functionForGizmo = ResolveFunctionEntityForTransformGizmo(entity, entityNode, ownerCompositeId);
+		if (functionForGizmo == null)
+			return false;
+
+		return PreviewVisualUtility.SupportsTransformGizmo(functionForGizmo, ownerCompositeId)
+			&& PreviewVisualUtility.HasValidWorldAnchor(entityNode);
 	}
 
 	public bool TryHideSelectedEntity()
@@ -318,9 +329,11 @@ public partial class AlienScene : Node3D
 
 	private void ResetLevel()
 	{
+		LevelViewerLoadProfiler.CancelSession();
 		PreviewVisibilitySettings.LevelRootCompositeId = 0;
 		_isBulkPopulating = false;
 		_loadStep = LoadPipelineStep.None;
+		LevelViewerRenderIdleThrottle.SetLoadActive(false);
 
 		PreviewVisualUtility.CleanupAllFunctionEntityPreviews(this);
 		ClearSelectedEntity();
@@ -334,21 +347,28 @@ public partial class AlienScene : Node3D
 
 		_parentNode = null;
 
-		_materials.Clear();
-		_wireframeMaterials.Clear();
+		ClearPopulateMaterialCaches();
 		_modelReferenceMeshes.Clear();
 		CancelLargeSceneRenderPolicy();
 		ModelReferenceRenderSettings.ResetForLevelLoad();
-		_materialSupport.Clear();
 
-		foreach (KeyValuePair<Textures.TEX4, TexOrCube> kvp in _texturesLevel)
+		foreach (KeyValuePair<int, TexOrCube> kvp in _texturesLevelByIndex)
 		{
 			if (kvp.Value.Texture != null && GodotObject.IsInstanceValid(kvp.Value.Texture))
 				kvp.Value.Texture.Dispose();
 			if (kvp.Value.Cubemap != null && GodotObject.IsInstanceValid(kvp.Value.Cubemap))
 				kvp.Value.Cubemap.Dispose();
 		}
-		_texturesLevel.Clear();
+		_texturesLevelByIndex.Clear();
+
+		foreach (KeyValuePair<int, TexOrCube> kvp in _texturesGlobalByIndex)
+		{
+			if (kvp.Value.Texture != null && GodotObject.IsInstanceValid(kvp.Value.Texture))
+				kvp.Value.Texture.Dispose();
+			if (kvp.Value.Cubemap != null && GodotObject.IsInstanceValid(kvp.Value.Cubemap))
+				kvp.Value.Cubemap.Dispose();
+		}
+		_texturesGlobalByIndex.Clear();
 
 		AlienSceneTextures.ClearTransparencyCache();
 
@@ -359,6 +379,11 @@ public partial class AlienScene : Node3D
 
 		_compositeNodes.Clear();
 		_nodeEntities.Clear();
+		_bulkPopulatePreviews.Clear();
+		_bulkModelReferencePreviews.Clear();
+		_bulkMeshSpawnJobs.Clear();
+		_bulkPickableMeshes.Clear();
+		_modelRefRenderablesByEntityId = null;
 		ClearEntityNodeCache();
 
 		_contentOrigin = Vector3.Zero;
@@ -444,6 +469,7 @@ public partial class AlienScene : Node3D
 				if (++_loadUiFrameCounter < LoadUiRedrawFrameCount)
 					return;
 
+				LevelViewerLoadProfiler.Mark("wait_ui_before_populate");
 				_loadStep = LoadPipelineStep.PopulateComposite;
 				Callable.From(ExecutePopulateComposite).CallDeferred();
 				break;
@@ -463,10 +489,16 @@ public partial class AlienScene : Node3D
 
 		ViewerLog.Print("Loading level " + _queuedLevelName + "...");
 		ResetLevel();
+		LevelViewerLoadProfiler.BeginSession("level=" + _queuedLevelName);
+		LevelViewerLoadProfiler.Mark("reset_level");
+
 		_levelName = _queuedLevelName;
 		_content.Load(_queuedLevelPath, _queuedLevelName);
+		LevelViewerLoadProfiler.Mark("cathode_level_load");
+
 		LevelViewerShaderBytecode.ClearAsync(_content.Level?.Shaders?.Entries);
 		BuildSubmeshWriteIndexCache();
+		LevelViewerLoadProfiler.Mark("submesh_write_index_cache");
 
 		if (_content.Loaded && _content.Level.Commands.EntryPoints[0] != null)
 		{
@@ -482,6 +514,7 @@ public partial class AlienScene : Node3D
 			if (comp != null && (_loadedComposite == null || _loadedComposite.shortGUID != _queuedCompositeGuid))
 			{
 				string compositeLabel = string.IsNullOrWhiteSpace(comp.name) ? "composite" : comp.name;
+				LevelViewerLoadProfiler.Mark("level_load_complete_await_populate");
 				BeginWaitUiBeforeCompositePopulate("Loading " + compositeLabel + "...", comp);
 				return;
 			}
@@ -489,6 +522,7 @@ public partial class AlienScene : Node3D
 
 		_loadStep = LoadPipelineStep.None;
 		ViewerPopulateBridge.NotifySkipped();
+		LevelViewerLoadProfiler.EndSession();
 		UpdateLoadPipelineProcessing();
 	}
 
@@ -506,23 +540,40 @@ public partial class AlienScene : Node3D
 
 		ViewerPopulateBridge.NotifyStarted(GetPopulateDisplayLabel(comp));
 
-		try
+		if (!LevelViewerLoadProfiler.IsActive)
 		{
-			_isBulkPopulating = true;
-			_deferMeshTreeActivation = true;
-			FunctionEntityPreview.DeferVisualRefresh = true;
-			PopulateCompositeInternal(comp);
-		}
-		finally
-		{
-			FunctionEntityPreview.DeferVisualRefresh = false;
-			_deferMeshTreeActivation = false;
-			_isBulkPopulating = false;
+			LevelViewerLoadProfiler.BeginSession(
+				"composite=" + GetPopulateDisplayLabel(comp) + " level=" + _levelName);
 		}
 
+		LevelViewerLoadProfiler.Mark(
+			"composite_populate_begin",
+			"composite=" + GetPopulateDisplayLabel(comp));
+
+		_isBulkPopulating = true;
+		_deferMeshTreeActivation = true;
+		FunctionEntityPreview.DeferVisualRefresh = true;
+		PopulateCompositeInternal(comp);
+
 		_loadStep = LoadPipelineStep.None;
+		UpdateLoadPipelineProcessing();
+		CompletePopulate();
+	}
+
+	private void CompletePopulate()
+	{
+		LevelViewerRenderIdleThrottle.SetLoadActive(false);
+		FunctionEntityPreview.DeferVisualRefresh = false;
+		_deferMeshTreeActivation = false;
+		_isBulkPopulating = false;
+
+		// Filters are often applied from OpenCAGE before the entity tree exists; refresh now that spawn finished.
+		RefreshRenderFilters(null);
+		RefreshCompositeFocus();
+
 		OnLoaded?.Invoke();
 		ViewerPopulateBridge.NotifyFinished();
+		LevelViewerLoadProfiler.EndSession();
 		Callable.From(HideLoading).CallDeferred();
 		UpdateLoadPipelineProcessing();
 	}
@@ -540,16 +591,24 @@ public partial class AlienScene : Node3D
 
 	private void PopulateCompositeInternal(Composite comp)
 	{
+		LevelViewerLoadProfiler.Mark("composite_cleanup_begin");
 		_compositeNodes.Clear();
 		_nodeEntities.Clear();
 		_deferredPickOwners.Clear();
+		_bulkPopulatePreviews.Clear();
+		_bulkModelReferencePreviews.Clear();
+		_bulkMeshSpawnJobs.Clear();
+		_bulkPickableMeshes.Clear();
+		_modelRefRenderablesByEntityId = null;
 		ClearEntityNodeCache();
 		PreviewVisualUtility.CleanupAllFunctionEntityPreviews(this);
 		ClearSelectedEntity();
 		LevelViewerSelection.Clear();
 		LevelViewerPick.ClearRegistry();
+		LevelViewerCompositeFocus.Clear();
 		CancelLargeSceneRenderPolicy();
 		ModelReferenceRenderSettings.ResetForLevelLoad();
+		ClearPopulateMaterialCaches();
 
 		if (_parentNode != null && GodotObject.IsInstanceValid(_parentNode))
 			_parentNode.QueueFree();
@@ -561,7 +620,68 @@ public partial class AlienScene : Node3D
 
 		ViewerLog.Print("Loading composite " + comp?.name + "...");
 		_loadedComposite = comp;
-		AddCompositeInstance(comp, _parentNode, null);
+		LevelViewerLoadProfiler.Mark("composite_scene_reset");
+
+		LevelViewerPopulateTree.Plan spawnPlan =
+			LevelViewerPopulateTree.Collect(comp, _content, deferAliasProxy: true, includeVariables: false);
+		LevelViewerLoadProfiler.Mark(
+			"spawn_tree_collect",
+			"entities=" + spawnPlan.Commands.Count
+			+ " model_refs=" + spawnPlan.ModelReferences.Count
+			+ " cpu_ms=" + spawnPlan.CollectCpuMs.ToString("F0", System.Globalization.CultureInfo.InvariantCulture));
+
+		LevelViewerPopulatePrewarm.ModelReferenceCache modelRefCache =
+			LevelViewerPopulatePrewarm.BuildModelReferenceCache(spawnPlan.ModelReferences, _content);
+		_modelRefRenderablesByEntityId = modelRefCache.RenderablesByEntityId;
+		LevelViewerPopulatePrewarm.Plan prewarmPlan = modelRefCache.PrewarmPlan;
+		LevelViewerLoadProfiler.Mark(
+			"prewarm_collect_plan",
+			"meshes=" + prewarmPlan.MeshWriteIndices.Count
+			+ " textures=" + prewarmPlan.Textures.Count
+			+ " materials=" + prewarmPlan.Materials.Count
+			+ " cpu_ms=" + modelRefCache.BuildCpuMs.ToString("F0", System.Globalization.CultureInfo.InvariantCulture));
+		ViewerLog.Print(
+			"Population plan: "
+			+ prewarmPlan.MeshWriteIndices.Count + " meshes, "
+			+ prewarmPlan.Textures.Count + " textures, "
+			+ prewarmPlan.Materials.Count + " materials.");
+
+		LevelViewerPopulatePrewarm.Result prewarmResult = LevelViewerPopulatePrewarm.Execute(prewarmPlan, _content.Level);
+		LevelViewerLoadProfiler.Mark(
+			"prewarm_cpu_execute",
+			"cpu_ms=" + prewarmResult.CpuElapsedMs.ToString("F0", System.Globalization.CultureInfo.InvariantCulture));
+
+		FinalizePrewarmGodotResources(prewarmResult, prewarmPlan);
+
+		ViewerLog.Print(
+			"Spawn plan: "
+			+ spawnPlan.Commands.Count + " entities ("
+			+ spawnPlan.CollectCpuMs.ToString("F0") + " ms tree collect).");
+
+		LevelViewerRenderIdleThrottle.SetLoadActive(true);
+		RegisterCompositeNode(comp, _parentNode);
+
+		ShowLoading("Spawning " + spawnPlan.Commands.Count + " entities...");
+		Stopwatch entitySpawnStopwatch = Stopwatch.StartNew();
+		_nodeEntities.EnsureCapacity(spawnPlan.Commands.Count);
+		_parentNode.ProcessMode = Node.ProcessModeEnum.Disabled;
+		try
+		{
+			ApplyPopulateTree(spawnPlan, comp, _parentNode);
+		}
+		finally
+		{
+			_parentNode.ProcessMode = Node.ProcessModeEnum.Inherit;
+		}
+		entitySpawnStopwatch.Stop();
+		LevelViewerLoadProfiler.Mark(
+			"entity_spawn",
+			"entities=" + spawnPlan.Commands.Count
+			+ " ms=" + entitySpawnStopwatch.Elapsed.TotalMilliseconds.ToString("F0", System.Globalization.CultureInfo.InvariantCulture));
+		ViewerLog.Print(
+			"Spawned "
+			+ spawnPlan.Commands.Count + " entities ("
+			+ entitySpawnStopwatch.Elapsed.TotalMilliseconds.ToString("F0") + " ms).");
 
 		_wiringCompositeLinks = true;
 		try
@@ -572,40 +692,97 @@ public partial class AlienScene : Node3D
 		{
 			_wiringCompositeLinks = false;
 		}
+		LevelViewerLoadProfiler.Mark("wire_aliases");
 
+		ShowLoading("Spawning model-reference meshes...");
+		Stopwatch meshSpawnStopwatch = Stopwatch.StartNew();
 		FinishBulkPopulateVisuals();
+		meshSpawnStopwatch.Stop();
+		LevelViewerLoadProfiler.Mark(
+			"mesh_spawn",
+			"instances=" + _modelReferenceMeshes.Count
+			+ " ms=" + meshSpawnStopwatch.Elapsed.TotalMilliseconds.ToString("F0", System.Globalization.CultureInfo.InvariantCulture));
+		ViewerLog.Print(
+			"Spawned "
+			+ _modelReferenceMeshes.Count + " model-reference meshes ("
+			+ meshSpawnStopwatch.Elapsed.TotalMilliseconds.ToString("F0") + " ms).");
+
 		ModelReferenceRenderSettings.FinalizeLevelLoad(_modelReferenceMeshes.Count);
 		ReleaseCathodeBinarySourceData();
+		LevelViewerLoadProfiler.Mark(
+			"release_cathode_binary",
+			"cached_textures=" + CachedTextureCount);
 		ViewerLog.Print(
 			"Scene resources: "
 			+ _modelReferenceMeshes.Count + " mesh instances, "
 			+ _modelMeshesByWriteIndex.Count + " unique meshes, "
-			+ (_texturesLevel.Count + _texturesGlobal.Count) + " cached textures.");
+			+ CachedTextureCount + " cached textures.");
 		QueueLargeSceneRenderPolicyApply();
 		Callable.From(RefreshCompositeFocus).CallDeferred();
+		LevelViewerLoadProfiler.Mark(
+			"composite_finalize",
+			"unique_meshes=" + _modelMeshesByWriteIndex.Count);
 	}
+
+	private int CachedTextureCount => _texturesLevelByIndex.Count + _texturesGlobalByIndex.Count;
 
 	private void FinishBulkPopulateVisuals()
 	{
 		InvalidateFunctionEntityPreviewCache();
 		EnsureFunctionEntityPreviewCache();
 
-		for (int i = 0; i < _cachedFunctionEntityPreviews.Length; i++)
+		Models models = _content.Level.Models;
+		Materials materials = _content.Level.Materials;
+		_bulkMeshSpawning = true;
+		_deferBulkPickRegistration = true;
+		try
 		{
-			FunctionEntityPreview preview = _cachedFunctionEntityPreviews[i];
-			if (preview == null)
+			for (int i = 0; i < _bulkMeshSpawnJobs.Count; i++)
 			{
-				_functionEntityPreviewsCacheDirty = true;
-				continue;
-			}
+				BulkMeshSpawnJob job = _bulkMeshSpawnJobs[i];
+				if (job.RenderTarget == null || !GodotObject.IsInstanceValid(job.RenderTarget))
+					continue;
 
-			preview.Refresh();
-			preview.RegisterPickablesWithOwner();
+				Models.CS2.Component.LOD.Submesh submesh = models.GetAtWriteIndex(job.ModelWriteIndex);
+				Materials.Material material = materials.GetAtWriteIndex(job.MaterialWriteIndex);
+				if (submesh == null || material == null)
+					continue;
+
+				SpawnRenderable(job.RenderTarget, submesh, material);
+			}
+		}
+		finally
+		{
+			_bulkMeshSpawning = false;
+			_deferBulkPickRegistration = false;
 		}
 
-		FinalizeBulkPickRegistration();
+		LevelViewerLoadProfiler.Mark(
+			"model_ref_mesh_spawn",
+			"jobs=" + _bulkMeshSpawnJobs.Count
+			+ " instances=" + _modelReferenceMeshes.Count);
+
+		RegisterBulkMeshPickables();
+		LevelViewerLoadProfiler.Mark("pick_registration");
+
 		ActivateDeferredMeshes();
+		LevelViewerLoadProfiler.Mark("activate_meshes");
+
 		RefreshSelectedLightRadiusVisual();
+	}
+
+	private void RegisterBulkMeshPickables()
+	{
+		for (int i = 0; i < _bulkPickableMeshes.Count; i++)
+		{
+			(MeshInstance3D mesh, Node3D owner) = _bulkPickableMeshes[i];
+			if (mesh == null || !GodotObject.IsInstanceValid(mesh))
+				continue;
+
+			LevelViewerPick.RegisterPickableMesh(mesh, owner);
+		}
+
+		_bulkPickableMeshes.Clear();
 	}
 
 	private void FinalizeBulkPickRegistration()
@@ -627,6 +804,8 @@ public partial class AlienScene : Node3D
 			if (mesh == null || !GodotObject.IsInstanceValid(mesh))
 				continue;
 
+			if (!mesh.IsInGroup("model_reference_renderable"))
+				mesh.AddToGroup("model_reference_renderable");
 			mesh.Visible = true;
 			MeshInstance3D overlay = FindWireframeOverlay(mesh);
 			if (overlay != null)
@@ -830,6 +1009,126 @@ public partial class AlienScene : Node3D
 		}
 	}
 
+	private void ApplyPopulateTree(LevelViewerPopulateTree.Plan plan, Composite rootComposite, Node3D rootNode)
+	{
+		if (rootComposite == null || rootNode == null)
+			return;
+
+		RegisterCompositeNode(rootComposite, rootNode);
+		if (plan?.Commands == null || plan.Commands.Count == 0)
+			return;
+
+		Node3D[] spawnedNodes = new Node3D[plan.Commands.Count];
+		Commands commands = _content.Level.Commands;
+		Dictionary<ShortGuid, Composite> compositeCache = new Dictionary<ShortGuid, Composite>();
+
+		for (int i = 0; i < plan.Commands.Count; i++)
+		{
+			LevelViewerPopulateTree.Command command = plan.Commands[i];
+			if (!compositeCache.TryGetValue(command.CompositeId, out Composite composite))
+			{
+				composite = commands.GetComposite(command.CompositeId);
+				compositeCache[command.CompositeId] = composite;
+			}
+
+			if (composite == null)
+				continue;
+
+			Node3D parentNode = command.ParentIndex < 0 ? rootNode : spawnedNodes[command.ParentIndex];
+			if (parentNode == null)
+				continue;
+
+			spawnedNodes[i] = SpawnEntityFromPopulateCommand(composite, command.Entity, parentNode, command);
+		}
+	}
+
+	private Node3D SpawnEntityFromPopulateCommand(
+		Composite composite,
+		Entity entity,
+		Node3D parentNode,
+		LevelViewerPopulateTree.Command? planCommand = null)
+	{
+		if (_isBulkPopulating && !_wiringCompositeLinks
+			&& (entity.variant == EntityVariant.ALIAS || entity.variant == EntityVariant.PROXY))
+		{
+			return null;
+		}
+
+		Vector3 position;
+		Vector3 rotation;
+		if (planCommand.HasValue && planCommand.Value.HasTransform)
+		{
+			position = planCommand.Value.Position;
+			rotation = planCommand.Value.RotationDegrees;
+		}
+		else
+		{
+			GetEntityTransform(entity, out position, out rotation);
+		}
+
+		string nodeName = planCommand.HasValue ? planCommand.Value.NodeName : entity.shortGUID.AsUInt32.ToString();
+
+		Node3D entityNode;
+		switch (entity.variant)
+		{
+			case EntityVariant.ALIAS:
+			case EntityVariant.PROXY:
+				entityNode = new EntityOverride { Name = nodeName };
+				break;
+			default:
+				entityNode = new Node3D { Name = nodeName };
+				break;
+		}
+
+		parentNode.AddChild(entityNode);
+		entityNode.Position = position;
+		entityNode.RotationDegrees = rotation;
+		entityNode.SetMeta(OwnerCompositeMetaKey, composite.shortGUID.AsUInt32);
+		_nodeEntities.Add(entityNode, entity);
+		TrackEntityNode(composite.shortGUID, entity.shortGUID, entityNode);
+
+		switch (entity.variant)
+		{
+			case EntityVariant.ALIAS:
+			case EntityVariant.PROXY:
+				ApplyAliasOrProxyOverrides(composite, entity, entityNode);
+				break;
+			case EntityVariant.FUNCTION:
+			{
+				FunctionEntity function = (FunctionEntity)entity;
+				if (!function.function.IsFunctionType)
+				{
+					Composite compositeNext = _content.Level.Commands.GetComposite(function.function);
+					if (compositeNext != null)
+						RegisterCompositeNode(compositeNext, entityNode);
+				}
+				else
+				{
+					bool geometryOnly = _isBulkPopulating && !_wiringCompositeLinks;
+					if (FunctionEntityPreviewSetup.TryAddPreview(
+						this,
+						function,
+						entityNode,
+						_content.Level.Commands.Utils,
+						composite.shortGUID,
+						geometryOnly))
+					{
+						_functionEntityPreviewsCacheDirty = true;
+						if (_isBulkPopulating)
+							TrackBulkPopulatePreview(entityNode, function);
+					}
+
+					if (!_isBulkPopulating)
+						LevelViewerPick.RegisterPickableSubtree(entityNode);
+				}
+
+				break;
+			}
+		}
+
+		return entityNode;
+	}
+
 	/// <summary>Wires aliases/proxies after the full composite instance tree exists.</summary>
 	private void WireCompositeAliasProxies(Composite composite, Node3D instanceRoot)
 	{
@@ -864,16 +1163,18 @@ public partial class AlienScene : Node3D
 			{
 				AliasEntity alias = (AliasEntity)entity;
 				EntityOverride aliasOverride = (EntityOverride)entityNode;
-				if (TryResolveAliasPointedSceneNode(aliasOverride, alias, composite, out Node3D aliasedNode)
-					&& alias.GetParameter("position") != null)
+				if (TryResolveAliasPointedSceneNode(aliasOverride, alias, composite, out Node3D aliasedNode))
 				{
-					EntityNodeUtil.SetPointed(aliasedNode, true);
-					aliasedNode.Position = entityNode.Position;
-					aliasedNode.RotationDegrees = entityNode.RotationDegrees;
-					if (!_isBulkPopulating)
+					if (alias.GetParameter("position") != null)
 					{
-						LevelViewerAliasHighlight.InvalidateCache();
-						LevelViewerProxyHighlight.InvalidateCache();
+						EntityNodeUtil.SetPointed(aliasedNode, true);
+						aliasedNode.Position = entityNode.Position;
+						aliasedNode.RotationDegrees = entityNode.RotationDegrees;
+						if (!_isBulkPopulating)
+						{
+							LevelViewerAliasHighlight.InvalidateCache();
+							LevelViewerProxyHighlight.InvalidateCache();
+						}
 					}
 				}
 
@@ -938,62 +1239,15 @@ public partial class AlienScene : Node3D
 
 	private void AddEntity(Composite composite, Entity entity, Node3D parentNode)
 	{
-		if (_isBulkPopulating && !_wiringCompositeLinks
-			&& (entity.variant == EntityVariant.ALIAS || entity.variant == EntityVariant.PROXY))
-		{
+		Node3D entityNode = SpawnEntityFromPopulateCommand(composite, entity, parentNode);
+		if (entityNode == null)
 			return;
-		}
 
-		GetEntityTransform(entity, out Vector3 position, out Vector3 rotation);
-
-		Node3D entityNode;
-		switch (entity.variant)
+		if (entity is FunctionEntity function && !function.function.IsFunctionType)
 		{
-			case EntityVariant.ALIAS:
-			case EntityVariant.PROXY:
-				entityNode = new EntityOverride { Name = entity.shortGUID.AsUInt32.ToString() };
-				break;
-			default:
-				entityNode = new Node3D { Name = entity.shortGUID.AsUInt32.ToString() };
-				break;
-		}
-
-		parentNode.AddChild(entityNode);
-		entityNode.Position = position;
-		entityNode.RotationDegrees = rotation;
-		entityNode.SetMeta(OwnerCompositeMetaKey, composite.shortGUID.AsUInt32);
-		_nodeEntities.Add(entityNode, entity);
-		TrackEntityNode(composite.shortGUID, entity.shortGUID, entityNode);
-
-		switch (entity.variant)
-		{
-			case EntityVariant.ALIAS:
-			case EntityVariant.PROXY:
-				ApplyAliasOrProxyOverrides(composite, entity, entityNode);
-				break;
-			case EntityVariant.FUNCTION:
-			{
-				FunctionEntity function = (FunctionEntity)entity;
-				if (!function.function.IsFunctionType)
-				{
-					Composite compositeNext = _content.Level.Commands.GetComposite(function.function);
-					if (compositeNext != null)
-						AddCompositeInstance(compositeNext, entityNode, function);
-					// Nested composites register pickables per inner entity — do not stamp this whole subtree.
-				}
-				else
-				{
-					if (FunctionEntityPreviewSetup.TryAddPreview(this, function, entityNode, _content.Level.Commands.Utils, composite.shortGUID))
-						_functionEntityPreviewsCacheDirty = true;
-
-					if (_isBulkPopulating)
-						_deferredPickOwners.Add(entityNode);
-					else
-						LevelViewerPick.RegisterPickableSubtree(entityNode);
-				}
-
-				break;
-			}
+			Composite compositeNext = _content.Level.Commands.GetComposite(function.function);
+			if (compositeNext != null)
+				AddCompositeInstance(compositeNext, entityNode, function);
 		}
 	}
 
@@ -1275,7 +1529,9 @@ public partial class AlienScene : Node3D
 
 		try
 		{
-			LevelViewerCompositeFocus.Refresh(_parentNode, _parentNode, _content.Level.Commands);
+			LevelViewerCompositeFocus.SetScopeEvaluationContext(_nodeEntities, _parentNode);
+			Node3D focusAnchor = TryResolveInstanceFocusAnchor(PreviewVisibilitySettings.CompositeFocusInstancePath);
+			LevelViewerCompositeFocus.Refresh(_parentNode, _parentNode, _content.Level.Commands, focusAnchor, _nodeEntities);
 			RefreshProxyHighlights(forceRebuild: false);
 			RefreshAliasHighlights(forceRebuild: false);
 		}
@@ -1381,10 +1637,61 @@ public partial class AlienScene : Node3D
 		if (entityNode == null)
 			return null;
 
+		if (_nodeEntities.TryGetValue(entityNode, out Entity entity))
+			return ResolveSelectionVisualRoot(entityNode, entity) ?? entityNode;
+
+		return entityNode;
+	}
+
+	private Node3D ResolveSelectionVisualRoot(Node3D entityNode, Entity entity)
+	{
 		if (entityNode is EntityOverride entityOverride && entityOverride.PointedEntity != null)
 			return entityOverride.PointedEntity;
 
+		if (entity is AliasEntity alias && entityNode is EntityOverride aliasOverride)
+		{
+			if (!entityNode.HasMeta(OwnerCompositeMetaKey))
+				return entityNode;
+
+			Composite composite = _content?.Level?.Commands?.GetComposite(
+				new ShortGuid(entityNode.GetMeta(OwnerCompositeMetaKey).AsUInt32()));
+			if (composite != null
+				&& TryResolveAliasPointedSceneNode(aliasOverride, alias, composite, out Node3D pointedNode))
+			{
+				return pointedNode;
+			}
+		}
+
+		if (entity is ProxyEntity proxy && entityNode is EntityOverride proxyOverride)
+		{
+			if (proxyOverride.PointedEntity != null)
+				return proxyOverride.PointedEntity;
+
+			Node3D proxiedNode = GetEntityNode(EntityPathToGUIDList(proxy.proxy), ParentNode);
+			if (proxiedNode != null)
+			{
+				proxyOverride.PointedEntity = proxiedNode;
+				return proxiedNode;
+			}
+		}
+
 		return entityNode;
+	}
+
+	private FunctionEntity ResolveFunctionEntityForTransformGizmo(Entity entity, Node3D entityNode, uint ownerCompositeId)
+	{
+		if (entity is FunctionEntity function)
+			return function;
+
+		Node3D visualRoot = ResolveSelectionVisualRoot(entityNode, entity);
+		if (visualRoot != null
+			&& _nodeEntities.TryGetValue(visualRoot, out Entity pointedEntity)
+			&& pointedEntity is FunctionEntity pointedFunction)
+		{
+			return pointedFunction;
+		}
+
+		return null;
 	}
 
 	private Node3D GetEntityNode(List<uint> path, Node3D parent)
@@ -1400,6 +1707,92 @@ public partial class AlienScene : Node3D
 		{
 		}
 		return null;
+	}
+
+	private Node3D TryResolveInstanceFocusAnchor(uint[] instanceEntityPath)
+	{
+		if (_parentNode == null)
+			return null;
+
+		if (instanceEntityPath == null || instanceEntityPath.Length == 0)
+			return _parentNode;
+
+		Node3D node = GetEntityNode(new List<uint>(instanceEntityPath), _parentNode);
+		if (node != null)
+			return node;
+
+		return TryFindCachedEntityNodeMatchingInstancePath(instanceEntityPath);
+	}
+
+	private Node3D TryFindCachedEntityNodeMatchingInstancePath(uint[] instanceEntityPath)
+	{
+		if (instanceEntityPath == null || instanceEntityPath.Length == 0)
+			return null;
+
+		uint leafEntity = instanceEntityPath[instanceEntityPath.Length - 1];
+		foreach (KeyValuePair<ulong, List<Node3D>> entry in _entityNodesByKey)
+		{
+			if ((entry.Key & 0xFFFFFFFF) != leafEntity)
+				continue;
+
+			List<Node3D> nodes = entry.Value;
+			if (nodes == null)
+				continue;
+
+			for (int i = 0; i < nodes.Count; i++)
+			{
+				Node3D candidate = nodes[i];
+				if (candidate == null || !GodotObject.IsInstanceValid(candidate))
+					continue;
+
+				if (!TryBuildEntityIdChainFromNode(candidate, out List<uint> chain))
+					continue;
+
+				if (InstanceEntityPathMatchesChain(instanceEntityPath, chain))
+					return candidate;
+			}
+		}
+
+		return null;
+	}
+
+	private bool TryBuildEntityIdChainFromNode(Node3D start, out List<uint> entityIds)
+	{
+		entityIds = new List<uint>();
+		if (start == null || _parentNode == null)
+			return false;
+
+		Node current = start;
+		while (current != null && current != _parentNode)
+		{
+			if (current is Node3D node3D && _nodeEntities.TryGetValue(node3D, out Entity entity))
+				entityIds.Add(entity.shortGUID.AsUInt32);
+
+			current = current.GetParent();
+		}
+
+		if (entityIds.Count == 0)
+			return false;
+
+		entityIds.Reverse();
+		return true;
+	}
+
+	private static bool InstanceEntityPathMatchesChain(uint[] instanceEntityPath, List<uint> chain)
+	{
+		if (instanceEntityPath == null || instanceEntityPath.Length == 0)
+			return true;
+
+		if (chain == null || chain.Count < instanceEntityPath.Length)
+			return false;
+
+		for (int i = 0; i < instanceEntityPath.Length; i++)
+		{
+			if (chain[i] != instanceEntityPath[i])
+				return false;
+		}
+
+		return true;
 	}
 
 	private List<uint> EntityPathToGUIDList(EntityPath path)
@@ -1558,6 +1951,8 @@ public partial class AlienScene : Node3D
 		if (entityNode == null)
 			return;
 
+		EnsureLazyFunctionEntityPreview(entityNode);
+
 		BoxPreview[] boxPreviews = EntityNodeUtil.FindPreviews<BoxPreview>(entityNode);
 		for (int i = 0; i < boxPreviews.Length; i++)
 			boxPreviews[i].Refresh();
@@ -1578,7 +1973,8 @@ public partial class AlienScene : Node3D
 			others[i].Refresh();
 		}
 
-		LevelViewerPick.RegisterPickableSubtree(entityNode);
+		for (int i = 0; i < others.Length; i++)
+			others[i].SyncPickablesWithVisibility();
 		if (_selectedEntity != null && GodotObject.IsInstanceValid(_selectedEntity))
 		{
 			Node3D selectedEntityNode = LevelViewerPick.ResolveNearestEntityNode(_selectedEntity, _nodeEntities);
@@ -1593,14 +1989,189 @@ public partial class AlienScene : Node3D
 		_previewsByOwnerComposite.Clear();
 	}
 
+	private bool EnsureLazyFunctionEntityPreview(Node3D entityNode)
+	{
+		if (entityNode == null || !_nodeEntities.TryGetValue(entityNode, out Entity entity))
+			return false;
+
+		if (entity is not FunctionEntity function || !function.function.IsFunctionType)
+			return false;
+
+		if (function.function.AsFunctionType == FunctionType.ModelReference)
+			return false;
+
+		if (EntityNodeUtil.FindAllPreviews(entityNode).Length > 0)
+			return false;
+
+		if (!entityNode.HasMeta(OwnerCompositeMetaKey))
+			return false;
+
+		ShortGuid ownerComposite = new ShortGuid(entityNode.GetMeta(OwnerCompositeMetaKey).AsUInt32());
+		if (!FunctionEntityPreviewSetup.TryAddPreview(
+			this,
+			function,
+			entityNode,
+			_content.Level.Commands.Utils,
+			ownerComposite))
+		{
+			return false;
+		}
+
+		TrackMaterializedFunctionEntityPreview(entityNode);
+		return true;
+	}
+
+	private void TrackMaterializedFunctionEntityPreview(Node3D entityNode)
+	{
+		_functionEntityPreviewsCacheDirty = true;
+		FunctionEntityPreview[] previews = EntityNodeUtil.FindAllPreviews(entityNode);
+		for (int i = 0; i < previews.Length; i++)
+		{
+			FunctionEntityPreview preview = previews[i];
+			if (preview == null || preview is ModelReferencePreview)
+				continue;
+
+			_bulkPopulatePreviews.Add(preview);
+		}
+	}
+
+	private static bool ShouldMaterializeFunctionPreview(
+		FunctionEntity function,
+		uint ownerCompositeId,
+		HashSet<uint> changedFunctionTypes)
+	{
+		if (function == null || !function.function.IsFunctionType)
+			return false;
+
+		FunctionType functionType = function.function.AsFunctionType;
+		if (functionType == FunctionType.ModelReference)
+			return false;
+
+		if (!RenderFilterDefinitions.IsSupported(functionType))
+			return false;
+
+		uint functionTypeId = (uint)functionType;
+		if (changedFunctionTypes != null && !changedFunctionTypes.Contains(functionTypeId))
+			return false;
+
+		if (!RenderFilters.IsEnabled(functionType))
+			return false;
+
+		return PreviewVisualUtility.IsPreviewVisible(function, ownerCompositeId);
+	}
+
+	private void MaterializeLazyPreviewsForRenderFilters(HashSet<uint> changedFunctionTypes)
+	{
+		if (changedFunctionTypes != null)
+		{
+			bool anyEnabled = false;
+			foreach (uint functionTypeId in changedFunctionTypes)
+			{
+				if (RenderFilters.IsEnabled(functionTypeId))
+				{
+					anyEnabled = true;
+					break;
+				}
+			}
+
+			if (!anyEnabled)
+				return;
+		}
+
+		foreach (KeyValuePair<Node3D, Entity> entry in _nodeEntities)
+		{
+			Node3D entityNode = entry.Key;
+			if (entityNode == null || !GodotObject.IsInstanceValid(entityNode))
+				continue;
+
+			if (entry.Value is not FunctionEntity function)
+				continue;
+
+			if (!entityNode.HasMeta(OwnerCompositeMetaKey))
+				continue;
+
+			uint ownerCompositeId = entityNode.GetMeta(OwnerCompositeMetaKey).AsUInt32();
+			if (!ShouldMaterializeFunctionPreview(function, ownerCompositeId, changedFunctionTypes))
+				continue;
+
+			EnsureLazyFunctionEntityPreview(entityNode);
+		}
+	}
+
+	private void MaterializeLazyPreviewsForComposite(uint ownerCompositeId, HashSet<uint> changedFunctionTypes = null)
+	{
+		foreach (KeyValuePair<Node3D, Entity> entry in _nodeEntities)
+		{
+			Node3D entityNode = entry.Key;
+			if (entityNode == null || !GodotObject.IsInstanceValid(entityNode))
+				continue;
+
+			if (!entityNode.HasMeta(OwnerCompositeMetaKey))
+				continue;
+
+			if (entityNode.GetMeta(OwnerCompositeMetaKey).AsUInt32() != ownerCompositeId)
+				continue;
+
+			if (entry.Value is not FunctionEntity function)
+				continue;
+
+			if (!ShouldMaterializeFunctionPreview(function, ownerCompositeId, changedFunctionTypes))
+				continue;
+
+			EnsureLazyFunctionEntityPreview(entityNode);
+		}
+	}
+
+	private void TrackBulkPopulatePreview(Node3D entityNode, FunctionEntity function)
+	{
+		if (entityNode == null || function == null)
+			return;
+
+		for (int i = entityNode.GetChildCount() - 1; i >= 0; i--)
+		{
+			if (entityNode.GetChild(i) is not FunctionEntityPreview preview)
+				continue;
+
+			_bulkPopulatePreviews.Add(preview);
+			if (preview is not ModelReferencePreview modelPreview)
+				return;
+
+			_bulkModelReferencePreviews.Add(modelPreview);
+			if (_modelRefRenderablesByEntityId == null
+				|| !_modelRefRenderablesByEntityId.TryGetValue(function.shortGUID.AsUInt32, out List<Tuple<int, int>> renderables)
+				|| renderables == null)
+			{
+				return;
+			}
+
+			Node3D renderTarget = modelPreview.GetPopulateRenderTarget();
+			if (renderTarget == null)
+				return;
+
+			for (int j = 0; j < renderables.Count; j++)
+			{
+				Tuple<int, int> renderable = renderables[j];
+				if (renderable.Item1 < 0 || renderable.Item2 < 0)
+					continue;
+
+				_bulkMeshSpawnJobs.Add(new BulkMeshSpawnJob(renderTarget, renderable.Item1, renderable.Item2));
+			}
+
+			return;
+		}
+	}
+
 	private void EnsureFunctionEntityPreviewCache()
 	{
 		if (!_functionEntityPreviewsCacheDirty)
 			return;
 
-		_cachedFunctionEntityPreviews = _parentNode == null
-			? Array.Empty<FunctionEntityPreview>()
-			: EntityNodeUtil.FindAllPreviews(_parentNode);
+		if (_bulkPopulatePreviews.Count > 0)
+			_cachedFunctionEntityPreviews = _bulkPopulatePreviews.ToArray();
+		else if (_parentNode == null)
+			_cachedFunctionEntityPreviews = System.Array.Empty<FunctionEntityPreview>();
+		else
+			_cachedFunctionEntityPreviews = EntityNodeUtil.FindAllPreviews(_parentNode);
 		_previewsByOwnerComposite.Clear();
 
 		for (int i = 0; i < _cachedFunctionEntityPreviews.Length; i++)
@@ -1627,17 +2198,20 @@ public partial class AlienScene : Node3D
 		if (_parentNode == null)
 			return;
 
-		EnsureFunctionEntityPreviewCache();
-
 		if (previousActiveCompositeId != 0)
 			RefreshVisibilityForComposite(previousActiveCompositeId);
 
 		if (newActiveCompositeId != 0 && newActiveCompositeId != previousActiveCompositeId)
 			RefreshVisibilityForComposite(newActiveCompositeId);
+
+		RefreshCompositeFocus();
 	}
 
 	private void RefreshVisibilityForComposite(uint ownerCompositeId)
 	{
+		MaterializeLazyPreviewsForComposite(ownerCompositeId);
+		EnsureFunctionEntityPreviewCache();
+
 		if (!_previewsByOwnerComposite.TryGetValue(ownerCompositeId, out List<FunctionEntityPreview> previews))
 			return;
 
@@ -1654,6 +2228,7 @@ public partial class AlienScene : Node3D
 		if (_parentNode == null)
 			return;
 
+		MaterializeLazyPreviewsForRenderFilters(changedFunctionTypes);
 		EnsureFunctionEntityPreviewCache();
 
 		for (int i = 0; i < _cachedFunctionEntityPreviews.Length; i++)
@@ -1676,9 +2251,10 @@ public partial class AlienScene : Node3D
 			}
 
 			preview.Refresh();
-			preview.RegisterPickablesWithOwner();
+			preview.SyncPickablesWithVisibility();
 		}
 
+		RefreshCompositeFocus();
 		RefreshSelectedLightRadiusVisual();
 	}
 
@@ -1832,10 +2408,10 @@ public partial class AlienScene : Node3D
 		if (parent == null)
 			return;
 
-		foreach (Node child in parent.GetChildren().ToArray())
+		for (int i = parent.GetChildCount() - 1; i >= 0; i--)
 		{
-			if (child is MeshInstance3D)
-				child.QueueFree();
+			if (parent.GetChild(i) is MeshInstance3D mesh)
+				mesh.QueueFree();
 		}
 	}
 
@@ -1946,23 +2522,31 @@ public partial class AlienScene : Node3D
 		if (!IsMaterialSupported(material))
 			return;
 
-		ModelReferenceRenderSettings.NotifyMeshSpawned(_modelReferenceMeshes.Count + 1);
+		if (!_bulkMeshSpawning)
+			ModelReferenceRenderSettings.NotifyMeshSpawned(_modelReferenceMeshes.Count + 1);
 
 		MeshInstance3D meshInstance = new MeshInstance3D
 		{
-			Name = holder.MainMesh.ResourceName + " (" + material.Name + ")",
 			Mesh = holder.MainMesh,
-			Visible = true,
+			Visible = !_deferMeshTreeActivation,
 		};
+		if (!_bulkMeshSpawning)
+			meshInstance.Name = holder.MainMesh.ResourceName + " (" + material.Name + ")";
+
 		LevelViewerMeshUtil.ConfigureMeshInstance(meshInstance);
-		meshInstance.AddToGroup("model_reference_renderable");
-		meshInstance.TreeExited += () => _modelReferenceMeshes.Remove(meshInstance);
+		if (!_bulkMeshSpawning)
+			meshInstance.AddToGroup("model_reference_renderable");
+		if (!_bulkMeshSpawning)
+			meshInstance.TreeExited += () => _modelReferenceMeshes.Remove(meshInstance);
 		_modelReferenceMeshes[meshInstance] = material;
 		meshInstance.MaterialOverride = GetSolidMaterial(material);
 		parent.AddChild(meshInstance);
-		if (ModelReferenceRenderSettings.WireframeEnabled)
+		if (!_bulkMeshSpawning && ModelReferenceRenderSettings.WireframeEnabled)
 			UpdateWireframeOverlay(meshInstance, material);
-		LevelViewerPick.RegisterPickableMesh(meshInstance, parent);
+		if (_deferBulkPickRegistration)
+			_bulkPickableMeshes.Add((meshInstance, parent));
+		else if (!_bulkMeshSpawning)
+			LevelViewerPick.RegisterPickableMesh(meshInstance, parent);
 		if (_deferMeshTreeActivation)
 		{
 			meshInstance.Visible = false;
@@ -2021,23 +2605,7 @@ public partial class AlienScene : Node3D
 
 	private bool GetEntityTransform(Entity entity, out Vector3 position, out Vector3 rotation)
 	{
-		position = Vector3.Zero;
-		rotation = Vector3.Zero;
-		if (entity == null) return false;
-
-		Parameter positionParam = entity.GetParameter("position");
-		if (positionParam != null && positionParam.content != null)
-		{
-			switch (positionParam.content.dataType)
-			{
-				case DataType.TRANSFORM:
-					cTransform transform = (cTransform)positionParam.content;
-					position = CathodeCoordinates.PositionToGodot(transform.position);
-					rotation = CathodeCoordinates.EulerDegreesToGodot(transform.rotation);
-					return true;
-			}
-		}
-		return false;
+		return LevelViewerPopulateTree.TryGetSpawnTransform(entity, out position, out rotation);
 	}
 
 	private void BuildSubmeshWriteIndexCache()
@@ -2047,10 +2615,11 @@ public partial class AlienScene : Node3D
 		if (models?.Entries == null)
 			return;
 
-		foreach (Models.CS2 model in models.Entries)
+		object gate = new object();
+		System.Threading.Tasks.Parallel.ForEach(models.Entries, model =>
 		{
 			if (model?.Components == null)
-				continue;
+				return;
 
 			foreach (Models.CS2.Component component in model.Components)
 			{
@@ -2068,12 +2637,17 @@ public partial class AlienScene : Node3D
 							continue;
 
 						int writeIndex = models.GetWriteIndex(submesh);
-						if (writeIndex >= 0)
+						if (writeIndex < 0)
+							continue;
+
+						lock (gate)
+						{
 							_submeshWriteIndexByReference[submesh] = writeIndex;
+						}
 					}
 				}
 			}
-		}
+		});
 	}
 
 	private bool TryResolveSubmeshWriteIndex(Models.CS2.Component.LOD.Submesh submesh, out int writeIndex)
@@ -2181,6 +2755,26 @@ public partial class AlienScene : Node3D
 		}
 
 		return _wireframeMaterials[material];
+	}
+
+	private void ClearPopulateMaterialCaches()
+	{
+		foreach (KeyValuePair<Materials.Material, ShaderMaterial> entry in _materials)
+		{
+			if (entry.Value != null && GodotObject.IsInstanceValid(entry.Value))
+				entry.Value.Dispose();
+		}
+
+		_materials.Clear();
+		_materialSupport.Clear();
+
+		foreach (KeyValuePair<Materials.Material, ShaderMaterial> entry in _wireframeMaterials)
+		{
+			if (entry.Value != null && GodotObject.IsInstanceValid(entry.Value))
+				entry.Value.Dispose();
+		}
+
+		_wireframeMaterials.Clear();
 	}
 
 	private void EnsureSolidMaterial(Materials.Material material)
@@ -2309,7 +2903,7 @@ public partial class AlienScene : Node3D
 
 	public Texture2D GetDiffuseTexture(Materials.Material material, Shaders.Shader shader, int samplerIndex)
 	{
-		if (shader.SamplerRemaps.Count <= samplerIndex)
+		if (samplerIndex < 0 || shader.SamplerRemaps.Count <= samplerIndex)
 			return null;
 
 		int diffuseMapIndex = shader.SamplerRemaps[samplerIndex];
@@ -2324,23 +2918,50 @@ public partial class AlienScene : Node3D
 		return texture?.Texture;
 	}
 
+	private Textures GetTexturesForSource(TexturePtr.Source source) =>
+		source == TexturePtr.Source.GLOBAL ? LevelContent.Global?.Textures : _content?.Level?.Textures;
+
+	private Dictionary<int, TexOrCube> GetTextureCacheForSource(TexturePtr.Source source) =>
+		source == TexturePtr.Source.GLOBAL ? _texturesGlobalByIndex : _texturesLevelByIndex;
+
+	private int GetTextureWriteIndex(Textures.TEX4 tex, TexturePtr.Source source)
+	{
+		if (tex == null)
+			return -1;
+
+		return GetTexturesForSource(source)?.GetWriteIndex(tex) ?? -1;
+	}
+
+	private bool TryGetCachedTexture(TexturePtr.Source source, int writeIndex, out TexOrCube cached)
+	{
+		cached = null;
+		if (writeIndex < 0)
+			return false;
+
+		return GetTextureCacheForSource(source).TryGetValue(writeIndex, out cached);
+	}
+
+	private void StoreCachedTexture(TexturePtr.Source source, int writeIndex, TexOrCube tex)
+	{
+		if (writeIndex < 0 || tex == null)
+			return;
+
+		GetTextureCacheForSource(source)[writeIndex] = tex;
+	}
+
 	private TexOrCube GetTexOrCube(TexturePtr ptr)
 	{
 		if (ptr == null || ptr.Location == TexturePtr.Source.NONE || ptr.Texture == null)
 			return null;
 
-		Dictionary<Textures.TEX4, TexOrCube> cache = ptr.Location == TexturePtr.Source.GLOBAL
-			? _texturesGlobal
-			: _texturesLevel;
-
-		if (cache.TryGetValue(ptr.Texture, out TexOrCube cached))
+		int writeIndex = GetTextureWriteIndex(ptr.Texture, ptr.Location);
+		if (writeIndex >= 0 && TryGetCachedTexture(ptr.Location, writeIndex, out TexOrCube cached))
 			return cached;
 
-		Textures.TEX4.Texture texPart = ptr.Texture.TextureStreamed == null
-			? ptr.Texture.TexturePersistent
-			: ptr.Texture.TextureStreamed;
+		Dictionary<int, TexOrCube> cache = GetTextureCacheForSource(ptr.Location);
 
-		if (texPart == null || texPart.Content == null || texPart.Content.Length == 0)
+		Textures.TEX4.Texture texPart = SelectTexPartForConversion(ptr.Texture);
+		if (texPart == null)
 			return null;
 
 		TexOrCube tex = new TexOrCube();
@@ -2387,13 +3008,160 @@ public partial class AlienScene : Node3D
 		if (tex.Texture == null)
 			return null;
 
-		if (ptr.Texture.TextureStreamed != null)
-			ptr.Texture.TextureStreamed.Content = null;
-		if (ptr.Texture.TexturePersistent != null)
-			ptr.Texture.TexturePersistent.Content = null;
+		ReleaseTex4SourceContent(ptr.Texture);
 
-		cache.Add(ptr.Texture, tex);
+		if (writeIndex >= 0)
+			cache[writeIndex] = tex;
+
 		return tex;
+	}
+
+	private void FinalizePrewarmGodotResources(
+		LevelViewerPopulatePrewarm.Result result,
+		LevelViewerPopulatePrewarm.Plan plan)
+	{
+		if (result == null || plan == null || _content?.Level == null)
+			return;
+
+		LevelViewerLoadProfiler.Mark("prewarm_godot_begin");
+		Stopwatch stopwatch = Stopwatch.StartNew();
+		Models models = _content.Level.Models;
+		int meshCount = 0;
+		int textureCount = 0;
+
+		foreach (KeyValuePair<int, ParsedMeshSurface> entry in result.Meshes)
+		{
+			int writeIndex = entry.Key;
+			if (_modelMeshesByWriteIndex.ContainsKey(writeIndex))
+				continue;
+
+			Models.CS2.Component.LOD.Submesh submesh = models?.GetAtWriteIndex(writeIndex);
+			if (submesh == null || !entry.Value.IsValid)
+				continue;
+
+			ArrayMesh arrayMesh = entry.Value.ToArrayMesh();
+			if (arrayMesh == null || arrayMesh.GetSurfaceCount() == 0)
+			{
+				arrayMesh?.Dispose();
+				continue;
+			}
+
+			Models.CS2.Component.LOD lod = models.FindModelLOD(submesh);
+			Models.CS2 mesh = models.FindModel(submesh);
+			arrayMesh.ResourceName = ((mesh == null) ? "?" : mesh.Name) + ": " + ((lod == null) ? "?" : lod.Name);
+			arrayMesh.ResourceLocalToScene = false;
+			submesh.Data = null;
+
+			_modelMeshesByWriteIndex[writeIndex] = new MeshHolder
+			{
+				MainMesh = arrayMesh,
+				DefaultMaterial = submesh.Material,
+			};
+			meshCount++;
+		}
+		LevelViewerLoadProfiler.Mark(
+			"prewarm_godot_meshes",
+			"converted=" + meshCount + "/" + result.Meshes.Count);
+
+		foreach (KeyValuePair<Textures.TEX4, BakedTextureCpu> entry in result.Textures)
+		{
+			Textures.TEX4 tex4 = entry.Key;
+			if (tex4 == null)
+				continue;
+
+			TexturePtr.Source location = plan.TextureLocations.TryGetValue(tex4, out TexturePtr.Source stored)
+				? stored
+				: TexturePtr.Source.LEVEL;
+
+			int writeIndex = GetTextureWriteIndex(tex4, location);
+			if (writeIndex >= 0 && TryGetCachedTexture(location, writeIndex, out _))
+				continue;
+
+			Texture2D texture = AlienSceneTextures.CreateTextureFromBaked(entry.Value, tex4.Name);
+			if (texture == null)
+				continue;
+
+			StoreCachedTexture(location, writeIndex, new TexOrCube { Texture = texture });
+			ReleaseTex4SourceContent(tex4);
+			textureCount++;
+		}
+
+		int missingTextureCount = ConvertMissingPlanTextures(plan);
+		textureCount += missingTextureCount;
+		LevelViewerLoadProfiler.Mark(
+			"prewarm_godot_textures",
+			"converted=" + textureCount + "/" + plan.Textures.Count
+			+ " fallback=" + missingTextureCount);
+
+		stopwatch.Stop();
+		LevelViewerLoadProfiler.Mark(
+			"prewarm_godot_finalize",
+			"godot_ms=" + stopwatch.Elapsed.TotalMilliseconds.ToString("F0", System.Globalization.CultureInfo.InvariantCulture));
+		ViewerLog.Print(
+			"Converted "
+			+ meshCount + "/" + result.Meshes.Count + " meshes and "
+			+ textureCount + "/" + plan.Textures.Count + " textures (CPU "
+			+ result.CpuElapsedMs.ToString("F0") + " ms, Godot "
+			+ stopwatch.Elapsed.TotalMilliseconds.ToString("F0") + " ms).");
+	}
+
+	private int ConvertMissingPlanTextures(LevelViewerPopulatePrewarm.Plan plan)
+	{
+		if (plan?.Textures == null)
+			return 0;
+
+		int converted = 0;
+		foreach (Textures.TEX4 tex4 in plan.Textures)
+		{
+			if (tex4 == null)
+				continue;
+
+			TexturePtr.Source location = plan.TextureLocations.TryGetValue(tex4, out TexturePtr.Source stored)
+				? stored
+				: TexturePtr.Source.LEVEL;
+
+			int writeIndex = GetTextureWriteIndex(tex4, location);
+			if (writeIndex >= 0 && TryGetCachedTexture(location, writeIndex, out _))
+				continue;
+
+			TexOrCube tex = GetTexOrCube(new TexturePtr
+			{
+				Texture = tex4,
+				Location = location,
+			});
+
+			if (tex?.Texture != null)
+				converted++;
+		}
+
+		return converted;
+	}
+
+	private static Textures.TEX4.Texture SelectTexPartForConversion(Textures.TEX4 tex)
+	{
+		if (tex == null)
+			return null;
+
+		if (HasTextureContent(tex.TextureStreamed))
+			return tex.TextureStreamed;
+		if (HasTextureContent(tex.TexturePersistent))
+			return tex.TexturePersistent;
+
+		return null;
+	}
+
+	private static bool HasTextureContent(Textures.TEX4.Texture part) =>
+		part?.Content != null && part.Content.Length > 0;
+
+	private static void ReleaseTex4SourceContent(Textures.TEX4 tex)
+	{
+		if (tex == null)
+			return;
+
+		if (tex.TextureStreamed != null)
+			tex.TextureStreamed.Content = null;
+		if (tex.TexturePersistent != null)
+			tex.TexturePersistent.Content = null;
 	}
 
 	private void ReleaseCathodeBinarySourceData()
@@ -2433,14 +3201,23 @@ public partial class AlienScene : Node3D
 			return;
 
 		foreach (Textures.TEX4 entry in textures.Entries)
-		{
-			if (entry?.TextureStreamed != null)
-				entry.TextureStreamed.Content = null;
-			if (entry?.TexturePersistent != null)
-				entry.TexturePersistent.Content = null;
-		}
+			ReleaseTex4SourceContent(entry);
 	}
 
+}
+
+public readonly struct BulkMeshSpawnJob
+{
+	public BulkMeshSpawnJob(Node3D renderTarget, int modelWriteIndex, int materialWriteIndex)
+	{
+		RenderTarget = renderTarget;
+		ModelWriteIndex = modelWriteIndex;
+		MaterialWriteIndex = materialWriteIndex;
+	}
+
+	public Node3D RenderTarget { get; }
+	public int ModelWriteIndex { get; }
+	public int MaterialWriteIndex { get; }
 }
 
 public class MeshHolder

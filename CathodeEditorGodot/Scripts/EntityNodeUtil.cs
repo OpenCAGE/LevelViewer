@@ -48,7 +48,10 @@ public static class EntityNodeUtil
 
     private static void CollectPreviews<T>(Node node, List<T> results) where T : FunctionEntityPreview
     {
-        var pending = new Stack<Node>();
+        if (node == null)
+            return;
+
+        Stack<Node> pending = new Stack<Node>();
         pending.Push(node);
         while (pending.Count > 0)
         {
@@ -59,18 +62,17 @@ public static class EntityNodeUtil
             if (current is T preview)
                 results.Add(preview);
 
-            foreach (Node child in current.GetChildren())
-                pending.Push(child);
+            PushChildren(current, pending);
         }
     }
 
     public static FunctionEntityPreview[] FindAllPreviews(Node root)
     {
-        List<FunctionEntityPreview> results = new List<FunctionEntityPreview>();
         if (root == null)
-            return results.ToArray();
+            return System.Array.Empty<FunctionEntityPreview>();
 
-        var pending = new Stack<Node>();
+        List<FunctionEntityPreview> results = new List<FunctionEntityPreview>();
+        Stack<Node> pending = new Stack<Node>();
         pending.Push(root);
         while (pending.Count > 0)
         {
@@ -81,10 +83,21 @@ public static class EntityNodeUtil
             if (current is FunctionEntityPreview preview)
                 results.Add(preview);
 
-            foreach (Node child in current.GetChildren())
-                pending.Push(child);
+            PushChildren(current, pending);
         }
 
         return results.ToArray();
+    }
+
+    /// <summary>Uses indexed child access — GetChildren() can return a read-only Godot Array during bulk scene builds.</summary>
+    private static void PushChildren(Node node, Stack<Node> pending)
+    {
+        int childCount = node.GetChildCount();
+        for (int i = 0; i < childCount; i++)
+        {
+            Node child = node.GetChild(i);
+            if (child != null)
+                pending.Push(child);
+        }
     }
 }

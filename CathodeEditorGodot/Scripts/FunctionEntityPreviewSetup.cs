@@ -4,13 +4,30 @@ using OpenCAGE;
 
 public static class FunctionEntityPreviewSetup
 {
-    public static bool TryAddPreview(AlienScene scene, FunctionEntity function, Node3D entityNode, CommandsUtils utils, ShortGuid ownerComposite)
+    public static bool TryAddPreview(
+        AlienScene scene,
+        FunctionEntity function,
+        Node3D entityNode,
+        CommandsUtils utils,
+        ShortGuid ownerComposite,
+        bool geometryOnly = false)
     {
         if (function == null || entityNode == null || !function.function.IsFunctionType)
             return false;
 
         uint ownerCompositeId = ownerComposite.AsUInt32;
         FunctionType functionType = function.function.AsFunctionType;
+
+        if (geometryOnly)
+        {
+            if (functionType != FunctionType.ModelReference)
+                return false;
+
+            ModelReferencePreview modelPreview = new ModelReferencePreview();
+            entityNode.AddChild(modelPreview);
+            modelPreview.Setup(scene, function, ownerCompositeId);
+            return true;
+        }
 
         if (!RenderFilterDefinitions.IsSupported(functionType))
         {

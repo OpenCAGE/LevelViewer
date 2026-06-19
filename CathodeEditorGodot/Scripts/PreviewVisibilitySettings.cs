@@ -39,6 +39,22 @@ public static class PreviewVisibilitySettings
     public static uint[] ActiveInstanceEntityPath { get; private set; } = Array.Empty<uint>();
 
     /// <summary>
+    /// Instance drill path used for composite-focus grey-out. Matches <see cref="ActiveInstanceEntityPath"/>
+    /// for normal navigation, but can extend further during deep-select alias picks.
+    /// </summary>
+    public static uint[] CompositeFocusInstancePath { get; private set; } = Array.Empty<uint>();
+
+    public static void SetCompositeFocusInstancePath(uint[] path)
+    {
+        CompositeFocusInstancePath = path ?? Array.Empty<uint>();
+    }
+
+    public static void ResetCompositeFocusToActiveInstancePath()
+    {
+        CompositeFocusInstancePath = ActiveInstanceEntityPath ?? Array.Empty<uint>();
+    }
+
+    /// <summary>
     /// True when viewing a nested composite instance below Commands.EntryPoints[0].
     /// </summary>
     public static bool IsSteppedDownFromLevelRoot()
@@ -51,7 +67,10 @@ public static class PreviewVisibilitySettings
 
     public static void SyncFromEditorPath(List<uint> pathEntities, List<uint> pathComposites, bool entitySelected)
     {
+        uint[] previousInstancePath = ActiveInstanceEntityPath;
         ActiveInstanceEntityPath = BuildInstanceEntityPath(pathEntities, pathComposites, entitySelected);
+        if (!InstancePathsEqual(previousInstancePath, ActiveInstanceEntityPath))
+            CompositeFocusInstancePath = ActiveInstanceEntityPath;
     }
 
     public static uint[] BuildInstanceEntityPath(List<uint> pathEntities, List<uint> pathComposites, bool entitySelected)

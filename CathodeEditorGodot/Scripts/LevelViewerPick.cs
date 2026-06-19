@@ -164,6 +164,34 @@ public static class LevelViewerPick
 		RegisterPickableRecursive(ownerEntityNode, ownerEntityNode);
 	}
 
+	/// <summary>Registers pickables under a preview subtree without touching sibling meshes on the owner entity.</summary>
+	public static void RegisterPickablePreviewSubtree(FunctionEntityPreview preview, Node3D ownerEntityNode)
+	{
+		if (preview == null || ownerEntityNode == null)
+			return;
+
+		PruneInvalidPickables(ownerEntityNode);
+		RegisterPickableRecursive(preview, ownerEntityNode);
+	}
+
+	/// <summary>Removes pickables registered from a preview subtree only.</summary>
+	public static void UnregisterPickablePreviewSubtree(FunctionEntityPreview preview, Node3D ownerEntityNode)
+	{
+		if (preview == null || ownerEntityNode == null)
+			return;
+
+		UnregisterPickableRecursive(preview, ownerEntityNode);
+
+		if (_pickablesByOwner.TryGetValue(ownerEntityNode, out List<MeshInstance3D> meshes)
+			&& meshes.Count == 0)
+		{
+			_pickablesByOwner.Remove(ownerEntityNode);
+			_ownerGlobalBounds.Remove(ownerEntityNode);
+		}
+
+		_scopedPickablesDirty = true;
+	}
+
 	private static void PruneInvalidPickables(Node3D ownerEntityNode)
 	{
 		if (!_pickablesByOwner.TryGetValue(ownerEntityNode, out List<MeshInstance3D> meshes))
@@ -204,8 +232,11 @@ public static class LevelViewerPick
 		if (!_registeredPickables.Add(meshInstance))
 			return;
 
-		if (!meshInstance.IsInGroup(PickableGroup))
-			meshInstance.AddToGroup(PickableGroup);
+		if (!LevelViewerCompositeFocus.IsMeshVisuallyDimmed(meshInstance))
+		{
+			if (!meshInstance.IsInGroup(PickableGroup))
+				meshInstance.AddToGroup(PickableGroup);
+		}
 		meshInstance.SetMeta(OwnerEntityMetaKey, ownerNode);
 
 		if (!_pickablesByOwner.TryGetValue(ownerNode, out List<MeshInstance3D> meshes))
@@ -227,19 +258,65 @@ public static class LevelViewerPick
 		if (node is MeshInstance3D meshInstance)
 			RegisterPickableMesh(meshInstance, ownerEntityNode);
 		else if (node is VisualInstance3D visual)
-		{
-			Aabb bounds = visual.GetAabb();
-			if (bounds.Size.LengthSquared() > RayEpsilon)
-			{
-				if (!visual.IsInGroup(PickableGroup))
-					visual.AddToGroup(PickableGroup);
-				visual.SetMeta(OwnerEntityMetaKey, ownerEntityNode);
-			}
-		}
+			RegisterPickableVisual(visual, ownerEntityNode);
 
 		children:
 		foreach (Node child in node.GetChildren())
 			RegisterPickableRecursive(child, ownerEntityNode);
+	}
+
+	private static void UnregisterPickableRecursive(Node node, Node3D ownerEntityNode)
+	{
+		if (node is MeshInstance3D meshInstance)
+			UnregisterPickableMesh(meshInstance, ownerEntityNode);
+		else if (node is VisualInstance3D visual)
+			UnregisterPickableVisual(visual);
+
+		foreach (Node child in node.GetChildren())
+			UnregisterPickableRecursive(child, ownerEntityNode);
+	}
+
+	private static void RegisterPickableVisual(VisualInstance3D visual, Node3D ownerEntityNode)
+	{
+		if (visual == null || visual.IsInGroup(WireframeOverlayGroup))
+			return;
+
+		Aabb bounds = visual.GetAabb();
+		if (bounds.Size.LengthSquared() <= RayEpsilon)
+			return;
+
+		if (!visual.IsInGroup(PickableGroup))
+			visual.AddToGroup(PickableGroup);
+		visual.SetMeta(OwnerEntityMetaKey, ownerEntityNode);
+	}
+
+	private static void UnregisterPickableVisual(VisualInstance3D visual)
+	{
+		if (visual == null || !GodotObject.IsInstanceValid(visual))
+			return;
+
+		if (visual.IsInGroup(PickableGroup))
+			visual.RemoveFromGroup(PickableGroup);
+		if (visual.HasMeta(OwnerEntityMetaKey))
+			visual.RemoveMeta(OwnerEntityMetaKey);
+	}
+
+	private static void UnregisterPickableMesh(MeshInstance3D meshInstance, Node3D ownerEntityNode)
+	{
+		if (meshInstance == null || !GodotObject.IsInstanceValid(meshInstance))
+			return;
+
+		if (meshInstance.IsInGroup(PickableGroup))
+			meshInstance.RemoveFromGroup(PickableGroup);
+		if (meshInstance.HasMeta(OwnerEntityMetaKey))
+			meshInstance.RemoveMeta(OwnerEntityMetaKey);
+		_registeredPickables.Remove(meshInstance);
+
+		if (ownerEntityNode != null
+			&& _pickablesByOwner.TryGetValue(ownerEntityNode, out List<MeshInstance3D> meshes))
+		{
+			meshes.Remove(meshInstance);
+		}
 	}
 
 	private static void EnsureScopedPickOwners(Node contentRoot, Commands commands)

@@ -10,7 +10,8 @@ public static class FunctionEntityPreviewSetup
         Node3D entityNode,
         CommandsUtils utils,
         ShortGuid ownerComposite,
-        bool geometryOnly = false)
+        bool geometryOnly = false,
+        uint mappingScopeInstanceEntityId = 0)
     {
         if (function == null || entityNode == null || !function.function.IsFunctionType)
             return false;
@@ -25,7 +26,7 @@ public static class FunctionEntityPreviewSetup
 
             ModelReferencePreview modelPreview = new ModelReferencePreview();
             entityNode.AddChild(modelPreview);
-            modelPreview.Setup(scene, function, ownerCompositeId);
+            modelPreview.Setup(scene, function, ownerCompositeId, mappingScopeInstanceEntityId);
             return true;
         }
 
@@ -35,7 +36,7 @@ public static class FunctionEntityPreviewSetup
             {
                 ModelReferencePreview preview = new ModelReferencePreview();
                 entityNode.AddChild(preview);
-                preview.Setup(scene, function, ownerCompositeId);
+                preview.Setup(scene, function, ownerCompositeId, mappingScopeInstanceEntityId);
                 return true;
             }
             return false;

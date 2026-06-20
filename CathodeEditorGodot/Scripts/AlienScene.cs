@@ -24,6 +24,7 @@ public partial class AlienScene : Node3D
 
 	private Node3D _parentNode = null;
 	public Node3D ParentNode => _parentNode;
+	public IReadOnlyDictionary<Node3D, Entity> NodeEntities => _nodeEntities;
 
 	private Composite _loadedComposite = null;
 	private Node3D _selectedEntity;
@@ -609,6 +610,8 @@ public partial class AlienScene : Node3D
 		CancelLargeSceneRenderPolicy();
 		ModelReferenceRenderSettings.ResetForLevelLoad();
 		ClearPopulateMaterialCaches();
+		MaterialMappingLog.BeginSession(_levelName);
+		ModelReferenceMaterialMapping.PrepareForLevelPopulate(_content.Level.Commands);
 
 		if (_parentNode != null && GodotObject.IsInstanceValid(_parentNode))
 			_parentNode.QueueFree();
@@ -631,7 +634,7 @@ public partial class AlienScene : Node3D
 			+ " cpu_ms=" + spawnPlan.CollectCpuMs.ToString("F0", System.Globalization.CultureInfo.InvariantCulture));
 
 		LevelViewerPopulatePrewarm.ModelReferenceCache modelRefCache =
-			LevelViewerPopulatePrewarm.BuildModelReferenceCache(spawnPlan.ModelReferences, _content);
+			LevelViewerPopulatePrewarm.BuildModelReferenceCache(spawnPlan.ModelReferences, _content, spawnPlan);
 		_modelRefRenderablesByEntityId = modelRefCache.RenderablesByEntityId;
 		LevelViewerPopulatePrewarm.Plan prewarmPlan = modelRefCache.PrewarmPlan;
 		LevelViewerLoadProfiler.Mark(
@@ -693,6 +696,10 @@ public partial class AlienScene : Node3D
 			_wiringCompositeLinks = false;
 		}
 		LevelViewerLoadProfiler.Mark("wire_aliases");
+
+		// Mesh jobs need alias wiring and instance mapping meta before material remaps resolve.
+		RebuildBulkMeshSpawnJobsFromPreviews();
+		LevelViewerLoadProfiler.Mark("mesh_jobs_remap");
 
 		ShowLoading("Spawning model-reference meshes...");
 		Stopwatch meshSpawnStopwatch = Stopwatch.StartNew();
@@ -1105,13 +1112,17 @@ public partial class AlienScene : Node3D
 				else
 				{
 					bool geometryOnly = _isBulkPopulating && !_wiringCompositeLinks;
+					uint mappingScopeInstanceEntityId = planCommand.HasValue
+						? planCommand.Value.MappingScopeInstanceEntityId
+						: 0;
 					if (FunctionEntityPreviewSetup.TryAddPreview(
 						this,
 						function,
 						entityNode,
 						_content.Level.Commands.Utils,
 						composite.shortGUID,
-						geometryOnly))
+						geometryOnly,
+						mappingScopeInstanceEntityId))
 					{
 						_functionEntityPreviewsCacheDirty = true;
 						if (_isBulkPopulating)
@@ -1165,6 +1176,7 @@ public partial class AlienScene : Node3D
 				EntityOverride aliasOverride = (EntityOverride)entityNode;
 				if (TryResolveAliasPointedSceneNode(aliasOverride, alias, composite, out Node3D aliasedNode))
 				{
+					ModelReferenceMaterialMapping.ApplyAliasInstanceMappingMeta(alias, aliasedNode);
 					if (alias.GetParameter("position") != null)
 					{
 						EntityNodeUtil.SetPointed(aliasedNode, true);
@@ -1827,6 +1839,23 @@ public partial class AlienScene : Node3D
 		return GetEntityNode(entityPath, _parentNode) as EntityOverride;
 	}
 
+	public Entity FindEntityById(uint entityId)
+	{
+		if (entityId == 0 || _content?.Level?.Commands?.Entries == null)
+			return null;
+
+		ShortGuid id = new ShortGuid(entityId);
+		List<Composite> composites = _content.Level.Commands.Entries;
+		for (int i = 0; i < composites.Count; i++)
+		{
+			Entity entity = composites[i].GetEntityByID(id);
+			if (entity != null)
+				return entity;
+		}
+
+		return null;
+	}
+
 	public void ApplyEntityParameter(
 		ShortGuid dataCompositeID,
 		ShortGuid dataEntityID,
@@ -1850,8 +1879,13 @@ public partial class AlienScene : Node3D
 
 		ParameterSync.ApplyToEntity(dataEntity, sync, _content);
 
+		ShortGuid paramName = new ShortGuid(sync.name);
+		ShortGuid mappingParameterId = ShortGuidUtils.Generate(ModelReferenceMaterialMapping.MappingParameterName);
+		if (paramName == mappingParameterId)
+			RefreshMaterialMappingForParameterChange(dataEntity, dataComposite);
+
 		DataType syncDataType = ParameterSync.GetDataType(sync);
-		if (syncDataType == DataType.RESOURCE)
+		if (syncDataType == DataType.RESOURCE && paramName != mappingParameterId)
 		{
 			FunctionEntity remapEntity = ModelReferencePreview.ResolveModelReferenceEntity(
 				dataEntity, dataComposite, _content.Level.Commands);
@@ -1993,6 +2027,84 @@ public partial class AlienScene : Node3D
 			Node3D selectedEntityNode = LevelViewerPick.ResolveNearestEntityNode(_selectedEntity, _nodeEntities);
 			if (selectedEntityNode == entityNode)
 				RefreshSelectedLightRadiusVisual();
+		}
+	}
+
+	private void RefreshMaterialMappingForParameterChange(Entity scopeEntity, Composite ownerComposite)
+	{
+		if (scopeEntity == null || ownerComposite == null)
+			return;
+
+		if (scopeEntity is FunctionEntity function
+			&& ModelReferenceMaterialMapping.IsCompositeInstanceEntity(function, _content.Level.Commands))
+		{
+			if (TryGetCachedEntityNodes(ownerComposite.shortGUID, scopeEntity.shortGUID, out List<Node3D> instanceNodes))
+			{
+				for (int i = 0; i < instanceNodes.Count; i++)
+					RefreshDirectModelReferencesInCompositeInstance(instanceNodes[i]);
+			}
+
+			return;
+		}
+
+		if (scopeEntity is not AliasEntity alias)
+			return;
+
+		if (!TryGetCachedEntityNodes(ownerComposite.shortGUID, alias.shortGUID, out List<Node3D> aliasNodes))
+			return;
+
+		for (int i = 0; i < aliasNodes.Count; i++)
+		{
+			if (aliasNodes[i] is not EntityOverride aliasOverride)
+				continue;
+
+			if (!TryResolveAliasPointedSceneNode(aliasOverride, alias, ownerComposite, out Node3D pointedNode))
+				continue;
+
+			if (ModelReferenceMaterialMapping.TryGetMappingParameter(alias) == null)
+				ModelReferenceMaterialMapping.ClearAliasInstanceMappingMeta(pointedNode);
+			else
+				ModelReferenceMaterialMapping.ApplyAliasInstanceMappingMeta(alias, pointedNode);
+
+			if (pointedNode != null
+				&& _nodeEntities.TryGetValue(pointedNode, out Entity pointedEntity)
+				&& pointedEntity is FunctionEntity pointedFunction
+				&& ModelReferenceMaterialMapping.IsCompositeInstanceEntity(pointedFunction, _content.Level.Commands))
+			{
+				RefreshDirectModelReferencesInCompositeInstance(pointedNode);
+			}
+		}
+	}
+
+	private void RefreshDirectModelReferencesInCompositeInstance(Node3D instanceRoot)
+	{
+		if (instanceRoot == null || !GodotObject.IsInstanceValid(instanceRoot))
+			return;
+
+		Commands commands = _content.Level.Commands;
+		foreach (Node child in instanceRoot.GetChildren())
+		{
+			if (child is not Node3D childNode || !GodotObject.IsInstanceValid(childNode))
+				continue;
+
+			if (!_nodeEntities.TryGetValue(childNode, out Entity entity))
+				continue;
+
+			if (entity is FunctionEntity function
+				&& ModelReferenceMaterialMapping.IsCompositeInstanceEntity(function, commands))
+			{
+				continue;
+			}
+
+			if (entity is FunctionEntity modelRef
+				&& ModelReferenceMaterialMapping.IsModelReferenceEntity(modelRef))
+			{
+				RefreshFunctionEntityPreviews(childNode);
+				continue;
+			}
+
+			if (entity.variant == EntityVariant.ALIAS || entity.variant == EntityVariant.PROXY)
+				RefreshFunctionEntityPreviews(childNode);
 		}
 	}
 
@@ -2146,31 +2258,46 @@ public partial class AlienScene : Node3D
 				continue;
 
 			_bulkPopulatePreviews.Add(preview);
-			if (preview is not ModelReferencePreview modelPreview)
-				return;
-
-			_bulkModelReferencePreviews.Add(modelPreview);
-			if (_modelRefRenderablesByEntityId == null
-				|| !_modelRefRenderablesByEntityId.TryGetValue(function.shortGUID.AsUInt32, out List<Tuple<int, int>> renderables)
-				|| renderables == null)
-			{
-				return;
-			}
-
-			Node3D renderTarget = modelPreview.GetPopulateRenderTarget();
-			if (renderTarget == null)
-				return;
-
-			for (int j = 0; j < renderables.Count; j++)
-			{
-				Tuple<int, int> renderable = renderables[j];
-				if (renderable.Item1 < 0 || renderable.Item2 < 0)
-					continue;
-
-				_bulkMeshSpawnJobs.Add(new BulkMeshSpawnJob(renderTarget, renderable.Item1, renderable.Item2));
-			}
+			if (preview is ModelReferencePreview modelPreview)
+				_bulkModelReferencePreviews.Add(modelPreview);
 
 			return;
+		}
+	}
+
+	private void RebuildBulkMeshSpawnJobsFromPreviews()
+	{
+		_bulkMeshSpawnJobs.Clear();
+		for (int i = 0; i < _bulkModelReferencePreviews.Count; i++)
+		{
+			ModelReferencePreview modelPreview = _bulkModelReferencePreviews[i];
+			if (modelPreview == null || !GodotObject.IsInstanceValid(modelPreview))
+				continue;
+
+			QueueBulkMeshSpawnJobsForPreview(modelPreview);
+		}
+	}
+
+	private void QueueBulkMeshSpawnJobsForPreview(ModelReferencePreview modelPreview)
+	{
+		if (modelPreview == null)
+			return;
+
+		List<Tuple<int, int>> renderables = modelPreview.GetResolvedRenderableIndexes();
+		if (renderables == null || renderables.Count == 0)
+			return;
+
+		Node3D renderTarget = modelPreview.GetPopulateRenderTarget();
+		if (renderTarget == null)
+			return;
+
+		for (int j = 0; j < renderables.Count; j++)
+		{
+			Tuple<int, int> renderable = renderables[j];
+			if (renderable.Item1 < 0 || renderable.Item2 < 0)
+				continue;
+
+			_bulkMeshSpawnJobs.Add(new BulkMeshSpawnJob(renderTarget, renderable.Item1, renderable.Item2));
 		}
 	}
 
@@ -2772,6 +2899,7 @@ public partial class AlienScene : Node3D
 
 	private void ClearPopulateMaterialCaches()
 	{
+		MaterialMappingLog.EndSession();
 		foreach (KeyValuePair<Materials.Material, ShaderMaterial> entry in _materials)
 		{
 			if (entry.Value != null && GodotObject.IsInstanceValid(entry.Value))

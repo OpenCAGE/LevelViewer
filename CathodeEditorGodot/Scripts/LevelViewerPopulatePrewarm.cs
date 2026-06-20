@@ -39,17 +39,79 @@ public static class LevelViewerPopulatePrewarm
 		return plan;
 	}
 
-	/// <summary>Derives prewarm work from the flat spawn plan (avoids a second composite tree walk).</summary>
+	/// <summary>Derives prewarm work from model references in the spawn plan only.</summary>
 	public static Plan CollectPlanFromSpawnCommands(LevelViewerPopulateTree.Plan spawnPlan, LevelContent content)
 	{
 		Plan plan = new Plan();
-		if (spawnPlan?.Commands == null || content?.Level == null)
-			return plan;
-
-		for (int i = 0; i < spawnPlan.Commands.Count; i++)
+		if (spawnPlan?.ModelReferences == null
+			|| spawnPlan.ModelReferences.Count == 0
+			|| content?.Level == null)
 		{
-			LevelViewerPopulateTree.Command command = spawnPlan.Commands[i];
-			if (command.Entity is not FunctionEntity function)
+			return plan;
+		}
+
+		Commands commands = content.Level.Commands;
+		Dictionary<uint, int> modelRefCommandIndex = BuildModelReferenceCommandIndex(spawnPlan.Commands);
+		for (int i = 0; i < spawnPlan.ModelReferences.Count; i++)
+		{
+			FunctionEntity function = spawnPlan.ModelReferences[i];
+			if (function == null)
+				continue;
+
+			if (!modelRefCommandIndex.TryGetValue(function.shortGUID.AsUInt32, out int commandIndex))
+				continue;
+
+			LevelViewerPopulateTree.Command command = spawnPlan.Commands[commandIndex];
+			List<Tuple<int, int>> renderables = ModelReferencePreview.GetRenderableIndexes(content, function);
+			Entity scopeEntity = command.MappingScopeInstanceEntityId != 0
+				? FindEntityById(commands, command.MappingScopeInstanceEntityId)
+				: null;
+			List<Composite> compositeChain = ModelReferenceMaterialMapping.BuildCompositeChainFromSpawnPlanAncestors(
+				spawnPlan.Commands,
+				commandIndex,
+				commands);
+			MaterialMappings.MaterialMapping mapping = ModelReferenceMaterialMapping.TryResolveMaterialMapping(
+				content.Level,
+				scopeEntity,
+				null,
+				null,
+				null,
+				compositeChain);
+
+			ModelReferenceMaterialMapping.MappingApplyContext? context = null;
+			if (MaterialMappingLog.LogRemaps)
+			{
+				string hierarchy = ModelReferenceMaterialMapping.BuildHierarchyFromSpawnPlan(
+					spawnPlan.Commands,
+					commandIndex,
+					commands);
+				context = new ModelReferenceMaterialMapping.MappingApplyContext(
+					function.shortGUID,
+					new ShortGuid(command.MappingScopeInstanceEntityId),
+					hierarchy);
+			}
+
+			List<Tuple<int, int>> remapped = ModelReferenceMaterialMapping.ApplyMapping(
+				content.Level,
+				mapping,
+				renderables,
+				context);
+			CollectModelReferenceRenderables(remapped, content, plan);
+		}
+
+		return plan;
+	}
+
+	private static Dictionary<uint, int> BuildModelReferenceCommandIndex(
+		IReadOnlyList<LevelViewerPopulateTree.Command> commands)
+	{
+		Dictionary<uint, int> modelRefCommandIndex = new Dictionary<uint, int>();
+		if (commands == null)
+			return modelRefCommandIndex;
+
+		for (int i = 0; i < commands.Count; i++)
+		{
+			if (commands[i].Entity is not FunctionEntity function)
 				continue;
 
 			if (!function.function.IsFunctionType)
@@ -58,10 +120,26 @@ public static class LevelViewerPopulatePrewarm
 			if (function.function.AsFunctionType != FunctionType.ModelReference)
 				continue;
 
-			CollectModelReference(function, content, plan);
+			modelRefCommandIndex[function.shortGUID.AsUInt32] = i;
 		}
 
-		return plan;
+		return modelRefCommandIndex;
+	}
+
+	private static Entity FindEntityById(Commands commands, uint entityId)
+	{
+		if (commands?.Entries == null || entityId == 0)
+			return null;
+
+		ShortGuid id = new ShortGuid(entityId);
+		for (int i = 0; i < commands.Entries.Count; i++)
+		{
+			Entity entity = commands.Entries[i].GetEntityByID(id);
+			if (entity != null)
+				return entity;
+		}
+
+		return null;
 	}
 
 	public sealed class ModelReferenceCache
@@ -74,7 +152,8 @@ public static class LevelViewerPopulatePrewarm
 	/// <summary>One GetRenderableIndexes pass per model reference, parallel on the thread pool.</summary>
 	public static ModelReferenceCache BuildModelReferenceCache(
 		IReadOnlyList<FunctionEntity> modelReferences,
-		LevelContent content)
+		LevelContent content,
+		LevelViewerPopulateTree.Plan spawnPlan = null)
 	{
 		ModelReferenceCache cache = new ModelReferenceCache();
 		if (modelReferences == null || modelReferences.Count == 0 || content?.Level == null)
@@ -100,6 +179,19 @@ public static class LevelViewerPopulatePrewarm
 		{
 			cache.RenderablesByEntityId[entry.Key] = entry.Value;
 			CollectModelReferenceRenderables(entry.Value, content, cache.PrewarmPlan);
+		}
+
+		if (spawnPlan != null)
+		{
+			Plan mappedPlan = CollectPlanFromSpawnCommands(spawnPlan, content);
+			foreach (Materials.Material material in mappedPlan.Materials)
+				cache.PrewarmPlan.Materials.Add(material);
+			foreach (Textures.TEX4 texture in mappedPlan.Textures)
+				cache.PrewarmPlan.Textures.Add(texture);
+			foreach (KeyValuePair<Textures.TEX4, TexturePtr.Source> entry in mappedPlan.TextureLocations)
+				cache.PrewarmPlan.TextureLocations[entry.Key] = entry.Value;
+			foreach (int meshIndex in mappedPlan.MeshWriteIndices)
+				cache.PrewarmPlan.MeshWriteIndices.Add(meshIndex);
 		}
 
 		stopwatch.Stop();

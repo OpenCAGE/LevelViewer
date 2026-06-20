@@ -14,11 +14,18 @@ public partial class ModelReferencePreview : FunctionEntityPreview
     private const string ResourceParameter = "resource";
 
     private AlienScene _scene;
+    private uint _mappingScopeInstanceEntityId;
 
-    public void Setup(AlienScene scene, FunctionEntity entity, uint ownerCompositeId = 0)
+    public void Setup(AlienScene scene, FunctionEntity entity, uint ownerCompositeId = 0, uint mappingScopeInstanceEntityId = 0)
     {
         _scene = scene;
+        _mappingScopeInstanceEntityId = mappingScopeInstanceEntityId;
         base.Setup(entity, ownerCompositeId);
+    }
+
+    public void SetMappingScopeInstanceEntityId(uint mappingScopeInstanceEntityId)
+    {
+        _mappingScopeInstanceEntityId = mappingScopeInstanceEntityId;
     }
 
     protected override Node3D GetVisibilityRoot() => null;
@@ -55,6 +62,7 @@ public partial class ModelReferencePreview : FunctionEntityPreview
 		Node3D renderTarget = GetRenderTarget();
 		_scene.ClearRenderableChildren(renderTarget);
 		SpawnAllRenderables(renderTarget);
+		RegisterPickablesWithOwner();
 	}
 
 	/// <summary>First bulk spawn after deferred setup — render target has no mesh children yet.</summary>
@@ -75,7 +83,7 @@ public partial class ModelReferencePreview : FunctionEntityPreview
 		if (_scene == null || renderTarget == null)
 			return;
 
-		foreach (Tuple<int, int> renderable in GetRenderableIndexes())
+		foreach (Tuple<int, int> renderable in GetResolvedRenderableIndexes())
 		{
 			SpawnSingleRenderable(
 				renderTarget,
@@ -131,7 +139,105 @@ public partial class ModelReferencePreview : FunctionEntityPreview
 
     private List<Tuple<int, int>> GetRenderableIndexes()
     {
+        return GetResolvedRenderableIndexes();
+    }
+
+    internal List<Tuple<int, int>> GetResolvedRenderableIndexes()
+    {
+        List<Tuple<int, int>> indexes = GetBaseRenderableIndexes();
+        if (indexes.Count == 0 || _scene?.Content?.Level == null)
+            return indexes;
+
+        Node3D entityNode = GetParent() as Node3D;
+        string hierarchy = string.Empty;
+        if (MaterialMappingLog.LogRemaps && entityNode != null)
+        {
+            hierarchy = ModelReferenceMaterialMapping.BuildModelReferenceHierarchyString(
+                entityNode,
+                _scene.ParentNode,
+                _scene.NodeEntities,
+                _scene.Content.Level.Commands);
+        }
+
+        var context = new ModelReferenceMaterialMapping.MappingApplyContext(
+            Entity.shortGUID,
+            new ShortGuid(_mappingScopeInstanceEntityId),
+            hierarchy);
+
+        MaterialMappings.MaterialMapping mapping = TryResolveMappingForSpawnScope();
+        if (mapping == null)
+            return indexes;
+
+        return ModelReferenceMaterialMapping.ApplyMapping(
+			_scene.Content.Level,
+			mapping,
+			indexes,
+			context);
+    }
+
+    private List<Tuple<int, int>> GetBaseRenderableIndexes()
+    {
         return GetRenderableIndexes(_scene.Content, Entity);
+    }
+
+    private MaterialMappings.MaterialMapping TryResolveMappingForSpawnScope()
+    {
+        if (_scene?.Content?.Level == null)
+            return null;
+
+        Commands commands = _scene.Content.Level.Commands;
+        Node3D modelRefNode = GetParent() as Node3D;
+
+        if (_mappingScopeInstanceEntityId != 0)
+        {
+            Entity scopeEntity = _scene.FindEntityById(_mappingScopeInstanceEntityId);
+            Node3D scopeNode = FindScopeInstanceNode(modelRefNode);
+            List<Composite> compositeChain = ModelReferenceMaterialMapping.BuildCompositeChainFromModelRefAncestors(
+                modelRefNode,
+                commands,
+                _scene.ParentNode);
+            MaterialMappings.MaterialMapping mapping = ModelReferenceMaterialMapping.TryResolveMaterialMapping(
+                _scene.Content.Level,
+                scopeEntity,
+                scopeNode,
+                modelRefNode,
+                _scene.NodeEntities,
+                compositeChain);
+            if (mapping != null)
+                return mapping;
+        }
+
+        if (modelRefNode == null)
+            return null;
+
+        return ModelReferenceMaterialMapping.TryResolveMappingForEntityNode(
+            _scene.Content.Level,
+            modelRefNode,
+            _scene.ParentNode,
+            _scene.NodeEntities,
+            commands);
+    }
+
+    private Node3D FindScopeInstanceNode(Node3D modelRefNode)
+    {
+        if (modelRefNode == null || _mappingScopeInstanceEntityId == 0 || _scene?.ParentNode == null)
+            return null;
+
+        ShortGuid scopeId = new ShortGuid(_mappingScopeInstanceEntityId);
+        Node current = modelRefNode.GetParent();
+        while (current != null && current != _scene.ParentNode)
+        {
+            if (current is Node3D node3D
+                && _scene.NodeEntities.TryGetValue(node3D, out Entity entity)
+                && entity.shortGUID == scopeId)
+            {
+                return node3D;
+            }
+
+            current = current.GetParent();
+        }
+
+        return null;
     }
 
     public static List<Tuple<int, int>> GetRenderableIndexes(LevelContent content, Entity entity)

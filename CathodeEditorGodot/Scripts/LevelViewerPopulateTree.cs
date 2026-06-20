@@ -23,7 +23,8 @@ public static class LevelViewerPopulateTree
 			Vector3 position,
 			Vector3 rotationDegrees,
 			bool hasTransform,
-			string nodeName)
+			string nodeName,
+			uint mappingScopeInstanceEntityId = 0)
 		{
 			ParentIndex = parentIndex;
 			CompositeId = compositeId;
@@ -32,6 +33,7 @@ public static class LevelViewerPopulateTree
 			RotationDegrees = rotationDegrees;
 			HasTransform = hasTransform;
 			NodeName = nodeName;
+			MappingScopeInstanceEntityId = mappingScopeInstanceEntityId;
 		}
 
 		/// <summary>Index into the spawn list, or -1 to attach to the composite instance root.</summary>
@@ -42,6 +44,8 @@ public static class LevelViewerPopulateTree
 		public Vector3 RotationDegrees { get; }
 		public bool HasTransform { get; }
 		public string NodeName { get; }
+		/// <summary>Composite instance entity that owns a <c>mapping</c> parameter for this spawn command.</summary>
+		public uint MappingScopeInstanceEntityId { get; }
 	}
 
 	public static bool TryGetSpawnTransform(Entity entity, out Vector3 position, out Vector3 rotationDegrees)
@@ -75,7 +79,13 @@ public static class LevelViewerPopulateTree
 			return plan;
 
 		Stopwatch stopwatch = Stopwatch.StartNew();
-		List<Command> commands = CollectCompositeSubtree(root, content, deferAliasProxy, includeVariables, plan.ModelReferences);
+		List<Command> commands = CollectCompositeSubtree(
+			root,
+			content,
+			deferAliasProxy,
+			includeVariables,
+			plan.ModelReferences,
+			mappingScopeInstanceEntityId: 0);
 		plan.Commands.AddRange(commands);
 		stopwatch.Stop();
 		plan.CollectCpuMs = stopwatch.Elapsed.TotalMilliseconds;
@@ -87,20 +97,52 @@ public static class LevelViewerPopulateTree
 		LevelContent content,
 		bool deferAliasProxy,
 		bool includeVariables,
-		List<FunctionEntity> modelReferences)
+		List<FunctionEntity> modelReferences,
+		uint mappingScopeInstanceEntityId)
 	{
 		Level level = content.Level;
 		List<Command> commands = new List<Command>();
-		List<(int ParentLocalIndex, Composite Nested)> nestedBranches = new List<(int, Composite)>();
+		List<(int ParentLocalIndex, Composite Nested, uint NestedMappingScopeInstanceEntityId)> nestedBranches =
+			new List<(int, Composite, uint)>();
 
-		CollectEntityList(composite.functions, composite, level, commands, nestedBranches, modelReferences);
+		CollectEntityList(
+			composite.functions,
+			composite,
+			level,
+			commands,
+			nestedBranches,
+			modelReferences,
+			mappingScopeInstanceEntityId);
 		if (includeVariables)
-			CollectEntityList(composite.variables, composite, level, commands, nestedBranches, modelReferences);
+		{
+			CollectEntityList(
+				composite.variables,
+				composite,
+				level,
+				commands,
+				nestedBranches,
+				modelReferences,
+				mappingScopeInstanceEntityId);
+		}
 
 		if (!deferAliasProxy)
 		{
-			CollectEntityList(composite.aliases, composite, level, commands, nestedBranches, modelReferences);
-			CollectEntityList(composite.proxies, composite, level, commands, nestedBranches, modelReferences);
+			CollectEntityList(
+				composite.aliases,
+				composite,
+				level,
+				commands,
+				nestedBranches,
+				modelReferences,
+				mappingScopeInstanceEntityId);
+			CollectEntityList(
+				composite.proxies,
+				composite,
+				level,
+				commands,
+				nestedBranches,
+				modelReferences,
+				mappingScopeInstanceEntityId);
 		}
 
 		if (nestedBranches.Count == 0)
@@ -108,17 +150,29 @@ public static class LevelViewerPopulateTree
 
 		if (nestedBranches.Count == 1)
 		{
-			(int parentLocalIndex, Composite nested) = nestedBranches[0];
-			List<Command> nestedCommands = CollectCompositeSubtree(nested, content, deferAliasProxy, includeVariables, modelReferences);
+			(int parentLocalIndex, Composite nested, uint nestedScopeId) = nestedBranches[0];
+			List<Command> nestedCommands = CollectCompositeSubtree(
+				nested,
+				content,
+				deferAliasProxy,
+				includeVariables,
+				modelReferences,
+				nestedScopeId);
 			MergeSubtree(commands, nestedCommands, parentLocalIndex);
 			return commands;
 		}
 
-		(int ParentLocalIndex, Composite Nested)[] branches = nestedBranches.ToArray();
+		(int ParentLocalIndex, Composite Nested, uint NestedMappingScopeInstanceEntityId)[] branches = nestedBranches.ToArray();
 		List<Command>[] nestedPlans = new List<Command>[branches.Length];
 		Parallel.For(0, branches.Length, i =>
 		{
-			nestedPlans[i] = CollectCompositeSubtree(branches[i].Nested, content, deferAliasProxy, includeVariables, modelReferences);
+			nestedPlans[i] = CollectCompositeSubtree(
+				branches[i].Nested,
+				content,
+				deferAliasProxy,
+				includeVariables,
+				modelReferences,
+				branches[i].NestedMappingScopeInstanceEntityId);
 		});
 
 		for (int i = 0; i < branches.Length; i++)
@@ -132,8 +186,9 @@ public static class LevelViewerPopulateTree
 		Composite composite,
 		Level level,
 		List<Command> commands,
-		List<(int ParentLocalIndex, Composite Nested)> nestedBranches,
-		List<FunctionEntity> modelReferences)
+		List<(int ParentLocalIndex, Composite Nested, uint NestedMappingScopeInstanceEntityId)> nestedBranches,
+		List<FunctionEntity> modelReferences,
+		uint mappingScopeInstanceEntityId)
 	{
 		if (entities == null)
 			return;
@@ -150,7 +205,8 @@ public static class LevelViewerPopulateTree
 				position,
 				rotationDegrees,
 				hasTransform,
-				entity.shortGUID.AsUInt32.ToString()));
+				entity.shortGUID.AsUInt32.ToString(),
+				mappingScopeInstanceEntityId));
 
 			if (entity is not FunctionEntity function)
 				continue;
@@ -164,7 +220,7 @@ public static class LevelViewerPopulateTree
 
 			Composite nested = level.Commands.GetComposite(function.function);
 			if (nested != null)
-				nestedBranches.Add((localIndex, nested));
+				nestedBranches.Add((localIndex, nested, function.shortGUID.AsUInt32));
 		}
 	}
 
@@ -185,7 +241,8 @@ public static class LevelViewerPopulateTree
 				cmd.Position,
 				cmd.RotationDegrees,
 				cmd.HasTransform,
-				cmd.NodeName));
+				cmd.NodeName,
+				cmd.MappingScopeInstanceEntityId));
 		}
 	}
 }

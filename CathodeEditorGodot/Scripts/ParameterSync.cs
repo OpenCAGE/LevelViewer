@@ -70,6 +70,14 @@ public static class ParameterSync
             return DataType.SPLINE;
         if (name == ShortGuidUtils.Generate("loop"))
             return DataType.BOOL;
+        if (name == ShortGuidUtils.Generate(ModelReferenceMaterialOverrides.MaterialParameterName))
+            return DataType.STRING;
+        if (name == ShortGuidUtils.Generate(ModelReferenceMaterialOverrides.VertexColourScaleParameterName)
+            || name == ShortGuidUtils.Generate(ModelReferenceMaterialOverrides.DiffuseColourScaleParameterName))
+            return DataType.VECTOR;
+        if (name == ShortGuidUtils.Generate(ModelReferenceMaterialOverrides.VertexOpacityScaleParameterName)
+            || name == ShortGuidUtils.Generate(ModelReferenceMaterialOverrides.DiffuseOpacityScaleParameterName))
+            return DataType.FLOAT;
         return DataType.NONE;
     }
 

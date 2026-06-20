@@ -87,10 +87,12 @@ public partial class ModelReferencePreview : FunctionEntityPreview
 		if (sourceRenderables.Count == 0)
 			return;
 
-		MaterialMappings.MaterialMapping mapping = TryResolveMappingForSpawnScope();
-		List<Tuple<int, int>> renderables = mapping != null
-			? ModelReferenceMaterialMapping.ApplyMapping(_scene.Content.Level, mapping, sourceRenderables)
-			: sourceRenderables;
+        MaterialMappings.MaterialMapping mapping = TryResolveMappingForSpawnScope();
+        List<Tuple<int, int>> renderables = mapping != null
+            ? ModelReferenceMaterialMapping.ApplyMapping(_scene.Content.Level, mapping, sourceRenderables)
+            : new List<Tuple<int, int>>(sourceRenderables);
+
+        ApplyResolvedMaterialOverrides(renderables);
 
 		int count = Math.Min(sourceRenderables.Count, renderables.Count);
 		for (int i = 0; i < count; i++)
@@ -117,11 +119,15 @@ public partial class ModelReferencePreview : FunctionEntityPreview
 		if (_scene == null || renderTarget == null || modelWriteIndex < 0 || materialWriteIndex < 0)
 			return;
 
+		ResolveOverrideParameterEntities(out Entity parameterEntity, out Entity fallbackEntity);
 		_scene.SpawnRenderable(
 			renderTarget,
 			_scene.Content.Level.Models.GetAtWriteIndex(modelWriteIndex),
 			_scene.Content.Level.Materials.GetAtWriteIndex(materialWriteIndex),
-			sourceMaterialWriteIndex >= 0 ? sourceMaterialWriteIndex : materialWriteIndex);
+			sourceMaterialWriteIndex >= 0 ? sourceMaterialWriteIndex : materialWriteIndex,
+			Entity,
+			parameterEntity,
+			fallbackEntity);
 	}
 
 	internal Node3D GetPopulateRenderTarget() => GetRenderTarget();
@@ -177,17 +183,49 @@ public partial class ModelReferencePreview : FunctionEntityPreview
                 _mappingScopeInstanceEntityId,
                 out List<Tuple<int, int>> cached))
         {
-            return cached;
+            List<Tuple<int, int>> resolved = new List<Tuple<int, int>>(cached);
+            ApplyResolvedMaterialOverrides(resolved);
+            return resolved;
         }
 
         MaterialMappings.MaterialMapping mapping = TryResolveMappingForSpawnScope();
         if (mapping == null)
             return indexes;
 
-        return ModelReferenceMaterialMapping.ApplyMapping(
+        List<Tuple<int, int>> mapped = ModelReferenceMaterialMapping.ApplyMapping(
 			_scene.Content.Level,
 			mapping,
 			indexes);
+        return ApplyResolvedMaterialOverrides(mapped);
+    }
+
+    internal List<Tuple<int, int>> ApplyResolvedMaterialOverrides(List<Tuple<int, int>> renderables)
+    {
+        if (renderables == null || renderables.Count == 0 || _scene?.Content?.Level == null || Entity == null)
+            return renderables;
+
+        ResolveOverrideParameterEntities(out Entity parameterEntity, out Entity fallbackEntity);
+        ModelReferenceMaterialOverrides.TryApplyMaterialParameterOverride(
+            _scene.Content.Level,
+            parameterEntity,
+            fallbackEntity,
+            renderables);
+        return renderables;
+    }
+
+    internal void ResolveOverrideParameterEntities(out Entity parameterEntity, out Entity fallbackEntity)
+    {
+        fallbackEntity = Entity;
+        parameterEntity = Entity;
+        if (_scene == null || Entity == null)
+            return;
+
+        Node3D renderTarget = GetRenderTarget();
+        if (renderTarget == null)
+            return;
+
+        if (_scene.TryGetAliasParameterEntityForRenderTarget(renderTarget, Entity, out Entity alias))
+            parameterEntity = alias;
     }
 
     internal List<Tuple<int, int>> GetSourceRenderableIndexes()

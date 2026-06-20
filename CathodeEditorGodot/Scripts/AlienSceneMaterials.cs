@@ -42,7 +42,10 @@ public static class AlienSceneMaterials
 		public bool Supported { get; }
 	}
 
-	public static MaterialResult GetMaterial(Materials.Material material, AlienScene scene)
+	public static MaterialResult GetMaterial(
+		Materials.Material material,
+		AlienScene scene,
+		ModelReferenceMaterialOverrides.EnvironmentColourScalars? environmentScalars = null)
 	{
 		if (material == null || material.Shader == null)
 			return Unsupported(material, "NULL");
@@ -53,7 +56,7 @@ public static class AlienSceneMaterials
 		if (diffuseSampler < 0 && !TryGetSeparateAlphaMap(material, shader, scene, out _))
 			return Unsupported(material, baseName + " (NO DIFFUSE SAMPLER)");
 
-		return CreateShadedMaterial(material, shader, scene, baseName, diffuseSampler);
+		return CreateShadedMaterial(material, shader, scene, baseName, diffuseSampler, environmentScalars);
 	}
 
 	private static MaterialResult Unsupported(Materials.Material material, string name)
@@ -67,7 +70,8 @@ public static class AlienSceneMaterials
 		Shaders.Shader shader,
 		AlienScene scene,
 		string name,
-		int diffuseSamplerIndex)
+		int diffuseSamplerIndex,
+		ModelReferenceMaterialOverrides.EnvironmentColourScalars? environmentScalars = null)
 	{
 		bool doubleSided = IsDoubleSided(shader);
 		ResolveMaterialTextures(material, shader, scene, diffuseSamplerIndex, out Texture2D diffuse, out Texture2D separateAlphaMap);
@@ -79,7 +83,7 @@ public static class AlienSceneMaterials
 			RenderPriority = useAlpha ? TransparentRenderPriority : OpaqueRenderPriority,
 		};
 
-		ApplyDiffuseParameters(godotMaterial, material, shader, useAlpha, diffuse, separateAlphaMap);
+		ApplyDiffuseParameters(godotMaterial, material, shader, useAlpha, diffuse, separateAlphaMap, environmentScalars);
 		return new MaterialResult(godotMaterial, true);
 	}
 
@@ -88,7 +92,8 @@ public static class AlienSceneMaterials
 		Shaders.Shader shader,
 		AlienScene scene,
 		string name,
-		int diffuseSamplerIndex)
+		int diffuseSamplerIndex,
+		ModelReferenceMaterialOverrides.EnvironmentColourScalars? environmentScalars = null)
 	{
 		bool doubleSided = IsDoubleSided(shader);
 		ResolveMaterialTextures(material, shader, scene, diffuseSamplerIndex, out Texture2D diffuse, out Texture2D separateAlphaMap);
@@ -100,7 +105,7 @@ public static class AlienSceneMaterials
 			RenderPriority = useAlpha ? TransparentWireframeRenderPriority : TransparentRenderPriority,
 		};
 
-		ApplyDiffuseParameters(godotMaterial, material, shader, useAlpha, diffuse, separateAlphaMap);
+		ApplyDiffuseParameters(godotMaterial, material, shader, useAlpha, diffuse, separateAlphaMap, environmentScalars);
 		return godotMaterial;
 	}
 
@@ -177,10 +182,25 @@ public static class AlienSceneMaterials
 		Shaders.Shader shader,
 		bool useAlpha,
 		Texture2D diffuse,
-		Texture2D separateAlphaMap)
+		Texture2D separateAlphaMap,
+		ModelReferenceMaterialOverrides.EnvironmentColourScalars? environmentScalars = null)
 	{
 		AlienSceneShaderParams.MaterialParams shaderParams = AlienSceneShaderParams.GetParams(shader.Ubershader);
-		godotMaterial.SetShaderParameter("diffuse_tint", AlienSceneShaderParams.GetDiffuseTint(material, shader, shaderParams, useAlpha));
+		Color diffuseTint = AlienSceneShaderParams.GetDiffuseTint(material, shader, shaderParams, useAlpha);
+		Color vertexColourTint = Colors.White;
+		if (environmentScalars.HasValue)
+		{
+			ModelReferenceMaterialOverrides.EnvironmentColourScalars scalars = environmentScalars.Value;
+			diffuseTint = new Color(
+				diffuseTint.R * scalars.Diffuse.X,
+				diffuseTint.G * scalars.Diffuse.Y,
+				diffuseTint.B * scalars.Diffuse.Z,
+				diffuseTint.A * scalars.Diffuse.W);
+			vertexColourTint = new Color(scalars.Vertex.X, scalars.Vertex.Y, scalars.Vertex.Z, scalars.Vertex.W);
+		}
+
+		godotMaterial.SetShaderParameter("diffuse_tint", diffuseTint);
+		godotMaterial.SetShaderParameter("vertex_colour_tint", vertexColourTint);
 		godotMaterial.SetShaderParameter("diffuse_uv_mult", AlienSceneShaderParams.GetUvScale(material, shader, shaderParams));
 
 		godotMaterial.SetShaderParameter("use_diffuse_map", diffuse != null);

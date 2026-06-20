@@ -45,3 +45,7 @@ vec3 model_reference_apply_preview_shading(vec3 albedo, float ndl) {
 	lit = model_reference_compress_highlights(lit);
 	return model_reference_cap_peak(lit);
 }
+
+vec4 model_reference_apply_vertex_colour_tint(vec4 color, vec4 vertex_colour_tint) {
+	return vec4(color.rgb * vertex_colour_tint.rgb, color.a * vertex_colour_tint.a);
+}

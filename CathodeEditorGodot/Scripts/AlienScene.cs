@@ -38,6 +38,7 @@ public partial class AlienScene : Node3D
 	private Dictionary<Materials.Material, ShaderMaterial> _materials = new Dictionary<Materials.Material, ShaderMaterial>();
 	private Dictionary<Materials.Material, ShaderMaterial> _wireframeMaterials = new Dictionary<Materials.Material, ShaderMaterial>();
 	private Dictionary<ShaderMaterial, bool> _materialSupport = new Dictionary<ShaderMaterial, bool>();
+	private readonly Dictionary<ulong, ShaderMaterial> _modelReferenceOverrideMaterials = new Dictionary<ulong, ShaderMaterial>();
 	private Dictionary<MeshInstance3D, Materials.Material> _modelReferenceMeshes = new Dictionary<MeshInstance3D, Materials.Material>();
 	// Shared Godot mesh cache: one ArrayMesh per models write index (shared by all instances).
 	private readonly Dictionary<int, MeshHolder> _modelMeshesByWriteIndex = new Dictionary<int, MeshHolder>();
@@ -104,6 +105,7 @@ public partial class AlienScene : Node3D
 	private readonly List<ModelReferencePreview> _bulkModelReferencePreviews = new List<ModelReferencePreview>();
 	private readonly List<BulkMeshSpawnJob> _bulkMeshSpawnJobs = new List<BulkMeshSpawnJob>();
 	private Dictionary<ulong, List<Tuple<int, int>>> _modelRefRenderablesByEntityId;
+	private Dictionary<Node3D, Entity> _aliasParameterEntityByRenderTarget;
 	private bool _bulkMeshSpawning;
 	private bool _deferBulkPickRegistration;
 	private readonly List<(MeshInstance3D Mesh, Node3D Owner)> _bulkPickableMeshes = new List<(MeshInstance3D, Node3D)>();
@@ -575,6 +577,7 @@ public partial class AlienScene : Node3D
 	{
 		_compositeNodes.Clear();
 		_nodeEntities.Clear();
+		_aliasParameterEntityByRenderTarget = null;
 		_deferredPickOwners.Clear();
 		_bulkPopulatePreviews.Clear();
 		_bulkModelReferencePreviews.Clear();
@@ -636,7 +639,6 @@ public partial class AlienScene : Node3D
 		{
 			_parentNode.ProcessMode = Node.ProcessModeEnum.Inherit;
 		}
-		ViewerLog.Print("Spawned " + spawnPlan.Commands.Count + " entities.");
 
 		_wiringCompositeLinks = true;
 		try
@@ -647,6 +649,8 @@ public partial class AlienScene : Node3D
 		{
 			_wiringCompositeLinks = false;
 		}
+
+		RebuildAliasParameterEntityIndex();
 
 		// Mesh jobs need alias wiring and instance mapping meta before material remaps resolve.
 		RebuildBulkMeshSpawnJobsFromPreviews();
@@ -690,7 +694,14 @@ public partial class AlienScene : Node3D
 				if (submesh == null || material == null)
 					continue;
 
-				SpawnRenderable(job.RenderTarget, submesh, material);
+				SpawnRenderable(
+					job.RenderTarget,
+					submesh,
+					material,
+					job.SourceMaterialWriteIndex,
+					ModelReferenceMaterialMapping.TryGetEntityById(job.ModelReferenceEntityId),
+					ModelReferenceMaterialMapping.TryGetEntityById(job.OverrideParameterEntityId),
+					ModelReferenceMaterialMapping.TryGetEntityById(job.ModelReferenceEntityId));
 			}
 		}
 		finally
@@ -1789,6 +1800,45 @@ public partial class AlienScene : Node3D
 
 	public Entity FindEntityById(uint entityId) => ModelReferenceMaterialMapping.TryGetEntityById(entityId);
 
+	internal bool TryGetAliasParameterEntityForRenderTarget(
+		Node3D renderTarget,
+		Entity modelReferenceEntity,
+		out Entity aliasEntity)
+	{
+		if (_aliasParameterEntityByRenderTarget == null && _nodeEntities.Count > 0)
+			RebuildAliasParameterEntityIndex();
+
+		if (ModelReferenceMaterialOverrides.TryGetAliasParameterEntityFromIndex(
+			_aliasParameterEntityByRenderTarget,
+			renderTarget,
+			modelReferenceEntity,
+			out aliasEntity))
+		{
+			return true;
+		}
+
+		return ModelReferenceMaterialOverrides.TryFindAliasParameterEntity(
+			_nodeEntities,
+			renderTarget,
+			modelReferenceEntity,
+			_content?.Level?.Commands,
+			out AliasEntity resolvedAlias)
+			&& (aliasEntity = resolvedAlias) != null;
+	}
+
+	private void RebuildAliasParameterEntityIndex()
+	{
+		Commands commands = _content?.Level?.Commands;
+		if (commands == null)
+		{
+			_aliasParameterEntityByRenderTarget = null;
+			return;
+		}
+
+		_aliasParameterEntityByRenderTarget =
+			ModelReferenceMaterialOverrides.BuildAliasParameterEntityIndex(_nodeEntities, commands);
+	}
+
 	internal bool TryGetModelRefRenderables(
 		uint entityId,
 		uint mappingScopeInstanceEntityId,
@@ -1876,6 +1926,8 @@ public partial class AlienScene : Node3D
 		ShortGuid mappingParameterId = ShortGuidUtils.Generate(ModelReferenceMaterialMapping.MappingParameterName);
 		if (paramName == mappingParameterId)
 			RefreshMaterialMappingForParameterChange(dataEntity, dataComposite);
+		else if (ModelReferenceMaterialOverrides.IsModelReferenceOverrideParameter(paramName))
+			RefreshModelReferenceOverridesForParameterChange(dataEntity, dataComposite);
 
 		DataType syncDataType = ParameterSync.GetDataType(sync);
 		if (syncDataType == DataType.RESOURCE && paramName != mappingParameterId)
@@ -2030,6 +2082,7 @@ public partial class AlienScene : Node3D
 
 		ModelReferenceMaterialMapping.InvalidateRuntimeMappingCaches(_content.Level.Commands);
 		InvalidateModelRefRenderablesCache();
+		_aliasParameterEntityByRenderTarget = null;
 
 		if (scopeEntity is FunctionEntity function
 			&& ModelReferenceMaterialMapping.IsCompositeInstanceEntity(function, _content.Level.Commands))
@@ -2069,6 +2122,95 @@ public partial class AlienScene : Node3D
 			{
 				RefreshDirectModelReferencesInCompositeInstance(pointedNode);
 			}
+		}
+	}
+
+	private void RefreshModelReferenceOverridesForParameterChange(Entity scopeEntity, Composite ownerComposite)
+	{
+		if (scopeEntity == null || ownerComposite == null)
+			return;
+
+		InvalidateModelRefRenderablesCache();
+		_aliasParameterEntityByRenderTarget = null;
+
+		if (scopeEntity is FunctionEntity function
+			&& ModelReferenceMaterialMapping.IsModelReferenceEntity(function))
+		{
+			RefreshModelReferencePreviewNodes(ownerComposite, function);
+			RefreshModelReferenceAliasOverrides(ownerComposite, function);
+			return;
+		}
+
+		if (scopeEntity is FunctionEntity compositeInstance
+			&& ModelReferenceMaterialMapping.IsCompositeInstanceEntity(compositeInstance, _content.Level.Commands))
+		{
+			if (TryGetCachedEntityNodes(ownerComposite.shortGUID, compositeInstance.shortGUID, out List<Node3D> instanceNodes))
+			{
+				for (int i = 0; i < instanceNodes.Count; i++)
+					RefreshDirectModelReferencesInCompositeInstance(instanceNodes[i]);
+			}
+
+			return;
+		}
+
+		if (scopeEntity is not AliasEntity alias)
+			return;
+
+		if (!TryGetCachedEntityNodes(ownerComposite.shortGUID, alias.shortGUID, out List<Node3D> aliasNodes))
+			return;
+
+		for (int i = 0; i < aliasNodes.Count; i++)
+		{
+			if (aliasNodes[i] is not EntityOverride aliasOverride)
+				continue;
+
+			if (!TryResolveAliasPointedSceneNode(aliasOverride, alias, ownerComposite, out Node3D pointedNode))
+				continue;
+
+			RefreshFunctionEntityPreviews(pointedNode);
+		}
+	}
+
+	private void RefreshModelReferencePreviewNodes(Composite ownerComposite, FunctionEntity modelReference)
+	{
+		if (!TryGetCachedEntityNodes(ownerComposite.shortGUID, modelReference.shortGUID, out List<Node3D> entityNodes))
+			return;
+
+		for (int i = 0; i < entityNodes.Count; i++)
+			RefreshFunctionEntityPreviews(entityNodes[i]);
+	}
+
+	private void RefreshModelReferenceAliasOverrides(Composite ownerComposite, FunctionEntity modelReference)
+	{
+		Commands commands = _content.Level.Commands;
+		HashSet<Node3D> refreshed = new HashSet<Node3D>();
+
+		foreach (KeyValuePair<Node3D, Entity> entry in _nodeEntities)
+		{
+			if (entry.Value is not AliasEntity alias)
+				continue;
+			if (entry.Key is not EntityOverride aliasOverride)
+				continue;
+			if (!entry.Key.HasMeta(OwnerCompositeMetaKey))
+				continue;
+
+			Composite aliasComposite = commands.GetComposite(
+				new ShortGuid(entry.Key.GetMeta(OwnerCompositeMetaKey).AsUInt32()));
+			if (aliasComposite != ownerComposite)
+				continue;
+
+			(_, Entity targetEntity) = commands.Utils.GetResolvedTarget(
+				commands.Utils.ResolveAlias(alias, aliasComposite));
+			if (targetEntity != modelReference)
+				continue;
+
+			if (!TryResolveAliasPointedSceneNode(aliasOverride, alias, aliasComposite, out Node3D pointedNode))
+				continue;
+
+			if (!refreshed.Add(pointedNode))
+				continue;
+
+			RefreshFunctionEntityPreviews(pointedNode);
 		}
 	}
 
@@ -2264,44 +2406,136 @@ public partial class AlienScene : Node3D
 	private void RebuildBulkMeshSpawnJobsFromPreviews()
 	{
 		_bulkMeshSpawnJobs.Clear();
+		Dictionary<uint, List<Tuple<int, int>>> sourceRenderablesByEntityId = BuildBulkSourceRenderablesCache();
+		Dictionary<(uint EntityId, uint ScopeId, uint OverrideEntityId), List<Tuple<int, int>>> resolvedRenderablesCache =
+			new Dictionary<(uint, uint, uint), List<Tuple<int, int>>>();
+
 		for (int i = 0; i < _bulkModelReferencePreviews.Count; i++)
 		{
 			ModelReferencePreview modelPreview = _bulkModelReferencePreviews[i];
 			if (modelPreview == null || !GodotObject.IsInstanceValid(modelPreview))
 				continue;
 
-			QueueBulkMeshSpawnJobsForPreview(modelPreview);
+			QueueBulkMeshSpawnJobsForPreview(
+				modelPreview,
+				sourceRenderablesByEntityId,
+				resolvedRenderablesCache);
 		}
 	}
 
-	private void QueueBulkMeshSpawnJobsForPreview(ModelReferencePreview modelPreview)
+	private Dictionary<uint, List<Tuple<int, int>>> BuildBulkSourceRenderablesCache()
+	{
+		Dictionary<uint, List<Tuple<int, int>>> sourceRenderablesByEntityId =
+			new Dictionary<uint, List<Tuple<int, int>>>();
+		for (int i = 0; i < _bulkModelReferencePreviews.Count; i++)
+		{
+			ModelReferencePreview modelPreview = _bulkModelReferencePreviews[i];
+			if (modelPreview?.Entity == null)
+				continue;
+
+			uint entityId = modelPreview.Entity.shortGUID.AsUInt32;
+			if (sourceRenderablesByEntityId.ContainsKey(entityId))
+				continue;
+
+			sourceRenderablesByEntityId[entityId] =
+				ModelReferencePreview.GetRenderableIndexes(_content, modelPreview.Entity);
+		}
+
+		return sourceRenderablesByEntityId;
+	}
+
+	private void QueueBulkMeshSpawnJobsForPreview(
+		ModelReferencePreview modelPreview,
+		Dictionary<uint, List<Tuple<int, int>>> sourceRenderablesByEntityId,
+		Dictionary<(uint EntityId, uint ScopeId, uint OverrideEntityId), List<Tuple<int, int>>> resolvedRenderablesCache)
 	{
 		if (modelPreview?.Entity == null)
 			return;
 
 		uint entityId = modelPreview.Entity.shortGUID.AsUInt32;
 		uint scopeId = modelPreview.MappingScopeInstanceEntityId;
-		if (!TryGetModelRefRenderables(entityId, scopeId, out List<Tuple<int, int>> renderables))
+		if (!sourceRenderablesByEntityId.TryGetValue(entityId, out List<Tuple<int, int>> sourceRenderables)
+			|| sourceRenderables == null
+			|| sourceRenderables.Count == 0)
 		{
-			renderables = modelPreview.GetResolvedRenderableIndexes();
-			CacheModelRefRenderables(entityId, scopeId, renderables);
-		}
-
-		if (renderables == null || renderables.Count == 0)
 			return;
+		}
 
 		Node3D renderTarget = modelPreview.GetPopulateRenderTarget();
 		if (renderTarget == null)
 			return;
 
-		for (int j = 0; j < renderables.Count; j++)
+		uint overrideParameterEntityId = entityId;
+		if (_aliasParameterEntityByRenderTarget != null
+			&& _aliasParameterEntityByRenderTarget.TryGetValue(renderTarget, out Entity aliasEntity)
+			&& aliasEntity != null)
+		{
+			overrideParameterEntityId = aliasEntity.shortGUID.AsUInt32;
+		}
+
+		(uint EntityId, uint ScopeId, uint OverrideEntityId) resolvedKey =
+			(entityId, scopeId, overrideParameterEntityId);
+		if (!resolvedRenderablesCache.TryGetValue(resolvedKey, out List<Tuple<int, int>> renderables))
+		{
+			if (!TryGetMappedModelRefRenderables(entityId, scopeId, sourceRenderables, out List<Tuple<int, int>> mapped))
+				return;
+
+			Entity parameterEntity = overrideParameterEntityId == entityId
+				? modelPreview.Entity
+				: ModelReferenceMaterialMapping.TryGetEntityById(overrideParameterEntityId);
+			if (ModelReferenceMaterialOverrides.NeedsInstanceMaterialRemap(parameterEntity, modelPreview.Entity))
+			{
+				renderables = new List<Tuple<int, int>>(mapped);
+				ModelReferenceMaterialOverrides.TryApplyMaterialParameterOverride(
+					_content.Level,
+					parameterEntity,
+					modelPreview.Entity,
+					renderables);
+			}
+			else
+			{
+				renderables = mapped;
+			}
+
+			resolvedRenderablesCache[resolvedKey] = renderables;
+		}
+
+		if (renderables == null || renderables.Count == 0)
+			return;
+
+		int count = Math.Min(sourceRenderables.Count, renderables.Count);
+		for (int j = 0; j < count; j++)
 		{
 			Tuple<int, int> renderable = renderables[j];
+			Tuple<int, int> source = sourceRenderables[j];
 			if (renderable.Item1 < 0 || renderable.Item2 < 0)
 				continue;
 
-			_bulkMeshSpawnJobs.Add(new BulkMeshSpawnJob(renderTarget, renderable.Item1, renderable.Item2));
+			int sourceMaterialWriteIndex = source != null ? source.Item2 : renderable.Item2;
+			_bulkMeshSpawnJobs.Add(new BulkMeshSpawnJob(
+				renderTarget,
+				renderable.Item1,
+				renderable.Item2,
+				sourceMaterialWriteIndex,
+				entityId,
+				overrideParameterEntityId));
 		}
+	}
+
+	private bool TryGetMappedModelRefRenderables(
+		uint entityId,
+		uint scopeId,
+		List<Tuple<int, int>> sourceRenderables,
+		out List<Tuple<int, int>> mapped)
+	{
+		if (TryGetModelRefRenderables(entityId, scopeId, out mapped))
+			return mapped != null && mapped.Count > 0;
+
+		if (scopeId != 0 && TryGetModelRefRenderables(entityId, 0, out mapped))
+			return mapped != null && mapped.Count > 0;
+
+		mapped = sourceRenderables;
+		return mapped != null && mapped.Count > 0;
 	}
 
 	private void EnsureFunctionEntityPreviewCache()
@@ -2562,9 +2796,19 @@ public partial class AlienScene : Node3D
 		Node3D parent,
 		Models.CS2.Component.LOD.Submesh submesh,
 		Materials.Material material,
-		int sourceMaterialWriteIndex = -1)
+		int sourceMaterialWriteIndex = -1,
+		Entity modelReferenceEntity = null,
+		Entity overrideParameterEntity = null,
+		Entity fallbackParameterEntity = null)
 	{
-		CreateRenderable(parent, submesh, material, sourceMaterialWriteIndex);
+		CreateRenderable(
+			parent,
+			submesh,
+			material,
+			sourceMaterialWriteIndex,
+			modelReferenceEntity,
+			overrideParameterEntity,
+			fallbackParameterEntity);
 	}
 
 	public void SetModelReferenceWireframe(bool enabled)
@@ -2661,7 +2905,10 @@ public partial class AlienScene : Node3D
 		Node3D parent,
 		Models.CS2.Component.LOD.Submesh submesh,
 		Materials.Material material,
-		int sourceMaterialWriteIndex = -1)
+		int sourceMaterialWriteIndex = -1,
+		Entity modelReferenceEntity = null,
+		Entity overrideParameterEntity = null,
+		Entity fallbackParameterEntity = null)
 	{
 		MeshHolder holder = GetModel(submesh);
 		if (holder == null || holder.MainMesh == null || holder.MainMesh.GetSurfaceCount() == 0)
@@ -2691,16 +2938,36 @@ public partial class AlienScene : Node3D
 				sourceMaterialWriteIndex);
 		}
 
+		if (modelReferenceEntity != null)
+		{
+			meshInstance.SetMeta(
+				ModelReferenceMaterialOverrides.ModelReferenceEntityMetaKey,
+				modelReferenceEntity.shortGUID.AsUInt32);
+		}
+
+		Entity parameterEntity = overrideParameterEntity ?? modelReferenceEntity;
+		if (parameterEntity != null)
+		{
+			meshInstance.SetMeta(
+				ModelReferenceMaterialOverrides.OverrideParameterEntityMetaKey,
+				parameterEntity.shortGUID.AsUInt32);
+		}
+
+		Entity fallbackEntity = fallbackParameterEntity ?? modelReferenceEntity;
 		LevelViewerMeshUtil.ConfigureMeshInstance(meshInstance);
 		if (!_bulkMeshSpawning)
 			meshInstance.AddToGroup("model_reference_renderable");
 		if (!_bulkMeshSpawning)
 			meshInstance.TreeExited += () => _modelReferenceMeshes.Remove(meshInstance);
 		_modelReferenceMeshes[meshInstance] = material;
-		meshInstance.MaterialOverride = GetSolidMaterial(material);
+		meshInstance.MaterialOverride = GetSolidMaterialForModelReference(
+			material,
+			modelReferenceEntity,
+			parameterEntity,
+			fallbackEntity);
 		parent.AddChild(meshInstance);
 		if (!_bulkMeshSpawning && ModelReferenceRenderSettings.WireframeEnabled)
-			UpdateWireframeOverlay(meshInstance, material);
+			UpdateWireframeOverlay(meshInstance, material, modelReferenceEntity, parameterEntity, fallbackEntity);
 		if (_deferBulkPickRegistration)
 			_bulkPickableMeshes.Add((meshInstance, parent));
 		else if (!_bulkMeshSpawning)
@@ -2889,6 +3156,155 @@ public partial class AlienScene : Node3D
 		return _materialSupport[_materials[material]];
 	}
 
+	private ShaderMaterial GetSolidMaterialForModelReference(
+		Materials.Material material,
+		Entity modelReferenceEntity,
+		Entity overrideParameterEntity = null,
+		Entity fallbackParameterEntity = null)
+	{
+		if (TryCreateModelReferenceMaterial(
+			material,
+			modelReferenceEntity,
+			overrideParameterEntity,
+			fallbackParameterEntity,
+			wireframe: false,
+			out ShaderMaterial customMaterial))
+		{
+			return customMaterial;
+		}
+
+		return GetSolidMaterial(material);
+	}
+
+	private ShaderMaterial GetWireframeMaterialForModelReference(
+		Materials.Material material,
+		Entity modelReferenceEntity,
+		Entity overrideParameterEntity = null,
+		Entity fallbackParameterEntity = null)
+	{
+		if (TryCreateModelReferenceMaterial(
+			material,
+			modelReferenceEntity,
+			overrideParameterEntity,
+			fallbackParameterEntity,
+			wireframe: true,
+			out ShaderMaterial customMaterial))
+		{
+			return customMaterial;
+		}
+
+		return GetWireframeMaterial(material);
+	}
+
+	private bool TryCreateModelReferenceMaterial(
+		Materials.Material material,
+		Entity modelReferenceEntity,
+		Entity overrideParameterEntity,
+		Entity fallbackParameterEntity,
+		bool wireframe,
+		out ShaderMaterial shaderMaterial)
+	{
+		shaderMaterial = null;
+		Entity parameterEntity = overrideParameterEntity ?? modelReferenceEntity;
+		Entity fallbackEntity = fallbackParameterEntity ?? modelReferenceEntity;
+		if (parameterEntity == null)
+			return false;
+
+		if (!ModelReferenceMaterialOverrides.TryGetEnvironmentColourScalars(
+				parameterEntity,
+				fallbackEntity,
+				material,
+				out ModelReferenceMaterialOverrides.EnvironmentColourScalars scalars)
+			|| scalars.IsDefault)
+		{
+			return false;
+		}
+
+		uint parameterEntityId = parameterEntity?.shortGUID.AsUInt32 ?? 0;
+		uint fallbackEntityId = fallbackEntity?.shortGUID.AsUInt32 ?? 0;
+		int materialWriteIndex = _content.Level.Materials.GetWriteIndex(material);
+		ulong cacheKey = MakeModelReferenceOverrideMaterialKey(
+			materialWriteIndex,
+			parameterEntityId,
+			fallbackEntityId,
+			scalars,
+			wireframe);
+		if (_modelReferenceOverrideMaterials.TryGetValue(cacheKey, out ShaderMaterial cachedMaterial)
+			&& cachedMaterial != null
+			&& GodotObject.IsInstanceValid(cachedMaterial))
+		{
+			shaderMaterial = cachedMaterial;
+			return true;
+		}
+
+		int diffuseSampler = AlienSceneMaterials.GetDiffuseSamplerIndex(material.Shader);
+		if (diffuseSampler < 0)
+			return false;
+
+		if (wireframe)
+		{
+			shaderMaterial = AlienSceneMaterials.CreateWireframeMaterial(
+				material,
+				material.Shader,
+				this,
+				material.Name + " " + material.Shader.Ubershader,
+				diffuseSampler,
+				scalars);
+		}
+		else
+		{
+			shaderMaterial = AlienSceneMaterials.GetMaterial(material, this, scalars).Material;
+		}
+
+		if (shaderMaterial != null)
+			_modelReferenceOverrideMaterials[cacheKey] = shaderMaterial;
+
+		return shaderMaterial != null;
+	}
+
+	private static ulong MakeModelReferenceOverrideMaterialKey(
+		int materialWriteIndex,
+		uint parameterEntityId,
+		uint fallbackEntityId,
+		ModelReferenceMaterialOverrides.EnvironmentColourScalars scalars,
+		bool wireframe)
+	{
+		ulong hash = (ulong)(uint)materialWriteIndex;
+		hash = unchecked(hash * 397 + parameterEntityId);
+		hash = unchecked(hash * 397 + fallbackEntityId);
+		hash = unchecked(hash * 397 + (wireframe ? 1u : 0u));
+		hash = unchecked(hash * 397 + (uint)scalars.Vertex.GetHashCode());
+		hash = unchecked(hash * 397 + (uint)scalars.Diffuse.GetHashCode());
+		return hash;
+	}
+
+	private Entity ResolveModelReferenceEntityFromMesh(MeshInstance3D meshInstance)
+	{
+		if (meshInstance == null || !meshInstance.HasMeta(ModelReferenceMaterialOverrides.ModelReferenceEntityMetaKey))
+			return null;
+
+		uint entityId = meshInstance.GetMeta(ModelReferenceMaterialOverrides.ModelReferenceEntityMetaKey).AsUInt32();
+		return ModelReferenceMaterialMapping.TryGetEntityById(entityId);
+	}
+
+	private void ResolveMaterialOverrideEntitiesFromMesh(
+		MeshInstance3D meshInstance,
+		out Entity modelReferenceEntity,
+		out Entity overrideParameterEntity,
+		out Entity fallbackParameterEntity)
+	{
+		modelReferenceEntity = ResolveModelReferenceEntityFromMesh(meshInstance);
+		fallbackParameterEntity = modelReferenceEntity;
+		overrideParameterEntity = modelReferenceEntity;
+		if (meshInstance == null || !meshInstance.HasMeta(ModelReferenceMaterialOverrides.OverrideParameterEntityMetaKey))
+			return;
+
+		uint overrideEntityId = meshInstance.GetMeta(ModelReferenceMaterialOverrides.OverrideParameterEntityMetaKey).AsUInt32();
+		Entity resolvedOverride = ModelReferenceMaterialMapping.TryGetEntityById(overrideEntityId);
+		if (resolvedOverride != null)
+			overrideParameterEntity = resolvedOverride;
+	}
+
 	private ShaderMaterial GetSolidMaterial(Materials.Material material)
 	{
 		EnsureSolidMaterial(material);
@@ -2933,6 +3349,14 @@ public partial class AlienScene : Node3D
 		}
 
 		_wireframeMaterials.Clear();
+
+		foreach (KeyValuePair<ulong, ShaderMaterial> entry in _modelReferenceOverrideMaterials)
+		{
+			if (entry.Value != null && GodotObject.IsInstanceValid(entry.Value))
+				entry.Value.Dispose();
+		}
+
+		_modelReferenceOverrideMaterials.Clear();
 	}
 
 	private void EnsureSolidMaterial(Materials.Material material)
@@ -2948,14 +3372,46 @@ public partial class AlienScene : Node3D
 	private const string WireframeOverlayNodeName = "WireframeOverlay";
 	private const string LegacyWireframeOverlaySuffix = " WireframeOverlay";
 
-	private void ApplyModelReferenceMaterial(MeshInstance3D solidMesh, Materials.Material material)
+	private void ApplyModelReferenceMaterial(
+		MeshInstance3D solidMesh,
+		Materials.Material material,
+		Entity modelReferenceEntity = null,
+		Entity overrideParameterEntity = null,
+		Entity fallbackParameterEntity = null)
 	{
-		solidMesh.MaterialOverride = GetSolidMaterial(material);
-		UpdateWireframeOverlay(solidMesh, material);
+		if (modelReferenceEntity == null || overrideParameterEntity == null || fallbackParameterEntity == null)
+			ResolveMaterialOverrideEntitiesFromMesh(
+				solidMesh,
+				out modelReferenceEntity,
+				out overrideParameterEntity,
+				out fallbackParameterEntity);
+
+		solidMesh.MaterialOverride = GetSolidMaterialForModelReference(
+			material,
+			modelReferenceEntity,
+			overrideParameterEntity,
+			fallbackParameterEntity);
+		UpdateWireframeOverlay(
+			solidMesh,
+			material,
+			modelReferenceEntity,
+			overrideParameterEntity,
+			fallbackParameterEntity);
 	}
 
-	private void UpdateWireframeOverlay(MeshInstance3D solidMesh, Materials.Material material)
+	private void UpdateWireframeOverlay(
+		MeshInstance3D solidMesh,
+		Materials.Material material,
+		Entity modelReferenceEntity = null,
+		Entity overrideParameterEntity = null,
+		Entity fallbackParameterEntity = null)
 	{
+		if (modelReferenceEntity == null || overrideParameterEntity == null || fallbackParameterEntity == null)
+			ResolveMaterialOverrideEntitiesFromMesh(
+				solidMesh,
+				out modelReferenceEntity,
+				out overrideParameterEntity,
+				out fallbackParameterEntity);
 		RemoveLegacySiblingWireframeOverlay(solidMesh);
 
 		MeshInstance3D overlay = FindWireframeOverlay(solidMesh);
@@ -2971,7 +3427,11 @@ public partial class AlienScene : Node3D
 
 		if (overlay != null)
 		{
-			ShaderMaterial wireframe = GetWireframeMaterial(material);
+			ShaderMaterial wireframe = GetWireframeMaterialForModelReference(
+				material,
+				modelReferenceEntity,
+				overrideParameterEntity,
+				fallbackParameterEntity);
 			if (wireframe != null)
 				overlay.MaterialOverride = wireframe;
 			overlay.Visible = true;
@@ -3350,16 +3810,30 @@ public partial class AlienScene : Node3D
 
 public readonly struct BulkMeshSpawnJob
 {
-	public BulkMeshSpawnJob(Node3D renderTarget, int modelWriteIndex, int materialWriteIndex)
+	public BulkMeshSpawnJob(
+		Node3D renderTarget,
+		int modelWriteIndex,
+		int materialWriteIndex,
+		int sourceMaterialWriteIndex,
+		uint modelReferenceEntityId,
+		uint overrideParameterEntityId = 0)
 	{
 		RenderTarget = renderTarget;
 		ModelWriteIndex = modelWriteIndex;
 		MaterialWriteIndex = materialWriteIndex;
+		SourceMaterialWriteIndex = sourceMaterialWriteIndex;
+		ModelReferenceEntityId = modelReferenceEntityId;
+		OverrideParameterEntityId = overrideParameterEntityId != 0
+			? overrideParameterEntityId
+			: modelReferenceEntityId;
 	}
 
 	public Node3D RenderTarget { get; }
 	public int ModelWriteIndex { get; }
 	public int MaterialWriteIndex { get; }
+	public int SourceMaterialWriteIndex { get; }
+	public uint ModelReferenceEntityId { get; }
+	public uint OverrideParameterEntityId { get; }
 }
 
 public class MeshHolder

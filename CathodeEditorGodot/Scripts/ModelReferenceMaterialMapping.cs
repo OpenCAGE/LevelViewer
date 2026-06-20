@@ -637,7 +637,7 @@ public static class ModelReferenceMaterialMapping
 		return normalized;
 	}
 
-	private static Materials.Material FindMaterialByName(Materials materials, string name)
+	public static Materials.Material FindMaterialByName(Materials materials, string name)
 	{
 		if (materials?.Entries == null || string.IsNullOrEmpty(name))
 			return null;

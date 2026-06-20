@@ -110,6 +110,12 @@ public static class LevelViewerPopulatePrewarm
 				continue;
 
 			uint entityId = function.shortGUID.AsUInt32;
+			ulong cacheKey = ModelReferenceMaterialMapping.MakeModelRefRenderablesCacheKey(
+				entityId,
+				command.MappingScopeInstanceEntityId);
+			if (cache.RenderablesByInstanceKey.ContainsKey(cacheKey))
+				continue;
+
 			if (!baseRenderablesByEntityId.TryGetValue(entityId, out List<Tuple<int, int>> baseRenderables))
 				continue;
 
@@ -131,10 +137,8 @@ public static class LevelViewerPopulatePrewarm
 				level,
 				mapping,
 				baseRenderables);
+			ModelReferenceMaterialOverrides.TryApplyMaterialParameterOverride(level, function, function, renderables);
 
-			ulong cacheKey = ModelReferenceMaterialMapping.MakeModelRefRenderablesCacheKey(
-				entityId,
-				command.MappingScopeInstanceEntityId);
 			cache.RenderablesByInstanceKey[cacheKey] = renderables;
 			CollectModelReferenceRenderables(renderables, content, cache.PrewarmPlan);
 		}

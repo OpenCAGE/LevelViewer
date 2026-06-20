@@ -7,7 +7,6 @@ using OpenCAGE;
 using OpenCAGE.UnityConnection;
 using System;
 using System.Collections.Generic;
-using System.Diagnostics;
 using System.IO;
 using System.Linq;
 
@@ -97,13 +96,14 @@ public partial class AlienScene : Node3D
 	private const int LoadUiRedrawFrameCount = 2;
 
 	private bool _isBulkPopulating;
+	internal bool IsBulkPopulating => _isBulkPopulating;
 	private bool _deferMeshTreeActivation;
 	private bool _wiringCompositeLinks;
 	private readonly List<Node3D> _deferredPickOwners = new List<Node3D>();
 	private readonly List<FunctionEntityPreview> _bulkPopulatePreviews = new List<FunctionEntityPreview>();
 	private readonly List<ModelReferencePreview> _bulkModelReferencePreviews = new List<ModelReferencePreview>();
 	private readonly List<BulkMeshSpawnJob> _bulkMeshSpawnJobs = new List<BulkMeshSpawnJob>();
-	private Dictionary<uint, List<Tuple<int, int>>> _modelRefRenderablesByEntityId;
+	private Dictionary<ulong, List<Tuple<int, int>>> _modelRefRenderablesByEntityId;
 	private bool _bulkMeshSpawning;
 	private bool _deferBulkPickRegistration;
 	private readonly List<(MeshInstance3D Mesh, Node3D Owner)> _bulkPickableMeshes = new List<(MeshInstance3D, Node3D)>();
@@ -330,7 +330,6 @@ public partial class AlienScene : Node3D
 
 	private void ResetLevel()
 	{
-		LevelViewerLoadProfiler.CancelSession();
 		PreviewVisibilitySettings.LevelRootCompositeId = 0;
 		_isBulkPopulating = false;
 		_loadStep = LoadPipelineStep.None;
@@ -470,7 +469,6 @@ public partial class AlienScene : Node3D
 				if (++_loadUiFrameCounter < LoadUiRedrawFrameCount)
 					return;
 
-				LevelViewerLoadProfiler.Mark("wait_ui_before_populate");
 				_loadStep = LoadPipelineStep.PopulateComposite;
 				Callable.From(ExecutePopulateComposite).CallDeferred();
 				break;
@@ -490,16 +488,12 @@ public partial class AlienScene : Node3D
 
 		ViewerLog.Print("Loading level " + _queuedLevelName + "...");
 		ResetLevel();
-		LevelViewerLoadProfiler.BeginSession("level=" + _queuedLevelName);
-		LevelViewerLoadProfiler.Mark("reset_level");
 
 		_levelName = _queuedLevelName;
 		_content.Load(_queuedLevelPath, _queuedLevelName);
-		LevelViewerLoadProfiler.Mark("cathode_level_load");
 
 		LevelViewerShaderBytecode.ClearAsync(_content.Level?.Shaders?.Entries);
 		BuildSubmeshWriteIndexCache();
-		LevelViewerLoadProfiler.Mark("submesh_write_index_cache");
 
 		if (_content.Loaded && _content.Level.Commands.EntryPoints[0] != null)
 		{
@@ -515,7 +509,6 @@ public partial class AlienScene : Node3D
 			if (comp != null && (_loadedComposite == null || _loadedComposite.shortGUID != _queuedCompositeGuid))
 			{
 				string compositeLabel = string.IsNullOrWhiteSpace(comp.name) ? "composite" : comp.name;
-				LevelViewerLoadProfiler.Mark("level_load_complete_await_populate");
 				BeginWaitUiBeforeCompositePopulate("Loading " + compositeLabel + "...", comp);
 				return;
 			}
@@ -523,7 +516,6 @@ public partial class AlienScene : Node3D
 
 		_loadStep = LoadPipelineStep.None;
 		ViewerPopulateBridge.NotifySkipped();
-		LevelViewerLoadProfiler.EndSession();
 		UpdateLoadPipelineProcessing();
 	}
 
@@ -540,16 +532,6 @@ public partial class AlienScene : Node3D
 		_queuedCompositeGuid = ShortGuid.Invalid;
 
 		ViewerPopulateBridge.NotifyStarted(GetPopulateDisplayLabel(comp));
-
-		if (!LevelViewerLoadProfiler.IsActive)
-		{
-			LevelViewerLoadProfiler.BeginSession(
-				"composite=" + GetPopulateDisplayLabel(comp) + " level=" + _levelName);
-		}
-
-		LevelViewerLoadProfiler.Mark(
-			"composite_populate_begin",
-			"composite=" + GetPopulateDisplayLabel(comp));
 
 		_isBulkPopulating = true;
 		_deferMeshTreeActivation = true;
@@ -574,7 +556,6 @@ public partial class AlienScene : Node3D
 
 		OnLoaded?.Invoke();
 		ViewerPopulateBridge.NotifyFinished();
-		LevelViewerLoadProfiler.EndSession();
 		Callable.From(HideLoading).CallDeferred();
 		UpdateLoadPipelineProcessing();
 	}
@@ -592,7 +573,6 @@ public partial class AlienScene : Node3D
 
 	private void PopulateCompositeInternal(Composite comp)
 	{
-		LevelViewerLoadProfiler.Mark("composite_cleanup_begin");
 		_compositeNodes.Clear();
 		_nodeEntities.Clear();
 		_deferredPickOwners.Clear();
@@ -610,7 +590,6 @@ public partial class AlienScene : Node3D
 		CancelLargeSceneRenderPolicy();
 		ModelReferenceRenderSettings.ResetForLevelLoad();
 		ClearPopulateMaterialCaches();
-		MaterialMappingLog.BeginSession(_levelName);
 		ModelReferenceMaterialMapping.PrepareForLevelPopulate(_content.Level.Commands);
 
 		if (_parentNode != null && GodotObject.IsInstanceValid(_parentNode))
@@ -623,26 +602,14 @@ public partial class AlienScene : Node3D
 
 		ViewerLog.Print("Loading composite " + comp?.name + "...");
 		_loadedComposite = comp;
-		LevelViewerLoadProfiler.Mark("composite_scene_reset");
 
 		LevelViewerPopulateTree.Plan spawnPlan =
 			LevelViewerPopulateTree.Collect(comp, _content, deferAliasProxy: true, includeVariables: false);
-		LevelViewerLoadProfiler.Mark(
-			"spawn_tree_collect",
-			"entities=" + spawnPlan.Commands.Count
-			+ " model_refs=" + spawnPlan.ModelReferences.Count
-			+ " cpu_ms=" + spawnPlan.CollectCpuMs.ToString("F0", System.Globalization.CultureInfo.InvariantCulture));
 
 		LevelViewerPopulatePrewarm.ModelReferenceCache modelRefCache =
 			LevelViewerPopulatePrewarm.BuildModelReferenceCache(spawnPlan.ModelReferences, _content, spawnPlan);
-		_modelRefRenderablesByEntityId = modelRefCache.RenderablesByEntityId;
+		_modelRefRenderablesByEntityId = modelRefCache.RenderablesByInstanceKey;
 		LevelViewerPopulatePrewarm.Plan prewarmPlan = modelRefCache.PrewarmPlan;
-		LevelViewerLoadProfiler.Mark(
-			"prewarm_collect_plan",
-			"meshes=" + prewarmPlan.MeshWriteIndices.Count
-			+ " textures=" + prewarmPlan.Textures.Count
-			+ " materials=" + prewarmPlan.Materials.Count
-			+ " cpu_ms=" + modelRefCache.BuildCpuMs.ToString("F0", System.Globalization.CultureInfo.InvariantCulture));
 		ViewerLog.Print(
 			"Population plan: "
 			+ prewarmPlan.MeshWriteIndices.Count + " meshes, "
@@ -650,22 +617,15 @@ public partial class AlienScene : Node3D
 			+ prewarmPlan.Materials.Count + " materials.");
 
 		LevelViewerPopulatePrewarm.Result prewarmResult = LevelViewerPopulatePrewarm.Execute(prewarmPlan, _content.Level);
-		LevelViewerLoadProfiler.Mark(
-			"prewarm_cpu_execute",
-			"cpu_ms=" + prewarmResult.CpuElapsedMs.ToString("F0", System.Globalization.CultureInfo.InvariantCulture));
 
 		FinalizePrewarmGodotResources(prewarmResult, prewarmPlan);
 
-		ViewerLog.Print(
-			"Spawn plan: "
-			+ spawnPlan.Commands.Count + " entities ("
-			+ spawnPlan.CollectCpuMs.ToString("F0") + " ms tree collect).");
+		ViewerLog.Print("Spawn plan: " + spawnPlan.Commands.Count + " entities.");
 
 		LevelViewerRenderIdleThrottle.SetLoadActive(true);
 		RegisterCompositeNode(comp, _parentNode);
 
 		ShowLoading("Spawning " + spawnPlan.Commands.Count + " entities...");
-		Stopwatch entitySpawnStopwatch = Stopwatch.StartNew();
 		_nodeEntities.EnsureCapacity(spawnPlan.Commands.Count);
 		_parentNode.ProcessMode = Node.ProcessModeEnum.Disabled;
 		try
@@ -676,15 +636,7 @@ public partial class AlienScene : Node3D
 		{
 			_parentNode.ProcessMode = Node.ProcessModeEnum.Inherit;
 		}
-		entitySpawnStopwatch.Stop();
-		LevelViewerLoadProfiler.Mark(
-			"entity_spawn",
-			"entities=" + spawnPlan.Commands.Count
-			+ " ms=" + entitySpawnStopwatch.Elapsed.TotalMilliseconds.ToString("F0", System.Globalization.CultureInfo.InvariantCulture));
-		ViewerLog.Print(
-			"Spawned "
-			+ spawnPlan.Commands.Count + " entities ("
-			+ entitySpawnStopwatch.Elapsed.TotalMilliseconds.ToString("F0") + " ms).");
+		ViewerLog.Print("Spawned " + spawnPlan.Commands.Count + " entities.");
 
 		_wiringCompositeLinks = true;
 		try
@@ -695,30 +647,16 @@ public partial class AlienScene : Node3D
 		{
 			_wiringCompositeLinks = false;
 		}
-		LevelViewerLoadProfiler.Mark("wire_aliases");
 
 		// Mesh jobs need alias wiring and instance mapping meta before material remaps resolve.
 		RebuildBulkMeshSpawnJobsFromPreviews();
-		LevelViewerLoadProfiler.Mark("mesh_jobs_remap");
 
 		ShowLoading("Spawning model-reference meshes...");
-		Stopwatch meshSpawnStopwatch = Stopwatch.StartNew();
 		FinishBulkPopulateVisuals();
-		meshSpawnStopwatch.Stop();
-		LevelViewerLoadProfiler.Mark(
-			"mesh_spawn",
-			"instances=" + _modelReferenceMeshes.Count
-			+ " ms=" + meshSpawnStopwatch.Elapsed.TotalMilliseconds.ToString("F0", System.Globalization.CultureInfo.InvariantCulture));
-		ViewerLog.Print(
-			"Spawned "
-			+ _modelReferenceMeshes.Count + " model-reference meshes ("
-			+ meshSpawnStopwatch.Elapsed.TotalMilliseconds.ToString("F0") + " ms).");
+		ViewerLog.Print("Spawned " + _modelReferenceMeshes.Count + " model-reference meshes.");
 
 		ModelReferenceRenderSettings.FinalizeLevelLoad(_modelReferenceMeshes.Count);
 		ReleaseCathodeBinarySourceData();
-		LevelViewerLoadProfiler.Mark(
-			"release_cathode_binary",
-			"cached_textures=" + CachedTextureCount);
 		ViewerLog.Print(
 			"Scene resources: "
 			+ _modelReferenceMeshes.Count + " mesh instances, "
@@ -726,9 +664,6 @@ public partial class AlienScene : Node3D
 			+ CachedTextureCount + " cached textures.");
 		QueueLargeSceneRenderPolicyApply();
 		Callable.From(RefreshCompositeFocus).CallDeferred();
-		LevelViewerLoadProfiler.Mark(
-			"composite_finalize",
-			"unique_meshes=" + _modelMeshesByWriteIndex.Count);
 	}
 
 	private int CachedTextureCount => _texturesLevelByIndex.Count + _texturesGlobalByIndex.Count;
@@ -764,16 +699,9 @@ public partial class AlienScene : Node3D
 			_deferBulkPickRegistration = false;
 		}
 
-		LevelViewerLoadProfiler.Mark(
-			"model_ref_mesh_spawn",
-			"jobs=" + _bulkMeshSpawnJobs.Count
-			+ " instances=" + _modelReferenceMeshes.Count);
-
 		RegisterBulkMeshPickables();
-		LevelViewerLoadProfiler.Mark("pick_registration");
 
 		ActivateDeferredMeshes();
-		LevelViewerLoadProfiler.Mark("activate_meshes");
 
 		RefreshSelectedLightRadiusVisual();
 	}
@@ -1028,6 +956,7 @@ public partial class AlienScene : Node3D
 		Node3D[] spawnedNodes = new Node3D[plan.Commands.Count];
 		Commands commands = _content.Level.Commands;
 		Dictionary<ShortGuid, Composite> compositeCache = new Dictionary<ShortGuid, Composite>();
+		bool addedPreview = false;
 
 		for (int i = 0; i < plan.Commands.Count; i++)
 		{
@@ -1045,8 +974,16 @@ public partial class AlienScene : Node3D
 			if (parentNode == null)
 				continue;
 
-			spawnedNodes[i] = SpawnEntityFromPopulateCommand(composite, command.Entity, parentNode, command);
+			spawnedNodes[i] = SpawnEntityFromPopulateCommand(
+				composite,
+				command.Entity,
+				parentNode,
+				command,
+				ref addedPreview);
 		}
+
+		if (addedPreview)
+			_functionEntityPreviewsCacheDirty = true;
 	}
 
 	private Node3D SpawnEntityFromPopulateCommand(
@@ -1054,6 +991,17 @@ public partial class AlienScene : Node3D
 		Entity entity,
 		Node3D parentNode,
 		LevelViewerPopulateTree.Command? planCommand = null)
+	{
+		bool unused = false;
+		return SpawnEntityFromPopulateCommand(composite, entity, parentNode, planCommand, ref unused);
+	}
+
+	private Node3D SpawnEntityFromPopulateCommand(
+		Composite composite,
+		Entity entity,
+		Node3D parentNode,
+		LevelViewerPopulateTree.Command? planCommand,
+		ref bool addedPreview)
 	{
 		if (_isBulkPopulating && !_wiringCompositeLinks
 			&& (entity.variant == EntityVariant.ALIAS || entity.variant == EntityVariant.PROXY))
@@ -1124,7 +1072,7 @@ public partial class AlienScene : Node3D
 						geometryOnly,
 						mappingScopeInstanceEntityId))
 					{
-						_functionEntityPreviewsCacheDirty = true;
+						addedPreview = true;
 						if (_isBulkPopulating)
 							TrackBulkPopulatePreview(entityNode, function);
 					}
@@ -1839,21 +1787,38 @@ public partial class AlienScene : Node3D
 		return GetEntityNode(entityPath, _parentNode) as EntityOverride;
 	}
 
-	public Entity FindEntityById(uint entityId)
-	{
-		if (entityId == 0 || _content?.Level?.Commands?.Entries == null)
-			return null;
+	public Entity FindEntityById(uint entityId) => ModelReferenceMaterialMapping.TryGetEntityById(entityId);
 
-		ShortGuid id = new ShortGuid(entityId);
-		List<Composite> composites = _content.Level.Commands.Entries;
-		for (int i = 0; i < composites.Count; i++)
+	internal bool TryGetModelRefRenderables(
+		uint entityId,
+		uint mappingScopeInstanceEntityId,
+		out List<Tuple<int, int>> renderables)
+	{
+		ulong cacheKey = ModelReferenceMaterialMapping.MakeModelRefRenderablesCacheKey(
+			entityId,
+			mappingScopeInstanceEntityId);
+		if (_modelRefRenderablesByEntityId != null
+			&& _modelRefRenderablesByEntityId.TryGetValue(cacheKey, out renderables))
 		{
-			Entity entity = composites[i].GetEntityByID(id);
-			if (entity != null)
-				return entity;
+			return true;
 		}
 
-		return null;
+		renderables = null;
+		return false;
+	}
+
+	internal void CacheModelRefRenderables(
+		uint entityId,
+		uint mappingScopeInstanceEntityId,
+		List<Tuple<int, int>> renderables)
+	{
+		if (renderables == null)
+			return;
+
+		_modelRefRenderablesByEntityId ??= new Dictionary<ulong, List<Tuple<int, int>>>();
+		_modelRefRenderablesByEntityId[
+			ModelReferenceMaterialMapping.MakeModelRefRenderablesCacheKey(entityId, mappingScopeInstanceEntityId)] =
+			renderables;
 	}
 
 	public void ApplyEntityParameter(
@@ -2280,10 +2245,17 @@ public partial class AlienScene : Node3D
 
 	private void QueueBulkMeshSpawnJobsForPreview(ModelReferencePreview modelPreview)
 	{
-		if (modelPreview == null)
+		if (modelPreview?.Entity == null)
 			return;
 
-		List<Tuple<int, int>> renderables = modelPreview.GetResolvedRenderableIndexes();
+		uint entityId = modelPreview.Entity.shortGUID.AsUInt32;
+		uint scopeId = modelPreview.MappingScopeInstanceEntityId;
+		if (!TryGetModelRefRenderables(entityId, scopeId, out List<Tuple<int, int>> renderables))
+		{
+			renderables = modelPreview.GetResolvedRenderableIndexes();
+			CacheModelRefRenderables(entityId, scopeId, renderables);
+		}
+
 		if (renderables == null || renderables.Count == 0)
 			return;
 
@@ -2899,7 +2871,6 @@ public partial class AlienScene : Node3D
 
 	private void ClearPopulateMaterialCaches()
 	{
-		MaterialMappingLog.EndSession();
 		foreach (KeyValuePair<Materials.Material, ShaderMaterial> entry in _materials)
 		{
 			if (entry.Value != null && GodotObject.IsInstanceValid(entry.Value))
@@ -3164,8 +3135,6 @@ public partial class AlienScene : Node3D
 		if (result == null || plan == null || _content?.Level == null)
 			return;
 
-		LevelViewerLoadProfiler.Mark("prewarm_godot_begin");
-		Stopwatch stopwatch = Stopwatch.StartNew();
 		Models models = _content.Level.Models;
 		int meshCount = 0;
 		int textureCount = 0;
@@ -3200,9 +3169,6 @@ public partial class AlienScene : Node3D
 			};
 			meshCount++;
 		}
-		LevelViewerLoadProfiler.Mark(
-			"prewarm_godot_meshes",
-			"converted=" + meshCount + "/" + result.Meshes.Count);
 
 		foreach (KeyValuePair<Textures.TEX4, BakedTextureCpu> entry in result.Textures)
 		{
@@ -3229,21 +3195,10 @@ public partial class AlienScene : Node3D
 
 		int missingTextureCount = ConvertMissingPlanTextures(plan);
 		textureCount += missingTextureCount;
-		LevelViewerLoadProfiler.Mark(
-			"prewarm_godot_textures",
-			"converted=" + textureCount + "/" + plan.Textures.Count
-			+ " fallback=" + missingTextureCount);
-
-		stopwatch.Stop();
-		LevelViewerLoadProfiler.Mark(
-			"prewarm_godot_finalize",
-			"godot_ms=" + stopwatch.Elapsed.TotalMilliseconds.ToString("F0", System.Globalization.CultureInfo.InvariantCulture));
 		ViewerLog.Print(
 			"Converted "
 			+ meshCount + "/" + result.Meshes.Count + " meshes and "
-			+ textureCount + "/" + plan.Textures.Count + " textures (CPU "
-			+ result.CpuElapsedMs.ToString("F0") + " ms, Godot "
-			+ stopwatch.Elapsed.TotalMilliseconds.ToString("F0") + " ms).");
+			+ textureCount + "/" + plan.Textures.Count + " textures.");
 	}
 
 	private int ConvertMissingPlanTextures(LevelViewerPopulatePrewarm.Plan plan)

@@ -17,9 +17,9 @@ public static class ModelReferenceMaterialMapping
 	public const string InstanceMappingMetaKey = "instance_material_mapping";
 
 	private static readonly ShortGuid MappingParameterId = ShortGuidUtils.Generate(MappingParameterName);
-	private static readonly HashSet<string> LoggedMappingParameterSources = new HashSet<string>();
 	private static readonly Dictionary<uint, List<AliasMappingSource>> AliasesByTargetEntityId = new Dictionary<uint, List<AliasMappingSource>>();
 	private static readonly Dictionary<uint, Composite> OwningCompositeByEntityId = new Dictionary<uint, Composite>();
+	private static readonly Dictionary<uint, Entity> EntityById = new Dictionary<uint, Entity>();
 	private static readonly Dictionary<ulong, MaterialMappings.MaterialMapping> ResolvedMappingCache = new Dictionary<ulong, MaterialMappings.MaterialMapping>();
 	private static bool _aliasMappingIndexBuilt;
 
@@ -39,34 +39,26 @@ public static class ModelReferenceMaterialMapping
 
 	public static void PrepareForLevelPopulate(Commands commands)
 	{
-		ClearLoggedMaterialLookupFailures();
+		ClearMappingCaches();
 		EnsureAliasMappingIndex(commands);
 	}
 
-	public static void ClearLoggedMaterialLookupFailures()
+	public static void ClearMappingCaches()
 	{
-		LoggedMappingParameterSources.Clear();
 		AliasesByTargetEntityId.Clear();
 		OwningCompositeByEntityId.Clear();
+		EntityById.Clear();
 		ResolvedMappingCache.Clear();
 		_aliasMappingIndexBuilt = false;
 	}
 
-	public readonly struct MappingApplyContext
+	public static Entity TryGetEntityById(uint entityId)
 	{
-		public MappingApplyContext(
-			ShortGuid modelReferenceEntityId,
-			ShortGuid mappingScopeInstanceEntityId,
-			string modelReferenceHierarchy = null)
-		{
-			ModelReferenceEntityId = modelReferenceEntityId;
-			MappingScopeInstanceEntityId = mappingScopeInstanceEntityId;
-			ModelReferenceHierarchy = modelReferenceHierarchy ?? string.Empty;
-		}
+		if (entityId == 0)
+			return null;
 
-		public ShortGuid ModelReferenceEntityId { get; }
-		public ShortGuid MappingScopeInstanceEntityId { get; }
-		public string ModelReferenceHierarchy { get; }
+		EntityById.TryGetValue(entityId, out Entity entity);
+		return entity;
 	}
 
 	public static bool IsCompositeInstanceEntity(FunctionEntity function, Commands commands)
@@ -82,6 +74,12 @@ public static class ModelReferenceMaterialMapping
 		return function != null
 			&& function.function.IsFunctionType
 			&& function.function.AsFunctionType == FunctionType.ModelReference;
+	}
+
+	/// <summary>Instance-specific cache key: model reference entity plus owning composite instance scope.</summary>
+	public static ulong MakeModelRefRenderablesCacheKey(uint entityId, uint mappingScopeInstanceEntityId)
+	{
+		return ((ulong)entityId << 32) | mappingScopeInstanceEntityId;
 	}
 
 	public static cResource TryGetMappingParameter(Entity entity)
@@ -142,7 +140,6 @@ public static class ModelReferenceMaterialMapping
 		if (mappingResource == null)
 			return null;
 
-		LogDirectInstanceMappingParameter(scopeEntity, commands, mappingResource);
 		return TryResolveMaterialMapping(level, mappingResource);
 	}
 
@@ -267,14 +264,6 @@ public static class ModelReferenceMaterialMapping
 					if (source.OwnerComposite != composite)
 						continue;
 
-					LogAliasMappingParameter(
-						source.Alias,
-						composite,
-						scopeInstanceEntity,
-						FindOwningComposite(scopeInstanceEntity, commands),
-						commands,
-						source.MappingResource);
-
 					MaterialMappings.MaterialMapping mapping = TryResolveMaterialMapping(level, source.MappingResource);
 					if (mapping != null)
 						winningMapping = mapping;
@@ -333,7 +322,11 @@ public static class ModelReferenceMaterialMapping
 			{
 				Entity entity = entities[e];
 				if (entity != null)
-					OwningCompositeByEntityId[entity.shortGUID.AsUInt32] = composite;
+				{
+					uint entityId = entity.shortGUID.AsUInt32;
+					OwningCompositeByEntityId[entityId] = composite;
+					EntityById[entityId] = entity;
+				}
 			}
 
 			if (composite.aliases == null)
@@ -476,8 +469,7 @@ public static class ModelReferenceMaterialMapping
 	public static List<Tuple<int, int>> ApplyMapping(
 		Level level,
 		MaterialMappings.MaterialMapping mapping,
-		IReadOnlyList<Tuple<int, int>> source,
-		MappingApplyContext? context = null)
+		IReadOnlyList<Tuple<int, int>> source)
 	{
 		List<Tuple<int, int>> result = new List<Tuple<int, int>>();
 		if (source == null || source.Count == 0)
@@ -496,7 +488,7 @@ public static class ModelReferenceMaterialMapping
 			if (element == null)
 				continue;
 
-			int materialIndex = RemapMaterialWriteIndex(level, mapping, element.Item2, context);
+			int materialIndex = RemapMaterialWriteIndex(level, mapping, element.Item2);
 			result.Add(new Tuple<int, int>(element.Item1, materialIndex));
 		}
 
@@ -506,8 +498,7 @@ public static class ModelReferenceMaterialMapping
 	public static int RemapMaterialWriteIndex(
 		Level level,
 		MaterialMappings.MaterialMapping mapping,
-		int materialWriteIndex,
-		MappingApplyContext? context = null)
+		int materialWriteIndex)
 	{
 		if (level?.Materials == null || mapping == null || materialWriteIndex < 0)
 			return materialWriteIndex;
@@ -521,116 +512,10 @@ public static class ModelReferenceMaterialMapping
 
 		Materials.Material remapped = FindMaterialByName(level.Materials, targetName);
 		if (remapped == null)
-		{
-			if (MaterialMappingLog.LogRemaps)
-			{
-				MaterialMappingLog.WriteErr(
-					"REMAP_FAIL "
-					+ FormatRemapLogLabel(context)
-					+ " from=\""
-					+ material.Name
-					+ "\" to=\""
-					+ targetName
-					+ "\"");
-			}
-
 			return materialWriteIndex;
-		}
 
 		int remappedIndex = level.Materials.GetWriteIndex(remapped);
-		if (remappedIndex < 0)
-		{
-			if (MaterialMappingLog.LogRemaps)
-			{
-				MaterialMappingLog.WriteErr(
-					"REMAP_FAIL "
-					+ FormatRemapLogLabel(context)
-					+ " from=\""
-					+ material.Name
-					+ "\" to=\""
-					+ targetName
-					+ "\"");
-			}
-
-			return materialWriteIndex;
-		}
-
-		if (MaterialMappingLog.LogRemaps)
-		{
-			MaterialMappingLog.Write(
-				"REMAP "
-				+ FormatRemapLogLabel(context)
-				+ " from=\""
-				+ material.Name
-				+ "\" to=\""
-				+ targetName
-				+ "\"");
-			MaterialMappingLog.Write(
-				"REMAP_OK "
-				+ FormatRemapLogLabel(context)
-				+ " from=\""
-				+ material.Name
-				+ "\" to=\""
-				+ remapped.Name
-				+ "\"");
-		}
-
-		return remappedIndex;
-	}
-
-	public static string BuildModelReferenceHierarchyString(
-		Node3D entityNode,
-		Node contentRoot,
-		IReadOnlyDictionary<Node3D, Entity> nodeEntities,
-		Commands commands)
-	{
-		if (entityNode == null || commands == null)
-			return string.Empty;
-
-		List<string> segments = new List<string>();
-		Node current = entityNode;
-		while (current != null && current != contentRoot)
-		{
-			if (current is Node3D node3D
-				&& nodeEntities.TryGetValue(node3D, out Entity entity)
-				&& node3D.HasMeta(AlienScene.OwnerCompositeMetaKey))
-			{
-				Composite ownerComposite = commands.GetComposite(
-					new ShortGuid(node3D.GetMeta(AlienScene.OwnerCompositeMetaKey).AsUInt32()));
-				if (ownerComposite != null)
-					segments.Add(FormatHierarchySegment(entity, ownerComposite, commands));
-			}
-
-			current = current.GetParent();
-		}
-
-		segments.Reverse();
-		return string.Join(" -> ", segments);
-	}
-
-	public static string BuildHierarchyFromSpawnPlan(
-		IReadOnlyList<LevelViewerPopulateTree.Command> commands,
-		int commandIndex,
-		Commands commandDb)
-	{
-		if (commands == null || commandDb == null || commandIndex < 0 || commandIndex >= commands.Count)
-			return string.Empty;
-
-		List<string> segments = new List<string>();
-		int current = commandIndex;
-		while (current >= 0)
-		{
-			LevelViewerPopulateTree.Command command = commands[current];
-			Composite ownerComposite = commandDb.GetComposite(command.CompositeId);
-			if (ownerComposite == null || command.Entity == null)
-				break;
-
-			segments.Add(FormatHierarchySegment(command.Entity, ownerComposite, commandDb));
-			current = command.ParentIndex;
-		}
-
-		segments.Reverse();
-		return string.Join(" -> ", segments);
+		return remappedIndex < 0 ? materialWriteIndex : remappedIndex;
 	}
 
 	public static bool TryFindMappingTarget(
@@ -724,56 +609,6 @@ public static class ModelReferenceMaterialMapping
 			pointedNode.RemoveMeta(InstanceMappingMetaKey);
 	}
 
-	private static void LogAliasMappingParameter(
-		AliasEntity alias,
-		Composite ownerComposite,
-		Entity scopeInstanceEntity,
-		Composite targetComposite,
-		Commands commands,
-		cResource mappingResource)
-	{
-		string dedupeKey = "alias:"
-			+ alias.shortGUID.ToByteString()
-			+ ":"
-			+ scopeInstanceEntity.shortGUID.ToByteString();
-		if (!LoggedMappingParameterSources.Add(dedupeKey))
-			return;
-
-		MaterialMappingLog.Write(
-			"PARAM source=ALIAS alias="
-			+ FormatHierarchySegment(alias, ownerComposite, commands)
-			+ " owner_composite="
-			+ FormatComposite(ownerComposite)
-			+ " applies_to_instance="
-			+ FormatHierarchySegment(
-				scopeInstanceEntity,
-				FindOwningComposite(scopeInstanceEntity, commands),
-				commands)
-			+ " target_composite="
-			+ FormatComposite(targetComposite)
-			+ " mapping="
-			+ mappingResource.shortGUID.ToByteString());
-	}
-
-	private static void LogDirectInstanceMappingParameter(
-		Entity scopeInstanceEntity,
-		Commands commands,
-		cResource mappingResource)
-	{
-		string dedupeKey = "instance:" + scopeInstanceEntity.shortGUID.ToByteString();
-		if (!LoggedMappingParameterSources.Add(dedupeKey))
-			return;
-
-		Composite ownerComposite = FindOwningComposite(scopeInstanceEntity, commands);
-		MaterialMappingLog.Write(
-			"PARAM source=INSTANCE instance="
-			+ FormatHierarchySegment(scopeInstanceEntity, ownerComposite, commands)
-			+ " owner_composite="
-			+ FormatComposite(ownerComposite)
-			+ " mapping="
-			+ mappingResource.shortGUID.ToByteString());
-	}
-
 	private static Composite FindOwningComposite(Entity entity, Commands commands)
 	{
 		if (entity == null)
@@ -796,46 +631,5 @@ public static class ModelReferenceMaterialMapping
 		}
 
 		return null;
-	}
-
-	private static string FormatRemapLogLabel(MappingApplyContext? context)
-	{
-		if (!context.HasValue)
-			return "model_ref=?";
-
-		MappingApplyContext value = context.Value;
-		if (!string.IsNullOrEmpty(value.ModelReferenceHierarchy))
-		{
-			return "path=\""
-				+ value.ModelReferenceHierarchy
-				+ "\" model_ref="
-				+ value.ModelReferenceEntityId.ToByteString();
-		}
-
-		return "model_ref=" + value.ModelReferenceEntityId.ToByteString();
-	}
-
-	private static string FormatHierarchySegment(Entity entity, Composite ownerComposite, Commands commands)
-	{
-		if (entity == null || ownerComposite == null || commands == null)
-			return "?";
-
-		string name = commands.Utils.GetEntityName(ownerComposite, entity);
-		if (entity is FunctionEntity function && !function.function.IsFunctionType)
-		{
-			Composite nested = commands.GetComposite(function.function);
-			if (nested != null)
-				name += " (" + nested.name + ")";
-		}
-
-		return "[" + entity.shortGUID.ToByteString() + "] " + name;
-	}
-
-	private static string FormatComposite(Composite composite)
-	{
-		if (composite == null)
-			return "null";
-
-		return composite.shortGUID.ToByteString() + " \"" + composite.name + "\"";
 	}
 }

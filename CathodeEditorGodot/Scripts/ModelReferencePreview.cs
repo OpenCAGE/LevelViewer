@@ -142,27 +142,22 @@ public partial class ModelReferencePreview : FunctionEntityPreview
         return GetResolvedRenderableIndexes();
     }
 
+    internal uint MappingScopeInstanceEntityId => _mappingScopeInstanceEntityId;
+
     internal List<Tuple<int, int>> GetResolvedRenderableIndexes()
     {
         List<Tuple<int, int>> indexes = GetBaseRenderableIndexes();
         if (indexes.Count == 0 || _scene?.Content?.Level == null)
             return indexes;
 
-        Node3D entityNode = GetParent() as Node3D;
-        string hierarchy = string.Empty;
-        if (MaterialMappingLog.LogRemaps && entityNode != null)
+        if (_scene.IsBulkPopulating
+            && _scene.TryGetModelRefRenderables(
+                Entity.shortGUID.AsUInt32,
+                _mappingScopeInstanceEntityId,
+                out List<Tuple<int, int>> cached))
         {
-            hierarchy = ModelReferenceMaterialMapping.BuildModelReferenceHierarchyString(
-                entityNode,
-                _scene.ParentNode,
-                _scene.NodeEntities,
-                _scene.Content.Level.Commands);
+            return cached;
         }
-
-        var context = new ModelReferenceMaterialMapping.MappingApplyContext(
-            Entity.shortGUID,
-            new ShortGuid(_mappingScopeInstanceEntityId),
-            hierarchy);
 
         MaterialMappings.MaterialMapping mapping = TryResolveMappingForSpawnScope();
         if (mapping == null)
@@ -171,8 +166,7 @@ public partial class ModelReferencePreview : FunctionEntityPreview
         return ModelReferenceMaterialMapping.ApplyMapping(
 			_scene.Content.Level,
 			mapping,
-			indexes,
-			context);
+			indexes);
     }
 
     private List<Tuple<int, int>> GetBaseRenderableIndexes()

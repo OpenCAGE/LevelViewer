@@ -39,8 +39,8 @@ public static class PreviewVisibilitySettings
     public static uint[] ActiveInstanceEntityPath { get; private set; } = Array.Empty<uint>();
 
     /// <summary>
-    /// Instance drill path used for composite-focus grey-out. Matches <see cref="ActiveInstanceEntityPath"/>
-    /// for normal navigation, but can extend further during deep-select alias picks.
+    /// Instance drill path used for composite-focus grey-out. Tracks OpenCAGE navigation
+    /// (Ctrl+MMB / hierarchy), not progressive deep-select alias picks.
     /// </summary>
     public static uint[] CompositeFocusInstancePath { get; private set; } = Array.Empty<uint>();
 

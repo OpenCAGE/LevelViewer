@@ -1232,7 +1232,7 @@ public partial class AlienScene : Node3D
 		if (!hit.HasValue)
 			return false;
 
-		hitEntityNode = LevelViewerPick.ResolveNearestEntityNode(hit.Value.HitNode, _nodeEntities);
+		hitEntityNode = LevelViewerPick.ResolvePickOwnerEntityNode(hit.Value.HitNode, _nodeEntities);
 		if (hitEntityNode == null)
 			return false;
 

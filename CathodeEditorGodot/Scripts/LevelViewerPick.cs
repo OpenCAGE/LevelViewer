@@ -525,6 +525,30 @@ public static class LevelViewerPick
 		return null;
 	}
 
+	/// <summary>
+	/// Uses mesh pick-owner metadata when present so selection paths match registered geometry.
+	/// </summary>
+	public static Node3D ResolvePickOwnerEntityNode(Node hitNode, IReadOnlyDictionary<Node3D, Entity> nodeEntities)
+	{
+		if (hitNode == null || nodeEntities == null)
+			return null;
+
+		if (hitNode is MeshInstance3D mesh && mesh.HasMeta(OwnerEntityMetaKey))
+		{
+			Node owner = mesh.GetMeta(OwnerEntityMetaKey).AsGodotObject() as Node;
+			if (owner is Node3D owner3D && GodotObject.IsInstanceValid(owner3D))
+			{
+				Node3D resolved = ResolveNearestEntityNode(owner3D, nodeEntities);
+				if (resolved != null)
+					return resolved;
+
+				return owner3D;
+			}
+		}
+
+		return ResolveNearestEntityNode(hitNode, nodeEntities);
+	}
+
 	public static SelectionTarget? BuildSelectionTarget(
 		Node3D hitEntityNode,
 		Node3D contentRoot,
@@ -714,9 +738,10 @@ public static class LevelViewerPick
 	public static int GetDeepSelectMaxDepth(
 		SelectionTarget target,
 		uint activeCompositeId,
-		uint[] instanceEntityPath)
+		uint[] instanceEntityPath,
+		Commands commands = null)
 	{
-		if (!TryGetAliasHierarchyStartIndex(target, activeCompositeId, instanceEntityPath, out int start))
+		if (!TryGetAliasHierarchyStartIndex(target, activeCompositeId, instanceEntityPath, commands, out int start))
 			return 0;
 
 		return CountChildCompositeSegments(target, activeCompositeId, start);
@@ -730,13 +755,14 @@ public static class LevelViewerPick
 		uint activeCompositeId,
 		uint[] instanceEntityPath,
 		int depthLevel,
-		out ShortGuid[] hierarchy)
+		out ShortGuid[] hierarchy,
+		Commands commands = null)
 	{
 		hierarchy = null;
 		if (depthLevel <= 0)
 			return false;
 
-		if (!TryGetAliasHierarchyStartIndex(target, activeCompositeId, instanceEntityPath, out int start))
+		if (!TryGetAliasHierarchyStartIndex(target, activeCompositeId, instanceEntityPath, commands, out int start))
 			return false;
 
 		if (!TryFindDeepSelectSegmentEndIndex(target, activeCompositeId, start, depthLevel, out int deepestIndex))
@@ -822,10 +848,11 @@ public static class LevelViewerPick
 		SelectionTarget target,
 		uint ownerCompositeId,
 		uint[] instanceEntityPath,
-		out ShortGuid[] hierarchy)
+		out ShortGuid[] hierarchy,
+		Commands commands = null)
 	{
 		hierarchy = null;
-		if (!TryGetAliasHierarchyStartIndex(target, ownerCompositeId, instanceEntityPath, out int start))
+		if (!TryGetAliasHierarchyStartIndex(target, ownerCompositeId, instanceEntityPath, commands, out int start))
 			return false;
 
 		int count = target.EntityIds.Count - start;
@@ -843,41 +870,101 @@ public static class LevelViewerPick
 		SelectionTarget target,
 		uint ownerCompositeId,
 		uint[] instanceEntityPath,
+		Commands commands,
 		out int start)
 	{
 		start = -1;
-		if (ownerCompositeId == 0 || target.EntityIds == null || target.EntityIds.Count == 0)
+		if (ownerCompositeId == 0 || target.EntityIds == null || target.CompositeIds == null || target.EntityIds.Count == 0)
 			return false;
 
-		if (instanceEntityPath != null && instanceEntityPath.Length > 0)
+		if (TryMatchInstancePathPrefix(target, instanceEntityPath, out start)
+			|| TryMatchInstancePathPrefix(
+				target,
+				PreviewVisibilitySettings.CompositeFocusInstancePath ?? System.Array.Empty<uint>(),
+				out start))
 		{
-			if (instanceEntityPath.Length > target.EntityIds.Count)
-				return false;
-
-			for (int i = 0; i < instanceEntityPath.Length; i++)
-			{
-				if (target.EntityIds[i] != instanceEntityPath[i])
-					return false;
-			}
-
-			start = instanceEntityPath.Length;
-		}
-		else
-		{
-			for (int i = 0; i < target.EntityIds.Count; i++)
-			{
-				if (target.CompositeIds[i] == ownerCompositeId)
-				{
-					start = i;
-					break;
-				}
-			}
-
-			if (start < 0)
-				return false;
+			return start >= 0 && start < target.EntityIds.Count;
 		}
 
-		return start >= 0 && start < target.EntityIds.Count;
+		start = FindLastCompositeIndex(target, ownerCompositeId);
+		if (start >= 0)
+			return true;
+
+		if (commands != null
+			&& target.CompositeIds.Count > 0
+			&& IsCompositeDefinitionReachableFromOwner(
+				commands.GetComposite(new ShortGuid(ownerCompositeId)),
+				target.CompositeIds[0],
+				commands,
+				new HashSet<uint>()))
+		{
+			start = 0;
+			return true;
+		}
+
+		return false;
+	}
+
+	private static bool TryMatchInstancePathPrefix(SelectionTarget target, uint[] instanceEntityPath, out int start)
+	{
+		start = -1;
+		if (instanceEntityPath == null || instanceEntityPath.Length == 0)
+			return false;
+
+		if (instanceEntityPath.Length > target.EntityIds.Count)
+			return false;
+
+		for (int i = 0; i < instanceEntityPath.Length; i++)
+		{
+			if (target.EntityIds[i] != instanceEntityPath[i])
+				return false;
+		}
+
+		start = instanceEntityPath.Length;
+		return true;
+	}
+
+	private static int FindLastCompositeIndex(SelectionTarget target, uint compositeId)
+	{
+		int last = -1;
+		for (int i = 0; i < target.CompositeIds.Count; i++)
+		{
+			if (target.CompositeIds[i] == compositeId)
+				last = i;
+		}
+
+		return last;
+	}
+
+	private static bool IsCompositeDefinitionReachableFromOwner(
+		Composite ownerComposite,
+		uint candidateCompositeId,
+		Commands commands,
+		HashSet<uint> visited)
+	{
+		if (ownerComposite == null || commands == null || candidateCompositeId == 0)
+			return false;
+
+		if (!visited.Add(ownerComposite.shortGUID.AsUInt32))
+			return false;
+
+		foreach (Entity entity in ownerComposite.functions)
+		{
+			if (entity is not FunctionEntity function || function.function.IsFunctionType)
+				continue;
+
+			Composite child = commands.GetComposite(function.function);
+			if (child == null)
+				continue;
+
+			if (child.shortGUID.AsUInt32 == candidateCompositeId)
+				return true;
+
+			if (IsCompositeDefinitionReachableFromOwner(child, candidateCompositeId, commands, visited))
+				return true;
+		}
+
+		return false;
 	}
 
 	/// <summary>
@@ -1057,7 +1144,7 @@ public static class LevelViewerPick
 		if (depthLevel <= 0 || commands == null)
 			return false;
 
-		if (!TryGetAliasHierarchyStartIndex(target, activeCompositeId, instanceEntityPath, out int start))
+		if (!TryGetAliasHierarchyStartIndex(target, activeCompositeId, instanceEntityPath, commands, out int start))
 			return false;
 
 		int segmentCount = CountChildCompositeSegments(target, activeCompositeId, start);

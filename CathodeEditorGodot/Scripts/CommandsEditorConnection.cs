@@ -1246,7 +1246,7 @@ public partial class CommandsEditorConnection : Node3D
                 ResetProgressiveDeepSelectState();
                 {
                     uint[] instancePath = PreviewVisibilitySettings.ActiveInstanceEntityPath ?? Array.Empty<uint>();
-                    if (LevelViewerPick.GetDeepSelectMaxDepth(target, activeCompositeId, instancePath) > 0)
+                    if (LevelViewerPick.GetDeepSelectMaxDepth(target, activeCompositeId, instancePath, commands) > 0)
                     {
                         built = TryPickDeepSelectViaAlias(
                             target,
@@ -1285,7 +1285,9 @@ public partial class CommandsEditorConnection : Node3D
 
                 if (!built)
                 {
-                    ResetProgressiveDeepSelectState();
+                    if (deepSelectDepth > 0)
+                        ResetProgressiveDeepSelectState();
+
                     built = LevelViewerPick.TryBuildActiveCompositeSelectionPath(
                         target,
                         activeCompositeId,
@@ -1309,11 +1311,7 @@ public partial class CommandsEditorConnection : Node3D
         if (!built)
             return;
 
-        if (PreviewVisibilitySettings.DeepSelectMode == PreviewVisibilitySettings.DeepSelectModeKind.DeepSelect)
-        {
-            UpdateCompositeFocusForDeepSelectPick(target, activeCompositeId, deepSelectDepth);
-        }
-        else if (PreviewVisibilitySettings.DeepSelectMode == PreviewVisibilitySettings.DeepSelectModeKind.AdvancedDeepSelect
+        if (PreviewVisibilitySettings.DeepSelectMode != PreviewVisibilitySettings.DeepSelectModeKind.None
             && !PreviewVisibilitySettings.InstancePathsEqual(
                 PreviewVisibilitySettings.CompositeFocusInstancePath,
                 PreviewVisibilitySettings.ActiveInstanceEntityPath))
@@ -1323,16 +1321,8 @@ public partial class CommandsEditorConnection : Node3D
             MarkCompositeFocusDirty();
         }
 
-        uint nextSelectedEntity = entitySelected && pathEntities != null && pathEntities.Count > 0
-            ? pathEntities[pathEntities.Count - 1]
-            : 0;
-        uint nextSelectedComposite = pathComposites != null && pathComposites.Count > 0
-            ? pathComposites[pathComposites.Count - 1]
-            : 0;
-        TryRemoveEphemeralDeepSelectAliasIfAbandoned(nextSelectedEntity, nextSelectedComposite);
-
         ApplyLocalSelection(pathEntities, pathComposites, entitySelected);
-        ApplySelectionNow();
+        ApplySelectionNowAndCleanupEphemeralAlias(pathEntities, pathComposites, entitySelected);
         UpdateEphemeralDeepSelectAliasTracking(pathEntities, pathComposites, entitySelected);
 
         // New alias: selection path is bundled into ENTITY_ADDED so OpenCAGE can add+select atomically.
@@ -1463,7 +1453,7 @@ public partial class CommandsEditorConnection : Node3D
         UpdateCompositeFocusForDrillPath(pathEntities, pathComposites, entitySelected);
         ApplyLocalSelection(pathEntities, pathComposites, entitySelected);
         SendSelectionToEditorWithPendingEphemeralDelete(pathEntities, pathComposites, entitySelected);
-        ApplySelectionNow();
+        ApplySelectionNowAndCleanupEphemeralAlias(pathEntities, pathComposites, entitySelected);
         ApplyCompositeFocusNow();
     }
 
@@ -1595,7 +1585,7 @@ public partial class CommandsEditorConnection : Node3D
 
         ApplyLocalSelection(pathEntities, pathComposites, entitySelected);
         SendSelectionToEditorWithPendingEphemeralDelete(pathEntities, pathComposites, entitySelected);
-        ApplySelectionNow();
+        ApplySelectionNowAndCleanupEphemeralAlias(pathEntities, pathComposites, entitySelected);
     }
 
     /// <summary>Steps back one level: deselects the current entity, or pops out of a nested composite instance.</summary>
@@ -1632,19 +1622,11 @@ public partial class CommandsEditorConnection : Node3D
 
         ApplyLocalSelection(pathEntities, pathComposites, entitySelected);
         SendSelectionToEditorWithPendingEphemeralDelete(pathEntities, pathComposites, entitySelected);
-        ApplySelectionNow();
+        ApplySelectionNowAndCleanupEphemeralAlias(pathEntities, pathComposites, entitySelected);
     }
 
     private void ApplyLocalSelection(List<uint> pathEntities, List<uint> pathComposites, bool entitySelected)
     {
-        uint newSelectedEntity = entitySelected && pathEntities != null && pathEntities.Count > 0
-            ? pathEntities[pathEntities.Count - 1]
-            : 0;
-        uint newSelectedComposite = pathComposites != null && pathComposites.Count > 0
-            ? pathComposites[pathComposites.Count - 1]
-            : 0;
-        TryRemoveEphemeralDeepSelectAliasIfAbandoned(newSelectedEntity, newSelectedComposite);
-
         lock (_lock)
         {
             uint previousActiveComposite = PreviewVisibilitySettings.ActiveCompositeId;
@@ -1708,42 +1690,6 @@ public partial class CommandsEditorConnection : Node3D
         MarkCompositeFocusDirty();
     }
 
-    private void UpdateCompositeFocusForDeepSelectPick(
-        LevelViewerPick.SelectionTarget target,
-        uint activeCompositeId,
-        int deepSelectDepth)
-    {
-        if (_scene?.Content?.Level?.Commands == null)
-            return;
-
-        if (PreviewVisibilitySettings.DeepSelectMode != PreviewVisibilitySettings.DeepSelectModeKind.DeepSelect)
-            return;
-
-        Commands commands = _scene.Content.Level.Commands;
-        uint[] instancePath = PreviewVisibilitySettings.ActiveInstanceEntityPath ?? Array.Empty<uint>();
-
-        if (deepSelectDepth <= 0)
-        {
-            PreviewVisibilitySettings.ResetCompositeFocusToActiveInstancePath();
-            MarkCompositeFocusDirty();
-            return;
-        }
-
-        if (LevelViewerPick.TryBuildProgressiveDeepDrillPath(
-                target,
-                activeCompositeId,
-                instancePath,
-                deepSelectDepth,
-                commands,
-                out List<uint> drillEntities,
-                out List<uint> drillComposites))
-        {
-            PreviewVisibilitySettings.SetCompositeFocusInstancePath(
-                PreviewVisibilitySettings.BuildInstanceEntityPath(drillEntities, drillComposites, entitySelected: false));
-            MarkCompositeFocusDirty();
-        }
-    }
-
     /// <summary>
     /// Progressive deep-select alias picks change selection without drilling into nested composites.
     /// Keep alias highlights and composite focus tied to OpenCAGE navigation, not local alias paths.
@@ -1770,6 +1716,21 @@ public partial class CommandsEditorConnection : Node3D
             entitySelected);
 
         return PreviewVisibilitySettings.InstancePathsEqual(selectionInstancePath, previousInstancePath);
+    }
+
+    private void ApplySelectionNowAndCleanupEphemeralAlias(
+        List<uint> pathEntities,
+        List<uint> pathComposites,
+        bool entitySelected)
+    {
+        ApplySelectionNow();
+        TryRemoveEphemeralDeepSelectAliasIfAbandoned(
+            entitySelected && pathEntities != null && pathEntities.Count > 0
+                ? pathEntities[pathEntities.Count - 1]
+                : 0,
+            pathComposites != null && pathComposites.Count > 0
+                ? pathComposites[pathComposites.Count - 1]
+                : 0);
     }
 
     private void ApplySelectionNow()
@@ -2081,6 +2042,7 @@ public partial class CommandsEditorConnection : Node3D
     {
         drillDepth = 1;
         uint[] instancePath = PreviewVisibilitySettings.ActiveInstanceEntityPath ?? Array.Empty<uint>();
+        Commands commands = _scene?.Content?.Level?.Commands;
 
         if (_progressiveDeepSelectDepth <= 0
             || activeCompositeId != _progressiveDeepSelectActiveComposite
@@ -2111,7 +2073,7 @@ public partial class CommandsEditorConnection : Node3D
             return pickedTarget;
         }
 
-        int pickedMaxDepth = LevelViewerPick.GetDeepSelectMaxDepth(pickedTarget, activeCompositeId, instancePath);
+        int pickedMaxDepth = LevelViewerPick.GetDeepSelectMaxDepth(pickedTarget, activeCompositeId, instancePath, commands);
         if (pickedMaxDepth >= drillDepth)
             return pickedTarget;
 
@@ -2124,8 +2086,9 @@ public partial class CommandsEditorConnection : Node3D
     private int ResolveProgressiveDeepSelectDepth(LevelViewerPick.SelectionTarget target, uint activeCompositeId)
     {
         uint[] instancePath = PreviewVisibilitySettings.ActiveInstanceEntityPath ?? Array.Empty<uint>();
+        Commands commands = _scene?.Content?.Level?.Commands;
         uint leafId = target.LeafEntityId;
-        int maxDepth = LevelViewerPick.GetDeepSelectMaxDepth(target, activeCompositeId, instancePath);
+        int maxDepth = LevelViewerPick.GetDeepSelectMaxDepth(target, activeCompositeId, instancePath, commands);
         if (maxDepth <= 0)
         {
             ResetProgressiveDeepSelectState();
@@ -2182,7 +2145,7 @@ public partial class CommandsEditorConnection : Node3D
             return false;
 
         uint[] instancePath = PreviewVisibilitySettings.ActiveInstanceEntityPath ?? Array.Empty<uint>();
-        if (LevelViewerPick.GetDeepSelectMaxDepth(target, ownerCompositeId, instancePath) <= 0)
+        if (LevelViewerPick.GetDeepSelectMaxDepth(target, ownerCompositeId, instancePath, commands) <= 0)
             return false;
 
         bool builtHierarchy = deepSelectDepth > 0
@@ -2191,8 +2154,9 @@ public partial class CommandsEditorConnection : Node3D
                 ownerCompositeId,
                 instancePath,
                 deepSelectDepth,
-                out ShortGuid[] hierarchy)
-            : LevelViewerPick.TryBuildAliasHierarchyPath(target, ownerCompositeId, instancePath, out hierarchy);
+                out ShortGuid[] hierarchy,
+                commands)
+            : LevelViewerPick.TryBuildAliasHierarchyPath(target, ownerCompositeId, instancePath, out hierarchy, commands);
         if (!builtHierarchy)
             return false;
 
@@ -2340,10 +2304,19 @@ public partial class CommandsEditorConnection : Node3D
         }
 
         composite.RemoveAlias(alias);
-        _scene.RemoveEntity(new ShortGuid(compositeId), new ShortGuid(entityId));
+        QueueEntityRemoval(compositeId, entityId);
         _pendingEphemeralDeepSelectDeleteCompositeId = compositeId;
         _pendingEphemeralDeepSelectDeleteEntityId = entityId;
         ClearEphemeralDeepSelectAliasTracking();
+    }
+
+    private void QueueEntityRemoval(uint compositeId, uint entityId)
+    {
+        if (compositeId == 0 || entityId == 0)
+            return;
+
+        _removedEntity = new Tuple<ShortGuid, ShortGuid>(new ShortGuid(compositeId), new ShortGuid(entityId));
+        WakePhysicsProcess();
     }
 
     private static bool EnsureAliasPositionParameter(AliasEntity alias, SyncedParameter sync)

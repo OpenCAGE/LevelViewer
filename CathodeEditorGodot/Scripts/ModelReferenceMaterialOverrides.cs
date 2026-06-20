@@ -441,7 +441,10 @@ public static class ModelReferenceMaterialOverrides
 
 			1f);
 
-
+		vertexColourScale = ClampVector3Components(vertexColourScale, 0f, 1f);
+		vertexOpacityScale = Mathf.Clamp(vertexOpacityScale, 0f, 1f);
+		diffuseColourScale = ClampVector3Components(diffuseColourScale, 0f, 255f);
+		diffuseOpacityScale = Mathf.Clamp(diffuseOpacityScale, 0f, 255f);
 
 		Vector4 vertex = new Vector4(vertexColourScale.X, vertexColourScale.Y, vertexColourScale.Z, vertexOpacityScale);
 
@@ -462,6 +465,14 @@ public static class ModelReferenceMaterialOverrides
 	}
 
 
+
+	private static Vector3 ClampVector3Components(Vector3 value, float min, float max)
+	{
+		return new Vector3(
+			Mathf.Clamp(value.X, min, max),
+			Mathf.Clamp(value.Y, min, max),
+			Mathf.Clamp(value.Z, min, max));
+	}
 
 	private static int GetSceneNodeDepth(Node node)
 

@@ -1821,6 +1821,34 @@ public partial class AlienScene : Node3D
 			renderables;
 	}
 
+	internal void InvalidateModelRefRenderablesCache(uint mappingScopeInstanceEntityId = 0)
+	{
+		if (_modelRefRenderablesByEntityId == null || _modelRefRenderablesByEntityId.Count == 0)
+			return;
+
+		if (mappingScopeInstanceEntityId == 0)
+		{
+			_modelRefRenderablesByEntityId.Clear();
+			return;
+		}
+
+		List<ulong> keysToRemove = null;
+		foreach (ulong key in _modelRefRenderablesByEntityId.Keys)
+		{
+			if ((key & 0xFFFFFFFF) != mappingScopeInstanceEntityId)
+				continue;
+
+			keysToRemove ??= new List<ulong>();
+			keysToRemove.Add(key);
+		}
+
+		if (keysToRemove == null)
+			return;
+
+		for (int i = 0; i < keysToRemove.Count; i++)
+			_modelRefRenderablesByEntityId.Remove(keysToRemove[i]);
+	}
+
 	public void ApplyEntityParameter(
 		ShortGuid dataCompositeID,
 		ShortGuid dataEntityID,
@@ -1999,6 +2027,9 @@ public partial class AlienScene : Node3D
 	{
 		if (scopeEntity == null || ownerComposite == null)
 			return;
+
+		ModelReferenceMaterialMapping.InvalidateRuntimeMappingCaches(_content.Level.Commands);
+		InvalidateModelRefRenderablesCache();
 
 		if (scopeEntity is FunctionEntity function
 			&& ModelReferenceMaterialMapping.IsCompositeInstanceEntity(function, _content.Level.Commands))
@@ -2527,9 +2558,13 @@ public partial class AlienScene : Node3D
 		}
 	}
 
-	public void SpawnRenderable(Node3D parent, Models.CS2.Component.LOD.Submesh submesh, Materials.Material material)
+	public void SpawnRenderable(
+		Node3D parent,
+		Models.CS2.Component.LOD.Submesh submesh,
+		Materials.Material material,
+		int sourceMaterialWriteIndex = -1)
 	{
-		CreateRenderable(parent, submesh, material);
+		CreateRenderable(parent, submesh, material, sourceMaterialWriteIndex);
 	}
 
 	public void SetModelReferenceWireframe(bool enabled)
@@ -2622,7 +2657,11 @@ public partial class AlienScene : Node3D
 		}
 	}
 
-	private void CreateRenderable(Node3D parent, Models.CS2.Component.LOD.Submesh submesh, Materials.Material material)
+	private void CreateRenderable(
+		Node3D parent,
+		Models.CS2.Component.LOD.Submesh submesh,
+		Materials.Material material,
+		int sourceMaterialWriteIndex = -1)
 	{
 		MeshHolder holder = GetModel(submesh);
 		if (holder == null || holder.MainMesh == null || holder.MainMesh.GetSurfaceCount() == 0)
@@ -2644,6 +2683,13 @@ public partial class AlienScene : Node3D
 		};
 		if (!_bulkMeshSpawning)
 			meshInstance.Name = holder.MainMesh.ResourceName + " (" + material.Name + ")";
+
+		if (sourceMaterialWriteIndex >= 0)
+		{
+			meshInstance.SetMeta(
+				ModelReferenceMaterialMapping.SourceMaterialWriteIndexMetaKey,
+				sourceMaterialWriteIndex);
+		}
 
 		LevelViewerMeshUtil.ConfigureMeshInstance(meshInstance);
 		if (!_bulkMeshSpawning)

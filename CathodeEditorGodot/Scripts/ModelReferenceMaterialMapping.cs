@@ -15,6 +15,8 @@ public static class ModelReferenceMaterialMapping
 {
 	public const string MappingParameterName = "mapping";
 	public const string InstanceMappingMetaKey = "instance_material_mapping";
+	/// <summary>Original ModelReference material write index before instance mapping is applied.</summary>
+	public const string SourceMaterialWriteIndexMetaKey = "source_material_write_index";
 
 	private static readonly ShortGuid MappingParameterId = ShortGuidUtils.Generate(MappingParameterName);
 	private static readonly Dictionary<uint, List<AliasMappingSource>> AliasesByTargetEntityId = new Dictionary<uint, List<AliasMappingSource>>();
@@ -50,6 +52,15 @@ public static class ModelReferenceMaterialMapping
 		EntityById.Clear();
 		ResolvedMappingCache.Clear();
 		_aliasMappingIndexBuilt = false;
+	}
+
+	/// <summary>Clears resolved mapping and alias-index caches after live mapping assignment changes.</summary>
+	public static void InvalidateRuntimeMappingCaches(Commands commands)
+	{
+		ResolvedMappingCache.Clear();
+		AliasesByTargetEntityId.Clear();
+		_aliasMappingIndexBuilt = false;
+		EnsureAliasMappingIndex(commands);
 	}
 
 	public static Entity TryGetEntityById(uint entityId)
@@ -488,7 +499,11 @@ public static class ModelReferenceMaterialMapping
 			if (element == null)
 				continue;
 
-			int materialIndex = RemapMaterialWriteIndex(level, mapping, element.Item2);
+			int materialIndex = RemapMaterialWriteIndex(
+				level,
+				mapping,
+				element.Item2,
+				sourceMaterialWriteIndex: element.Item2);
 			result.Add(new Tuple<int, int>(element.Item1, materialIndex));
 		}
 
@@ -498,24 +513,52 @@ public static class ModelReferenceMaterialMapping
 	public static int RemapMaterialWriteIndex(
 		Level level,
 		MaterialMappings.MaterialMapping mapping,
-		int materialWriteIndex)
+		int materialWriteIndex,
+		int sourceMaterialWriteIndex = -1)
 	{
 		if (level?.Materials == null || mapping == null || materialWriteIndex < 0)
 			return materialWriteIndex;
+
+		if (sourceMaterialWriteIndex >= 0)
+		{
+			Materials.Material sourceMaterial = level.Materials.GetAtWriteIndex(sourceMaterialWriteIndex);
+			if (sourceMaterial != null
+				&& !string.IsNullOrEmpty(sourceMaterial.Name)
+				&& TryFindMappingTarget(mapping, sourceMaterial.Name, out string sourceTargetName))
+			{
+				return ResolveMappedMaterialWriteIndex(level, sourceTargetName, materialWriteIndex);
+			}
+		}
 
 		Materials.Material material = level.Materials.GetAtWriteIndex(materialWriteIndex);
 		if (material == null || string.IsNullOrEmpty(material.Name))
 			return materialWriteIndex;
 
-		if (!TryFindMappingTarget(mapping, material.Name, out string targetName))
-			return materialWriteIndex;
+		if (TryFindMappingTarget(mapping, material.Name, out string targetName))
+			return ResolveMappedMaterialWriteIndex(level, targetName, materialWriteIndex);
 
+		// Input may already be a previous mapping target; resolve via the original "from" name.
+		MaterialMappings.MaterialMapping.Mapping reverseEntry = FindMappingEntryByTarget(mapping, material.Name);
+		if (reverseEntry != null
+			&& TryFindMappingTarget(mapping, reverseEntry.from, out string refreshedTargetName))
+		{
+			return ResolveMappedMaterialWriteIndex(level, refreshedTargetName, materialWriteIndex);
+		}
+
+		return materialWriteIndex;
+	}
+
+	private static int ResolveMappedMaterialWriteIndex(
+		Level level,
+		string targetName,
+		int fallbackWriteIndex)
+	{
 		Materials.Material remapped = FindMaterialByName(level.Materials, targetName);
 		if (remapped == null)
-			return materialWriteIndex;
+			return fallbackWriteIndex;
 
 		int remappedIndex = level.Materials.GetWriteIndex(remapped);
-		return remappedIndex < 0 ? materialWriteIndex : remappedIndex;
+		return remappedIndex < 0 ? fallbackWriteIndex : remappedIndex;
 	}
 
 	public static bool TryFindMappingTarget(
@@ -551,6 +594,31 @@ public static class ModelReferenceMaterialMapping
 				continue;
 
 			if (NormalizeMaterialNameForLookup(entry.from) == normalizedMaterialName)
+				return entry;
+		}
+
+		return null;
+	}
+
+	private static MaterialMappings.MaterialMapping.Mapping FindMappingEntryByTarget(
+		MaterialMappings.MaterialMapping mapping,
+		string targetMaterialName)
+	{
+		if (mapping?.Mappings == null || string.IsNullOrEmpty(targetMaterialName))
+			return null;
+
+		MaterialMappings.MaterialMapping.Mapping remap = mapping.Mappings.FirstOrDefault(entry => entry.to == targetMaterialName);
+		if (remap != null)
+			return remap;
+
+		string normalizedTargetName = NormalizeMaterialNameForLookup(targetMaterialName);
+		for (int i = 0; i < mapping.Mappings.Count; i++)
+		{
+			MaterialMappings.MaterialMapping.Mapping entry = mapping.Mappings[i];
+			if (entry == null || string.IsNullOrEmpty(entry.to))
+				continue;
+
+			if (NormalizeMaterialNameForLookup(entry.to) == normalizedTargetName)
 				return entry;
 		}
 

@@ -83,16 +83,36 @@ public partial class ModelReferencePreview : FunctionEntityPreview
 		if (_scene == null || renderTarget == null)
 			return;
 
-		foreach (Tuple<int, int> renderable in GetResolvedRenderableIndexes())
+		List<Tuple<int, int>> sourceRenderables = GetSourceRenderableIndexes();
+		if (sourceRenderables.Count == 0)
+			return;
+
+		MaterialMappings.MaterialMapping mapping = TryResolveMappingForSpawnScope();
+		List<Tuple<int, int>> renderables = mapping != null
+			? ModelReferenceMaterialMapping.ApplyMapping(_scene.Content.Level, mapping, sourceRenderables)
+			: sourceRenderables;
+
+		int count = Math.Min(sourceRenderables.Count, renderables.Count);
+		for (int i = 0; i < count; i++)
 		{
+			Tuple<int, int> source = sourceRenderables[i];
+			Tuple<int, int> renderable = renderables[i];
+			if (source == null || renderable == null)
+				continue;
+
 			SpawnSingleRenderable(
 				renderTarget,
 				renderable.Item1,
-				renderable.Item2);
+				renderable.Item2,
+				source.Item2);
 		}
 	}
 
-	internal void SpawnSingleRenderable(Node3D renderTarget, int modelWriteIndex, int materialWriteIndex)
+	internal void SpawnSingleRenderable(
+		Node3D renderTarget,
+		int modelWriteIndex,
+		int materialWriteIndex,
+		int sourceMaterialWriteIndex = -1)
 	{
 		if (_scene == null || renderTarget == null || modelWriteIndex < 0 || materialWriteIndex < 0)
 			return;
@@ -100,7 +120,8 @@ public partial class ModelReferencePreview : FunctionEntityPreview
 		_scene.SpawnRenderable(
 			renderTarget,
 			_scene.Content.Level.Models.GetAtWriteIndex(modelWriteIndex),
-			_scene.Content.Level.Materials.GetAtWriteIndex(materialWriteIndex));
+			_scene.Content.Level.Materials.GetAtWriteIndex(materialWriteIndex),
+			sourceMaterialWriteIndex >= 0 ? sourceMaterialWriteIndex : materialWriteIndex);
 	}
 
 	internal Node3D GetPopulateRenderTarget() => GetRenderTarget();
@@ -146,7 +167,7 @@ public partial class ModelReferencePreview : FunctionEntityPreview
 
     internal List<Tuple<int, int>> GetResolvedRenderableIndexes()
     {
-        List<Tuple<int, int>> indexes = GetBaseRenderableIndexes();
+        List<Tuple<int, int>> indexes = GetSourceRenderableIndexes();
         if (indexes.Count == 0 || _scene?.Content?.Level == null)
             return indexes;
 
@@ -169,9 +190,14 @@ public partial class ModelReferencePreview : FunctionEntityPreview
 			indexes);
     }
 
-    private List<Tuple<int, int>> GetBaseRenderableIndexes()
+    internal List<Tuple<int, int>> GetSourceRenderableIndexes()
     {
         return GetRenderableIndexes(_scene.Content, Entity);
+    }
+
+    private List<Tuple<int, int>> GetBaseRenderableIndexes()
+    {
+        return GetSourceRenderableIndexes();
     }
 
     private MaterialMappings.MaterialMapping TryResolveMappingForSpawnScope()

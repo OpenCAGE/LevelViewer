@@ -324,18 +324,12 @@ public partial class LevelViewerCamera : Camera3D
             if (_alienScene.ParentNode == null || !GodotObject.IsInstanceValid(_alienScene.ParentNode))
                 return;
 
-            if (!ShouldAutoFrameLoadedContent())
-                return;
-
             _alienScene.TryResolveInitialFocusPoint(out _, out bool focusResolved);
             if (focusResolved || i >= 2)
                 break;
         }
 
         if (_alienScene.ParentNode == null || !GodotObject.IsInstanceValid(_alienScene.ParentNode))
-            return;
-
-        if (!ShouldAutoFrameLoadedContent())
             return;
 
         Vector3 positionBefore = GlobalPosition;
@@ -355,30 +349,6 @@ public partial class LevelViewerCamera : Camera3D
         if (FrameEditorViewport && Engine.IsEditorHint())
             LevelViewerView.TryFrameEditorOn(_alienScene.ParentNode);
 #endif
-    }
-
-    /// <summary>
-    /// Frame the full loaded composite when focus-on-selected will not drive the camera
-    /// (no nested composite path, or focus disabled; entity focus is handled separately).
-    /// </summary>
-    private bool ShouldAutoFrameLoadedContent()
-    {
-        if (_commandsEditorConnection == null || !GodotObject.IsInstanceValid(_commandsEditorConnection))
-            _commandsEditorConnection = GetNodeOrNull<CommandsEditorConnection>(CommandsEditorConnectionPath);
-
-        if (_commandsEditorConnection == null)
-            return true;
-
-        if (!_commandsEditorConnection.FocusSelected)
-            return true;
-
-        if (_commandsEditorConnection.HasEntitySelection)
-            return false;
-
-        if (_commandsEditorConnection.HasChildCompositeInPath)
-            return false;
-
-        return true;
     }
 
     private void ApplyKeyboardMovement(float deltaSeconds)

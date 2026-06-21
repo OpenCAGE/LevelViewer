@@ -88,12 +88,7 @@ public partial class CommandsEditorConnection : Node3D
     private Tuple<ShortGuid, ShortGuid> _removedEntity = null;
     private ShortGuid _removedComposite = ShortGuid.Invalid;
 
-	public bool FocusSelected => _focusSelected;
 	public bool ShowCameraPosition => _showCameraPosition;
-	public bool HasEntitySelection => _entitySelected;
-	/// <summary>True when the editor path includes a nested composite (not just the loaded root).</summary>
-	public bool HasChildCompositeInPath => _pathComposites != null && _pathComposites.Count > 1;
-	private bool _focusSelected = false;
 	private bool _showCameraPosition = true;
     private bool _hideNestedScriptEntities = false;
     private bool _renderFiltersDirty = false;
@@ -455,7 +450,6 @@ public partial class CommandsEditorConnection : Node3D
         {
             lock (_lock)
             {
-                _focusSelected = packet.focus_object;
                 _showCameraPosition = packet.show_camera_position;
                 ApplyViewerSettings(packet);
                 ApplyActiveComposite(packet);
@@ -502,7 +496,6 @@ public partial class CommandsEditorConnection : Node3D
             _currentComposite = _compositeLoaded ? _pathComposites[_pathComposites.Count - 1] : 0;
             _currentEntity = _entitySelected ? _pathEntities[_pathEntities.Count - 1] : 0;
 
-            _focusSelected = packet.focus_object;
             _showCameraPosition = packet.show_camera_position;
             bool hideNestedChanged = ApplyViewerSettings(packet);
             ApplyActiveComposite(packet);
@@ -1738,7 +1731,6 @@ public partial class CommandsEditorConnection : Node3D
         if (_scene == null || !_scene.Content.Loaded)
             return;
 
-        bool focusSelected;
         bool entitySelected;
         List<uint> pathEntities;
         List<uint> pathComposites;
@@ -1748,7 +1740,6 @@ public partial class CommandsEditorConnection : Node3D
             if (!_forceSelectionApply && _currentEntityGOID == _currentEntity)
                 return;
 
-            focusSelected = _focusSelected;
             entitySelected = _entitySelected;
             pathEntities = _pathEntities;
             pathComposites = _pathComposites;
@@ -1756,7 +1747,7 @@ public partial class CommandsEditorConnection : Node3D
             _forceSelectionApply = false;
         }
 
-        _scene.SelectEntity(pathEntities, pathComposites, entitySelected, focusSelected);
+        _scene.SelectEntity(pathEntities, pathComposites, entitySelected);
     }
 
     private static bool PathsEqual(IReadOnlyList<uint> left, IReadOnlyList<uint> right)

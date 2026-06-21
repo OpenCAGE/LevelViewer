@@ -1517,7 +1517,7 @@ public partial class AlienScene : Node3D
 		}
 	}
 
-	public void SelectEntity(List<uint> entityPath, List<uint> compositePath, bool entitySelected, bool focusSelected)
+	public void SelectEntity(List<uint> entityPath, List<uint> compositePath, bool entitySelected)
 	{
 		if (!entitySelected || entityPath == null || entityPath.Count == 0)
 		{
@@ -1571,26 +1571,11 @@ public partial class AlienScene : Node3D
 			RefreshSelectedLightRadiusVisual();
 
 			Callable.From(() => OnSelectionChanged?.Invoke(entityNode)).CallDeferred();
-
-			if (focusSelected && entityNode != null)
-				Callable.From(() => FocusSelectedEntity(entityNode)).CallDeferred();
 		}
 		catch (System.Exception ex)
 		{
 			ViewerLog.PrintErr("[Viewer] Selection highlight failed: " + ex);
 		}
-	}
-
-	private void FocusSelectedEntity(Node3D target)
-	{
-		if (target == null || !GodotObject.IsInstanceValid(target))
-			return;
-
-		Camera3D camera = GetTree().Root.GetNodeOrNull<Camera3D>("Connection/Camera3D");
-		if (camera is LevelViewerCamera viewerCamera)
-			viewerCamera.FocusOnTarget(target);
-		else
-			LevelViewerView.FrameRuntimeCameraClose(target, camera);
 	}
 
 	private void RequestFrameView(Node3D target, bool focusEditor)

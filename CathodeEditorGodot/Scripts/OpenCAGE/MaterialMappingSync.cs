@@ -102,7 +102,7 @@ namespace OpenCAGE.UnityConnection
 			if (string.IsNullOrWhiteSpace(mapping.Name))
 				return ShortGuid.Invalid;
 
-			mapping.ID = ShortGuidUtils.Generate(mapping.Name.Replace("/", "\\").ToUpper());
+			mapping.ID = MaterialMappings.GenerateMappingID(mapping.Name, true);
 			return mapping.ID;
 		}
 	}

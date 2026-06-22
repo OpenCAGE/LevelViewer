@@ -205,6 +205,8 @@ public static class LevelViewerCompositeFocus
 			return;
 		}
 
+		PruneInvalidMeshState();
+
 		_scopeNodeEntities = nodeEntities ?? _scopeNodeEntities;
 		_scopeContentRoot = contentRoot;
 		uint activeId = PreviewVisibilitySettings.ActiveCompositeId;
@@ -268,15 +270,53 @@ public static class LevelViewerCompositeFocus
 		bool wireframeEnabled = ModelReferenceRenderSettings.WireframeEnabled;
 		foreach (KeyValuePair<MeshInstance3D, Material> entry in _savedMaterialOverrides)
 		{
-			if (entry.Key != null && GodotObject.IsInstanceValid(entry.Key))
+			if (entry.Key == null || !GodotObject.IsInstanceValid(entry.Key))
+				continue;
+
+			try
 			{
 				entry.Key.MaterialOverride = entry.Value;
 				if (wireframeEnabled)
 					SetWireframeOverlayVisible(entry.Key, true);
 			}
+			catch (Exception)
+			{
+			}
 		}
 
 		_savedMaterialOverrides.Clear();
+	}
+
+	private static void PruneInvalidMeshState()
+	{
+		List<MeshInstance3D> staleMeshes = null;
+		foreach (KeyValuePair<MeshInstance3D, Material> entry in _savedMaterialOverrides)
+		{
+			if (entry.Key == null || !GodotObject.IsInstanceValid(entry.Key))
+				(staleMeshes ??= new List<MeshInstance3D>()).Add(entry.Key);
+		}
+
+		if (staleMeshes != null)
+		{
+			for (int i = 0; i < staleMeshes.Count; i++)
+			{
+				_savedMaterialOverrides.Remove(staleMeshes[i]);
+				_meshDimmedState.Remove(staleMeshes[i]);
+			}
+		}
+
+		List<Node3D> staleOwners = null;
+		foreach (KeyValuePair<Node3D, uint[]> entry in _ownerEntityChainCache)
+		{
+			if (entry.Key == null || !GodotObject.IsInstanceValid(entry.Key))
+				(staleOwners ??= new List<Node3D>()).Add(entry.Key);
+		}
+
+		if (staleOwners != null)
+		{
+			for (int i = 0; i < staleOwners.Count; i++)
+				_ownerEntityChainCache.Remove(staleOwners[i]);
+		}
 	}
 
 	private static void ApplyFocusFromPickRegistry(Commands commands)
@@ -497,24 +537,45 @@ public static class LevelViewerCompositeFocus
 
 	private static void RestoreMesh(MeshInstance3D meshInstance)
 	{
-		if (_savedMaterialOverrides.TryGetValue(meshInstance, out Material saved))
+		if (meshInstance == null || !GodotObject.IsInstanceValid(meshInstance))
+			return;
+
+		if (!_savedMaterialOverrides.TryGetValue(meshInstance, out Material saved))
+			return;
+
+		try
 		{
 			meshInstance.MaterialOverride = saved;
+			_savedMaterialOverrides.Remove(meshInstance);
+		}
+		catch (Exception)
+		{
 			_savedMaterialOverrides.Remove(meshInstance);
 		}
 	}
 
 	private static void DimMesh(MeshInstance3D meshInstance)
 	{
+		if (meshInstance == null || !GodotObject.IsInstanceValid(meshInstance))
+			return;
+
 		if (_savedMaterialOverrides.ContainsKey(meshInstance))
 			return;
 
-		Material current = meshInstance.MaterialOverride ?? meshInstance.GetActiveMaterial(0);
-		if (current == null)
-			return;
+		try
+		{
+			Material current = meshInstance.MaterialOverride ?? meshInstance.GetActiveMaterial(0);
+			if (current == null)
+				return;
 
-		_savedMaterialOverrides[meshInstance] = meshInstance.MaterialOverride;
-		meshInstance.MaterialOverride = GetSharedDimmedMaterial(current);
+			_savedMaterialOverrides[meshInstance] = meshInstance.MaterialOverride;
+			meshInstance.MaterialOverride = GetSharedDimmedMaterial(current);
+		}
+		catch (Exception)
+		{
+			_savedMaterialOverrides.Remove(meshInstance);
+			_meshDimmedState.Remove(meshInstance);
+		}
 	}
 
 	private static Material GetSharedDimmedMaterial(Material original)

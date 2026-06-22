@@ -21,6 +21,7 @@ namespace OpenCAGE.UnityConnection
         ENTITY_PARAMETER_MODIFIED,
 
         RENDER_FILTERS_CHANGED,
+        MATERIAL_MAPPING_MODIFIED,
         SETTINGS_CHANGED,
         VIEWER_LOG,
         VIEWER_POPULATE_STARTED,
@@ -88,5 +89,7 @@ namespace OpenCAGE.UnityConnection
         // Level Viewer log line forwarded to OpenCAGE (VIEWER_LOG).
         public string log_message = "";
         public bool log_is_error = false;
+
+        public SyncedMaterialMappingSet material_mapping = null;
     }
 }

@@ -316,10 +316,15 @@ public partial class LevelViewerCamera : Camera3D
         if (_alienScene == null)
             return;
 
+        int contentGeneration = _alienScene.ContentGeneration;
+
         const int maxFrames = 60;
         for (int i = 0; i < maxFrames; i++)
         {
             await ToSignal(GetTree(), SceneTree.SignalName.ProcessFrame);
+
+            if (_alienScene == null || _alienScene.ContentGeneration != contentGeneration)
+                return;
 
             if (_alienScene.ParentNode == null || !GodotObject.IsInstanceValid(_alienScene.ParentNode))
                 return;
@@ -328,6 +333,9 @@ public partial class LevelViewerCamera : Camera3D
             if (focusResolved || i >= 2)
                 break;
         }
+
+        if (_alienScene == null || _alienScene.ContentGeneration != contentGeneration)
+            return;
 
         if (_alienScene.ParentNode == null || !GodotObject.IsInstanceValid(_alienScene.ParentNode))
             return;

@@ -155,7 +155,21 @@ public static class LevelViewerPick
 			if (meshes == null || meshes.Count == 0)
 				continue;
 
+			PruneInvalidPickMeshes(meshes);
+			if (meshes.Count == 0)
+				continue;
+
 			action(owner, meshes);
+		}
+	}
+
+	private static void PruneInvalidPickMeshes(List<MeshInstance3D> meshes)
+	{
+		for (int i = meshes.Count - 1; i >= 0; i--)
+		{
+			MeshInstance3D mesh = meshes[i];
+			if (mesh == null || !GodotObject.IsInstanceValid(mesh))
+				meshes.RemoveAt(i);
 		}
 	}
 

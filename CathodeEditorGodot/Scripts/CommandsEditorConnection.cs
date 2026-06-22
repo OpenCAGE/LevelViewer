@@ -361,11 +361,18 @@ public partial class CommandsEditorConnection : Node3D
         if (compositeFocusDirty && _scene != null && _scene.Content.Loaded && !_compositeFocusRefreshScheduled)
         {
             _compositeFocusRefreshScheduled = true;
+            int contentGeneration = _scene.ContentGeneration;
             Callable.From(() =>
             {
                 try
                 {
-                    _scene.RefreshCompositeFocus();
+                    if (_scene != null
+                        && GodotObject.IsInstanceValid(_scene)
+                        && _scene.Content.Loaded
+                        && _scene.ContentGeneration == contentGeneration)
+                    {
+                        _scene.RefreshCompositeFocus();
+                    }
                 }
                 catch (Exception ex)
                 {
@@ -443,6 +450,31 @@ public partial class CommandsEditorConnection : Node3D
                 if (packet.box_render_filters != null && RenderFilters.ApplyFromPacket(packet.box_render_filters, out HashSet<uint> changed))
                     MarkRenderFiltersDirty(changed);
             }
+            return;
+        }
+
+        if (packet.packet_event == PacketEvent.MATERIAL_MAPPING_MODIFIED)
+        {
+            SyncedMaterialMappingSet mappingSync = packet.material_mapping;
+            int contentGeneration = _scene?.ContentGeneration ?? 0;
+            Callable.From(() =>
+            {
+                try
+                {
+                    if (_scene != null
+                        && GodotObject.IsInstanceValid(_scene)
+                        && _scene.Content.Loaded
+                        && _scene.ContentGeneration == contentGeneration
+                        && mappingSync != null)
+                    {
+                        _scene.ApplySyncedMaterialMapping(mappingSync);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    ViewerLog.PrintErr("[Viewer] Material mapping sync failed: " + ex);
+                }
+            }).CallDeferred();
             return;
         }
 

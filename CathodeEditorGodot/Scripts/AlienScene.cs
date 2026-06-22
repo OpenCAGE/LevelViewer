@@ -116,6 +116,9 @@ public partial class AlienScene : Node3D
 	private string _queuedLevelPath = "";
 	private ShortGuid _queuedCompositeGuid = ShortGuid.Invalid;
 	private Composite _queuedComposite;
+	private int _contentGeneration;
+
+	public int ContentGeneration => _contentGeneration;
 
 	public override void _Ready()
 	{
@@ -153,13 +156,27 @@ public partial class AlienScene : Node3D
 
 	public override void _ExitTree()
 	{
-		if (_parentNode != null && GodotObject.IsInstanceValid(_parentNode))
-			_parentNode.QueueFree();
+		_contentGeneration++;
+		_loadStep = LoadPipelineStep.None;
+		CancelLargeSceneRenderPolicy();
 
+		ClearSelectedEntity();
+		LevelViewerSelection.Clear();
+		LevelViewerPick.ClearRegistry();
+		LevelViewerCompositeFocus.Clear();
+		LevelViewerEntityHide.ClearAll();
+
+		// Do not QueueFree _parentNode here — Godot frees children when this node leaves the tree.
 		_parentNode = null;
 
 		if (_loadingScreen != null && GodotObject.IsInstanceValid(_loadingScreen))
-			_loadingScreen.QueueFree();
+		{
+			if (_loadingScreen.GetParent() == this)
+				_loadingScreen.QueueFree();
+			else
+				_loadingScreen.HideScreen();
+		}
+
 		_loadingScreen = null;
 
 		base._ExitTree();
@@ -332,6 +349,7 @@ public partial class AlienScene : Node3D
 
 	private void ResetLevel()
 	{
+		_contentGeneration++;
 		PreviewVisibilitySettings.LevelRootCompositeId = 0;
 		_isBulkPopulating = false;
 		_loadStep = LoadPipelineStep.None;
@@ -575,6 +593,7 @@ public partial class AlienScene : Node3D
 
 	private void PopulateCompositeInternal(Composite comp)
 	{
+		_contentGeneration++;
 		_compositeNodes.Clear();
 		_nodeEntities.Clear();
 		_aliasParameterEntityByRenderTarget = null;
@@ -667,7 +686,6 @@ public partial class AlienScene : Node3D
 			+ _modelMeshesByWriteIndex.Count + " unique meshes, "
 			+ CachedTextureCount + " cached textures.");
 		QueueLargeSceneRenderPolicyApply();
-		Callable.From(RefreshCompositeFocus).CallDeferred();
 	}
 
 	private int CachedTextureCount => _texturesLevelByIndex.Count + _texturesGlobalByIndex.Count;
@@ -1492,7 +1510,7 @@ public partial class AlienScene : Node3D
 
 	public void RefreshCompositeFocus()
 	{
-		if (_parentNode == null || !_content.Loaded)
+		if (_parentNode == null || !GodotObject.IsInstanceValid(_parentNode) || !_content.Loaded)
 		{
 			LevelViewerCompositeFocus.Clear();
 			return;
@@ -2060,6 +2078,120 @@ public partial class AlienScene : Node3D
 		}
 	}
 
+	/// <summary>
+	/// Applies a live material-mapping edit from OpenCAGE and updates affected meshes in place.
+	/// </summary>
+	public void ApplySyncedMaterialMapping(SyncedMaterialMappingSet sync)
+	{
+		if (!_content.Loaded || _parentNode == null || !GodotObject.IsInstanceValid(_parentNode) || sync == null)
+			return;
+
+		MaterialMappingSync.Apply(_content.Level, sync);
+		RefreshMaterialMappingVisuals(sync.mapping_id);
+	}
+
+	private void RefreshMaterialMappingVisuals(uint changedMappingId)
+	{
+		ModelReferenceMaterialMapping.InvalidateRuntimeMappingCaches(_content.Level.Commands);
+		InvalidateModelRefRenderablesCache();
+		RemapExistingModelReferenceMeshes(changedMappingId);
+	}
+
+	private void RemapExistingModelReferenceMeshes(uint changedMappingId)
+	{
+		if (changedMappingId == 0 || _content?.Level?.Materials == null)
+			return;
+
+		Level level = _content.Level;
+		Commands commands = level.Commands;
+		ShortGuid changedId = new ShortGuid(changedMappingId);
+
+		foreach (KeyValuePair<MeshInstance3D, Materials.Material> entry in _modelReferenceMeshes.ToArray())
+		{
+			MeshInstance3D mesh = entry.Key;
+			if (mesh == null || !GodotObject.IsInstanceValid(mesh))
+				continue;
+
+			if (!mesh.HasMeta(ModelReferenceMaterialMapping.SourceMaterialWriteIndexMetaKey))
+				continue;
+
+			Node3D owner = mesh.GetParent() as Node3D;
+			if (owner == null)
+				continue;
+
+			MaterialMappings.MaterialMapping mapping = ModelReferenceMaterialMapping.TryResolveMappingForEntityNode(
+				level,
+				owner,
+				_parentNode,
+				_nodeEntities,
+				commands);
+			if (mapping == null || mapping.ID != changedId)
+				continue;
+
+			int sourceMaterialWriteIndex = mesh.GetMeta(
+				ModelReferenceMaterialMapping.SourceMaterialWriteIndexMetaKey).AsInt32();
+			Materials.Material currentMaterial = entry.Value;
+			int currentWriteIndex = level.Materials.GetWriteIndex(currentMaterial);
+			int remappedWriteIndex = ModelReferenceMaterialMapping.RemapMaterialWriteIndex(
+				level,
+				mapping,
+				sourceMaterialWriteIndex,
+				sourceMaterialWriteIndex);
+			if (remappedWriteIndex < 0 || remappedWriteIndex == currentWriteIndex)
+				continue;
+
+			Materials.Material remappedMaterial = level.Materials.GetAtWriteIndex(remappedWriteIndex);
+			if (remappedMaterial == null)
+				continue;
+
+			ResolveMaterialOverrideEntitiesFromMesh(
+				mesh,
+				out Entity modelReferenceEntity,
+				out Entity overrideParameterEntity,
+				out Entity fallbackParameterEntity);
+			_modelReferenceMeshes[mesh] = remappedMaterial;
+			mesh.MaterialOverride = GetSolidMaterialForModelReference(
+				remappedMaterial,
+				modelReferenceEntity,
+				overrideParameterEntity,
+				fallbackParameterEntity);
+			if (ModelReferenceRenderSettings.WireframeEnabled)
+			{
+				UpdateWireframeOverlay(
+					mesh,
+					remappedMaterial,
+					modelReferenceEntity,
+					overrideParameterEntity,
+					fallbackParameterEntity);
+			}
+		}
+	}
+
+	private void ReapplyAllAliasInstanceMappingMeta()
+	{
+		Commands commands = _content.Level.Commands;
+		foreach (KeyValuePair<Node3D, Entity> entry in _nodeEntities)
+		{
+			if (entry.Value is not AliasEntity alias || entry.Key is not EntityOverride aliasOverride)
+				continue;
+			if (!entry.Key.HasMeta(OwnerCompositeMetaKey))
+				continue;
+
+			Composite ownerComposite = commands.GetComposite(
+				new ShortGuid(entry.Key.GetMeta(OwnerCompositeMetaKey).AsUInt32()));
+			if (ownerComposite == null)
+				continue;
+
+			if (!TryResolveAliasPointedSceneNode(aliasOverride, alias, ownerComposite, out Node3D pointedNode))
+				continue;
+
+			if (ModelReferenceMaterialMapping.TryGetMappingParameter(alias) == null)
+				ModelReferenceMaterialMapping.ClearAliasInstanceMappingMeta(pointedNode);
+			else
+				ModelReferenceMaterialMapping.ApplyAliasInstanceMappingMeta(alias, pointedNode);
+		}
+	}
+
 	private void RefreshMaterialMappingForParameterChange(Entity scopeEntity, Composite ownerComposite)
 	{
 		if (scopeEntity == null || ownerComposite == null)
@@ -2462,7 +2594,12 @@ public partial class AlienScene : Node3D
 			(entityId, scopeId, overrideParameterEntityId);
 		if (!resolvedRenderablesCache.TryGetValue(resolvedKey, out List<Tuple<int, int>> renderables))
 		{
-			if (!TryGetMappedModelRefRenderables(entityId, scopeId, sourceRenderables, out List<Tuple<int, int>> mapped))
+			if (!TryGetMappedModelRefRenderables(
+					entityId,
+					scopeId,
+					sourceRenderables,
+					modelPreview,
+					out List<Tuple<int, int>> mapped))
 				return;
 
 			Entity parameterEntity = overrideParameterEntityId == entityId
@@ -2511,13 +2648,25 @@ public partial class AlienScene : Node3D
 		uint entityId,
 		uint scopeId,
 		List<Tuple<int, int>> sourceRenderables,
+		ModelReferencePreview preview,
 		out List<Tuple<int, int>> mapped)
 	{
-		if (TryGetModelRefRenderables(entityId, scopeId, out mapped))
-			return mapped != null && mapped.Count > 0;
+		if (TryGetModelRefRenderables(entityId, scopeId, out mapped) && mapped != null && mapped.Count > 0)
+			return true;
 
-		if (scopeId != 0 && TryGetModelRefRenderables(entityId, 0, out mapped))
+		if (scopeId != 0
+			&& TryGetModelRefRenderables(entityId, 0, out mapped)
+			&& mapped != null
+			&& mapped.Count > 0)
+		{
+			return true;
+		}
+
+		if (preview != null)
+		{
+			mapped = preview.GetResolvedRenderableIndexes();
 			return mapped != null && mapped.Count > 0;
+		}
 
 		mapped = sourceRenderables;
 		return mapped != null && mapped.Count > 0;

@@ -630,11 +630,27 @@ public static class ModelReferenceMaterialMapping
 		if (string.IsNullOrEmpty(materialName))
 			return string.Empty;
 
-		string normalized = materialName.ToUpperInvariant();
+		string normalized = StripTrailingVariantSuffix(materialName).ToUpperInvariant();
 		if (!normalized.Contains("->"))
 			normalized += "->" + normalized;
 
 		return normalized;
+	}
+
+	/// <summary>
+	/// Materials in the MTL can carry a trailing instance index (e.g. "foo->foo[000000]") that the
+	/// material-mapping from/to names do not. Strip it so name comparisons line up.
+	/// </summary>
+	private static string StripTrailingVariantSuffix(string name)
+	{
+		if (string.IsNullOrEmpty(name) || name[name.Length - 1] != ']')
+			return name;
+
+		int open = name.LastIndexOf('[');
+		if (open <= 0)
+			return name;
+
+		return name.Substring(0, open);
 	}
 
 	public static Materials.Material FindMaterialByName(Materials materials, string name)

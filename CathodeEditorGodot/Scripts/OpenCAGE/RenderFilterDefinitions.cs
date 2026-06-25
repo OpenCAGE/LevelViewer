@@ -91,6 +91,7 @@ namespace OpenCAGE
             new Definition(FunctionType.Sound, RenderPreviewKind.Sound, 0.2f, 0.45f, 1f),
             new Definition(FunctionType.PositionMarker, RenderPreviewKind.PositionMarker, 1f, 0.55f, 0.1f),
             new Definition(FunctionType.SoundEnvironmentMarker, RenderPreviewKind.SoundEnvironmentMarker, 0.12f, 0.22f, 0.65f),
+            new Definition(FunctionType.GCIP_WorldPickup, RenderPreviewKind.SoundEnvironmentMarker, 0.1f, 0.9f, 0.2f),
             new Definition(FunctionType.LightReference, RenderPreviewKind.LightReference, 1f, 0.92f, 0.35f),
             new Definition(FunctionType.Character, RenderPreviewKind.Character, 0.25f, 0.85f, 0.35f),
             new Definition(FunctionType.ParticleEmitterReference, RenderPreviewKind.ParticleEmitter, 0.35f, 0.75f, 1f),

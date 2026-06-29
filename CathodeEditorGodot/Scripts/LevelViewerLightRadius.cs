@@ -24,6 +24,10 @@ public static class LevelViewerLightRadius
 	private static Node3D _visualRoot;
 	private static Node3D _attachNode;
 
+	// Alias overrides that apply to the attached light instance, ordered outermost-first
+	// (the first override that supplies a parameter wins, then the entity's own parameter).
+	private static IReadOnlyList<Entity> _overrideEntities;
+
 	public static bool ShouldShow(FunctionEntity entity, uint ownerCompositeId)
 	{
 		if (entity == null || !entity.function.IsFunctionType)
@@ -35,7 +39,11 @@ public static class LevelViewerLightRadius
 		return PreviewVisualUtility.IsPreviewVisible(entity, ownerCompositeId);
 	}
 
-	public static void Apply(Node3D entityNode, FunctionEntity entity, uint ownerCompositeId)
+	public static void Apply(
+		Node3D entityNode,
+		FunctionEntity entity,
+		uint ownerCompositeId,
+		IReadOnlyList<Entity> overrideEntities = null)
 	{
 		if (!ShouldShow(entity, ownerCompositeId) || entityNode == null || !GodotObject.IsInstanceValid(entityNode))
 		{
@@ -51,10 +59,11 @@ public static class LevelViewerLightRadius
 			entityNode.AddChild(_visualRoot);
 		}
 
+		_overrideEntities = overrideEntities;
 		RebuildVisual(entity);
 	}
 
-	public static void RefreshIfAttached(FunctionEntity entity, uint ownerCompositeId)
+	public static void RefreshIfAttached(FunctionEntity entity, uint ownerCompositeId, IReadOnlyList<Entity> overrideEntities = null)
 	{
 		if (_visualRoot == null || _attachNode == null)
 			return;
@@ -65,6 +74,7 @@ public static class LevelViewerLightRadius
 			return;
 		}
 
+		_overrideEntities = overrideEntities;
 		RebuildVisual(entity);
 	}
 
@@ -75,6 +85,7 @@ public static class LevelViewerLightRadius
 
 		_visualRoot = null;
 		_attachNode = null;
+		_overrideEntities = null;
 	}
 
 	private static void RebuildVisual(FunctionEntity entity)
@@ -84,7 +95,7 @@ public static class LevelViewerLightRadius
 
 		ClearVisualChildren(_visualRoot);
 
-		LightVisualParams parameters = LightVisualParams.Read(entity);
+		LightVisualParams parameters = LightVisualParams.Read(entity, _overrideEntities);
 
 		switch (parameters.Type)
 		{
@@ -426,14 +437,14 @@ public static class LevelViewerLightRadius
 		public readonly bool IsSquareLight;
 		public readonly float AspectRatio;
 
-		public static LightVisualParams Read(FunctionEntity entity)
+		public static LightVisualParams Read(FunctionEntity entity, IReadOnlyList<Entity> overrideEntities = null)
 		{
-			LIGHT_TYPE type = (LIGHT_TYPE)GetEnumIndex(entity, "type", (int)LIGHT_TYPE.OMNI);
+			LIGHT_TYPE type = (LIGHT_TYPE)GetEnumIndex(entity, overrideEntities, "type", (int)LIGHT_TYPE.OMNI);
 			if (type == LIGHT_TYPE.UNKNOWN_LIGHT_TYPE)
 				type = LIGHT_TYPE.OMNI;
 
-			float endAttenuation = GetFloat(entity, "end_attenuation", 2f);
-			float startAttenuation = GetFloat(entity, "start_attenuation", 0.1f);
+			float endAttenuation = GetFloat(entity, overrideEntities, "end_attenuation", 2f);
+			float startAttenuation = GetFloat(entity, overrideEntities, "start_attenuation", 0.1f);
 			if (startAttenuation > endAttenuation - 0.05f)
 				startAttenuation = Mathf.Max(0f, endAttenuation - 0.05f);
 
@@ -441,11 +452,11 @@ public static class LevelViewerLightRadius
 				type,
 				startAttenuation,
 				endAttenuation,
-				GetFloat(entity, "inner_cone_angle", 22.5f),
-				GetFloat(entity, "outer_cone_angle", 45f),
-				GetFloat(entity, "strip_length", 10f),
-				GetBool(entity, "is_square_light", false),
-				GetFloat(entity, "aspect_ratio", 1f));
+				GetFloat(entity, overrideEntities, "inner_cone_angle", 22.5f),
+				GetFloat(entity, overrideEntities, "outer_cone_angle", 45f),
+				GetFloat(entity, overrideEntities, "strip_length", 10f),
+				GetBool(entity, overrideEntities, "is_square_light", false),
+				GetFloat(entity, overrideEntities, "aspect_ratio", 1f));
 		}
 
 		private LightVisualParams(
@@ -469,28 +480,55 @@ public static class LevelViewerLightRadius
 		}
 	}
 
-	private static float GetFloat(Entity entity, string name, float fallback)
+	// Resolution order: each override entity in turn (outermost alias first), then the entity's
+	// own parameter, then the supplied fallback. This mirrors how parameterized aliases override
+	// values down the composite hierarchy while leaving direct entity parameters as the base.
+	private static float GetFloat(Entity entity, IReadOnlyList<Entity> overrideEntities, string name, float fallback)
 	{
-		Parameter parameter = entity?.GetParameter(name);
-		if (parameter?.content is cFloat value)
+		if (overrideEntities != null)
+		{
+			for (int i = 0; i < overrideEntities.Count; i++)
+			{
+				if (overrideEntities[i]?.GetParameter(name)?.content is cFloat overrideValue)
+					return overrideValue.value;
+			}
+		}
+
+		if (entity?.GetParameter(name)?.content is cFloat value)
 			return value.value;
 
 		return fallback;
 	}
 
-	private static bool GetBool(Entity entity, string name, bool fallback)
+	private static bool GetBool(Entity entity, IReadOnlyList<Entity> overrideEntities, string name, bool fallback)
 	{
-		Parameter parameter = entity?.GetParameter(name);
-		if (parameter?.content is cBool value)
+		if (overrideEntities != null)
+		{
+			for (int i = 0; i < overrideEntities.Count; i++)
+			{
+				if (overrideEntities[i]?.GetParameter(name)?.content is cBool overrideValue)
+					return overrideValue.value;
+			}
+		}
+
+		if (entity?.GetParameter(name)?.content is cBool value)
 			return value.value;
 
 		return fallback;
 	}
 
-	private static int GetEnumIndex(Entity entity, string name, int fallback)
+	private static int GetEnumIndex(Entity entity, IReadOnlyList<Entity> overrideEntities, string name, int fallback)
 	{
-		Parameter parameter = entity?.GetParameter(name);
-		if (parameter?.content is cEnum value)
+		if (overrideEntities != null)
+		{
+			for (int i = 0; i < overrideEntities.Count; i++)
+			{
+				if (overrideEntities[i]?.GetParameter(name)?.content is cEnum overrideValue)
+					return overrideValue.enumIndex;
+			}
+		}
+
+		if (entity?.GetParameter(name)?.content is cEnum value)
 			return value.enumIndex;
 
 		return fallback;

@@ -344,7 +344,117 @@ public partial class AlienScene : Node3D
 			? entityNode.GetMeta(OwnerCompositeMetaKey).AsUInt32()
 			: 0;
 
-		LevelViewerLightRadius.Apply(entityNode, function, ownerCompositeId);
+		List<Entity> overrideEntities = BuildLightOverrideChain(entityNode);
+		LevelViewerLightRadius.Apply(entityNode, function, ownerCompositeId, overrideEntities);
+	}
+
+	/// <summary>
+	/// Collects the parameterized aliases whose resolved instance is <paramref name="lightNode"/>,
+	/// ordered outermost-first (smallest scene depth wins). These supply parameter overrides for the
+	/// light gizmo, layered above the light entity's own parameters.
+	/// </summary>
+	private List<Entity> BuildLightOverrideChain(Node3D lightNode)
+	{
+		if (lightNode == null || !GodotObject.IsInstanceValid(lightNode) || _content?.Level?.Commands == null)
+			return null;
+
+		List<(Entity Alias, int Depth)> matches = null;
+		foreach (KeyValuePair<Node3D, Entity> entry in _nodeEntities)
+		{
+			if (entry.Key is not EntityOverride aliasOverride || entry.Value is not AliasEntity alias)
+				continue;
+
+			if (alias.parameters == null || alias.parameters.Count == 0)
+				continue;
+
+			if (!entry.Key.HasMeta(OwnerCompositeMetaKey))
+				continue;
+
+			Node3D pointedNode = aliasOverride.PointedEntity;
+			if (pointedNode == null || !GodotObject.IsInstanceValid(pointedNode))
+			{
+				Composite ownerComposite = _content.Level.Commands.GetComposite(
+					new ShortGuid(entry.Key.GetMeta(OwnerCompositeMetaKey).AsUInt32()));
+				if (ownerComposite == null
+					|| !TryResolveAliasPointedSceneNode(aliasOverride, alias, ownerComposite, out pointedNode))
+				{
+					continue;
+				}
+			}
+
+			if (pointedNode != lightNode)
+				continue;
+
+			matches ??= new List<(Entity, int)>();
+			matches.Add((alias, GetSceneNodeDepth(aliasOverride)));
+		}
+
+		if (matches == null)
+			return null;
+
+		matches.Sort((a, b) => a.Depth.CompareTo(b.Depth));
+
+		List<Entity> overrides = new List<Entity>(matches.Count);
+		for (int i = 0; i < matches.Count; i++)
+			overrides.Add(matches[i].Alias);
+
+		return overrides;
+	}
+
+	private static int GetSceneNodeDepth(Node node)
+	{
+		int depth = 0;
+		Node current = node;
+		while (current != null)
+		{
+			depth++;
+			current = current.GetParent();
+		}
+
+		return depth;
+	}
+
+	/// <summary>
+	/// Refreshes the selected light's range gizmo when <paramref name="changedEntity"/> is the selected
+	/// light itself or a parameterized alias that overrides it, so live alias edits update the overlay.
+	/// </summary>
+	private void RefreshSelectedLightRadiusIfAffected(Entity changedEntity, Composite changedComposite)
+	{
+		if (changedEntity == null || _selectedEntity == null || !GodotObject.IsInstanceValid(_selectedEntity))
+			return;
+
+		Node3D lightNode = LevelViewerPick.ResolveNearestEntityNode(_selectedEntity, _nodeEntities);
+		if (lightNode == null
+			|| !_nodeEntities.TryGetValue(lightNode, out Entity selectedEntity)
+			|| selectedEntity is not FunctionEntity selectedFunction
+			|| !selectedFunction.function.IsFunctionType
+			|| selectedFunction.function.AsFunctionType != FunctionType.LightReference)
+		{
+			return;
+		}
+
+		bool affects = ReferenceEquals(changedEntity, selectedEntity);
+		if (!affects
+			&& changedEntity is AliasEntity alias
+			&& changedComposite != null
+			&& TryGetCachedEntityNodes(changedComposite.shortGUID, alias.shortGUID, out List<Node3D> aliasNodes))
+		{
+			for (int i = 0; i < aliasNodes.Count && !affects; i++)
+			{
+				if (aliasNodes[i] is not EntityOverride aliasOverride)
+					continue;
+
+				Node3D pointedNode = aliasOverride.PointedEntity;
+				if (pointedNode == null || !GodotObject.IsInstanceValid(pointedNode))
+					TryResolveAliasPointedSceneNode(aliasOverride, alias, changedComposite, out pointedNode);
+
+				if (pointedNode == lightNode)
+					affects = true;
+			}
+		}
+
+		if (affects)
+			RefreshSelectedLightRadiusVisual();
 	}
 
 	private void ResetLevel()
@@ -1931,6 +2041,11 @@ public partial class AlienScene : Node3D
 			RefreshMaterialMappingForParameterChange(dataEntity, dataComposite);
 		else if (ModelReferenceMaterialOverrides.IsModelReferenceOverrideParameter(paramName))
 			RefreshModelReferenceOverridesForParameterChange(dataEntity, dataComposite);
+
+		// Light range gizmo reads from the entity plus any aliases that override it, so refresh when
+		// the selected light or an alias pointing at it changes (direct float/enum edits also reach
+		// this through RefreshFunctionEntityPreviews, but alias edits would otherwise be missed).
+		RefreshSelectedLightRadiusIfAffected(dataEntity, dataComposite);
 
 		DataType syncDataType = ParameterSync.GetDataType(sync);
 		if (syncDataType == DataType.RESOURCE && paramName != mappingParameterId)

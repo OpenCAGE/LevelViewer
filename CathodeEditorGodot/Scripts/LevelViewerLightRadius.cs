@@ -16,6 +16,10 @@ public static class LevelViewerLightRadius
 	private const float MinDistance = 0.05f;
 	private const float LineWidth = 0.01f;
 	private static readonly Vector3 LightForward = Vector3.Back;
+	// Strip lights extend sideways (perpendicular to the light's forward direction).
+	private static readonly Vector3 StripAxis = Vector3.Right;
+	private static readonly Color WhiteColor = new Color(1f, 1f, 1f, 1f);
+	private static readonly Color GreyColor = new Color(0.5f, 0.5f, 0.5f, 1f);
 
 	private static Node3D _visualRoot;
 	private static Node3D _attachNode;
@@ -81,106 +85,217 @@ public static class LevelViewerLightRadius
 		ClearVisualChildren(_visualRoot);
 
 		LightVisualParams parameters = LightVisualParams.Read(entity);
-		Color color = PreviewVisualUtility.GetOpaquePreviewColor(entity);
-		color.A = 0.9f;
 
 		switch (parameters.Type)
 		{
 			case LIGHT_TYPE.OMNI:
-				BuildOmni(_visualRoot, parameters, color);
+				BuildOmni(_visualRoot, parameters);
 				break;
 			case LIGHT_TYPE.SPOT:
-				BuildSpot(_visualRoot, parameters, color);
+				BuildSpot(_visualRoot, parameters);
 				break;
 			case LIGHT_TYPE.STRIP:
-				BuildStrip(_visualRoot, parameters, color);
+				BuildStrip(_visualRoot, parameters);
 				break;
 		}
 	}
 
-	private static void BuildOmni(Node3D parent, LightVisualParams parameters, Color color)
+	// OMNI: end_attenuation draws a white wireframe sphere; start_attenuation draws a grey one.
+	private static void BuildOmni(Node3D parent, LightVisualParams parameters)
 	{
 		float endRadius = Mathf.Max(parameters.EndAttenuation, MinDistance);
-		BuildCircle(parent, Vector3.Up, endRadius, color, "OmniXY");
-		BuildCircle(parent, Vector3.Right, endRadius, color, "OmniXZ");
-		BuildCircle(parent, Vector3.Forward, endRadius, color, "OmniYZ");
+		BuildWireSphere(parent, Vector3.Zero, endRadius, WhiteColor, "OmniEnd");
 
-		float startRadius = Mathf.Clamp(parameters.StartAttenuation, MinDistance, endRadius - 0.01f);
+		float startRadius = Mathf.Max(parameters.StartAttenuation, 0f);
 		if (startRadius > MinDistance)
-		{
-			Color inner = color;
-			inner.A *= 0.55f;
-			BuildCircle(parent, Vector3.Up, startRadius, inner, "OmniStartXY");
-			BuildCircle(parent, Vector3.Right, startRadius, inner, "OmniStartXZ");
-			BuildCircle(parent, Vector3.Forward, startRadius, inner, "OmniStartYZ");
-		}
+			BuildWireSphere(parent, Vector3.Zero, startRadius, GreyColor, "OmniStart");
 	}
 
-	private static void BuildSpot(Node3D parent, LightVisualParams parameters, Color color)
+	private static void BuildSpot(Node3D parent, LightVisualParams parameters)
 	{
 		float endDistance = Mathf.Max(parameters.EndAttenuation, MinDistance);
-		float nearDistance = Mathf.Clamp(parameters.NearDist, 0f, endDistance - 0.01f);
+		float startDistance = Mathf.Clamp(parameters.StartAttenuation, 0f, endDistance);
 		float outerHalfAngleRad = Mathf.DegToRad(parameters.OuterConeAngle * 0.5f);
 		float innerHalfAngleRad = Mathf.DegToRad(parameters.InnerConeAngle * 0.5f);
 
-		BuildCone(parent, nearDistance, endDistance, outerHalfAngleRad, color, "SpotOuter");
+		// outer_cone_angle: white frustum from the light origin out to end_attenuation.
+		BuildSpotFrustum(
+			parent,
+			endDistance,
+			outerHalfAngleRad,
+			WhiteColor,
+			"SpotOuter",
+			parameters.IsSquareLight,
+			parameters.AspectRatio);
+
+		// start_attenuation: grey cross-section at the start distance, sized by the outer cone.
+		if (startDistance > MinDistance)
+		{
+			BuildSpotCrossSection(
+				parent,
+				startDistance,
+				outerHalfAngleRad,
+				GreyColor,
+				"SpotStart",
+				parameters.IsSquareLight,
+				parameters.AspectRatio);
+		}
+
+		// inner_cone_angle: grey frustum from the light origin out to end_attenuation.
 		if (innerHalfAngleRad > 0.001f && innerHalfAngleRad < outerHalfAngleRad - 0.001f)
 		{
-			Color inner = color;
-			inner.A *= 0.55f;
-			BuildCone(parent, nearDistance, endDistance, innerHalfAngleRad, inner, "SpotInner");
+			BuildSpotFrustum(
+				parent,
+				endDistance,
+				innerHalfAngleRad,
+				GreyColor,
+				"SpotInner",
+				parameters.IsSquareLight,
+				parameters.AspectRatio);
 		}
 	}
 
-	private static void BuildStrip(Node3D parent, LightVisualParams parameters, Color color)
-	{
-		float length = Mathf.Max(parameters.StripLength, MinDistance);
-		Vector3 start = Vector3.Zero;
-		Vector3 end = LightForward * length;
-		PreviewVisualUtility.CreateLineSegment("StripAxis", parent, start, end, LineWidth * 1.35f, color);
-
-		float cross = Mathf.Clamp(parameters.EndAttenuation * 0.15f, LineWidth * 2f, 0.75f);
-		BuildStripEndCap(parent, start, cross, color, "StripStartCap");
-		BuildStripEndCap(parent, end, cross, color, "StripEndCap");
-	}
-
-	private static void BuildStripEndCap(Node3D parent, Vector3 center, float size, Color color, string prefix)
-	{
-		Vector3 right = Vector3.Right * size;
-		Vector3 up = Vector3.Up * size;
-		PreviewVisualUtility.CreateLineSegment(prefix + "A", parent, center - right, center + right, LineWidth, color);
-		PreviewVisualUtility.CreateLineSegment(prefix + "B", parent, center - up, center + up, LineWidth, color);
-	}
-
-	private static void BuildCone(
+	private static void BuildSpotFrustum(
 		Node3D parent,
-		float nearDistance,
 		float endDistance,
 		float halfAngleRad,
 		Color color,
-		string prefix)
+		string prefix,
+		bool isSquare,
+		float aspectRatio)
 	{
-		Vector3 apex = LightForward * nearDistance;
-		Vector3 center = LightForward * endDistance;
-		float endRadius = Mathf.Tan(halfAngleRad) * (endDistance - nearDistance);
-		if (endRadius < MinDistance)
-			endRadius = MinDistance;
+		Vector3 apex = Vector3.Zero;
+		Vector3 endCenter = LightForward * endDistance;
+		GetSpotCrossSectionExtents(halfAngleRad, endDistance, isSquare, aspectRatio, out float halfHeight, out float halfWidth);
 
-		BuildCircle(parent, LightForward, endRadius, color, prefix + "End", center);
+		if (isSquare)
+			BuildRectangle(parent, LightForward, halfHeight, halfWidth, color, prefix + "End", endCenter);
+		else
+			BuildCircle(parent, LightForward, halfHeight, color, prefix + "End", endCenter);
 
-		const int spokeCount = 8;
-		for (int i = 0; i < spokeCount; i++)
+		GetSpotPlaneBasis(LightForward, out Vector3 tangent, out Vector3 bitangent);
+		if (isSquare)
 		{
-			float angle = i / (float)spokeCount * Mathf.Tau;
-			Vector3 offset = ConeBasisOffset(LightForward, angle, endRadius);
-			PreviewVisualUtility.CreateLineSegment(
-				$"{prefix}Spoke{i}",
-				parent,
-				apex,
-				center + offset,
-				LineWidth,
-				color);
+			Vector3[] corners =
+			{
+				endCenter + tangent * halfHeight + bitangent * halfWidth,
+				endCenter + tangent * halfHeight - bitangent * halfWidth,
+				endCenter - tangent * halfHeight - bitangent * halfWidth,
+				endCenter - tangent * halfHeight + bitangent * halfWidth,
+			};
+
+			for (int i = 0; i < corners.Length; i++)
+			{
+				PreviewVisualUtility.CreateLineSegment(
+					$"{prefix}Spoke{i}",
+					parent,
+					apex,
+					corners[i],
+					LineWidth,
+					color);
+			}
 		}
+		else
+		{
+			const int spokeCount = 8;
+			for (int i = 0; i < spokeCount; i++)
+			{
+				float angle = i / (float)spokeCount * Mathf.Tau;
+				Vector3 offset = ConeBasisOffset(LightForward, angle, halfHeight);
+				PreviewVisualUtility.CreateLineSegment(
+					$"{prefix}Spoke{i}",
+					parent,
+					apex,
+					endCenter + offset,
+					LineWidth,
+					color);
+			}
+		}
+	}
+
+	private static void BuildSpotCrossSection(
+		Node3D parent,
+		float distance,
+		float halfAngleRad,
+		Color color,
+		string prefix,
+		bool isSquare,
+		float aspectRatio)
+	{
+		GetSpotCrossSectionExtents(halfAngleRad, distance, isSquare, aspectRatio, out float halfHeight, out float halfWidth);
+		Vector3 center = LightForward * distance;
+
+		if (isSquare)
+			BuildRectangle(parent, LightForward, halfHeight, halfWidth, color, prefix, center);
+		else
+			BuildCircle(parent, LightForward, halfHeight, color, prefix, center);
+	}
+
+	private static void GetSpotCrossSectionExtents(
+		float halfAngleRad,
+		float distance,
+		bool isSquare,
+		float aspectRatio,
+		out float halfHeight,
+		out float halfWidth)
+	{
+		halfHeight = Mathf.Max(Mathf.Tan(halfAngleRad) * distance, MinDistance);
+		if (!isSquare)
+		{
+			halfWidth = halfHeight;
+			return;
+		}
+
+		halfWidth = Mathf.Max(halfHeight * Mathf.Max(aspectRatio, 0.001f), MinDistance);
+	}
+
+	private static void GetSpotPlaneBasis(Vector3 planeNormal, out Vector3 tangent, out Vector3 bitangent)
+	{
+		planeNormal = planeNormal.Normalized();
+		if (planeNormal.LengthSquared() < 0.0001f)
+			planeNormal = Vector3.Up;
+
+		tangent = PreviewVisualUtility.GetSafeLookUpVector(planeNormal);
+		bitangent = planeNormal.Cross(tangent).Normalized();
+		tangent = bitangent.Cross(planeNormal).Normalized();
+	}
+
+	private static void BuildRectangle(
+		Node3D parent,
+		Vector3 planeNormal,
+		float halfHeight,
+		float halfWidth,
+		Color color,
+		string name,
+		Vector3 center = default)
+	{
+		GetSpotPlaneBasis(planeNormal, out Vector3 tangent, out Vector3 bitangent);
+
+		Vector3 topLeft = center + tangent * halfHeight + bitangent * halfWidth;
+		Vector3 topRight = center + tangent * halfHeight - bitangent * halfWidth;
+		Vector3 bottomRight = center - tangent * halfHeight - bitangent * halfWidth;
+		Vector3 bottomLeft = center - tangent * halfHeight + bitangent * halfWidth;
+
+		PreviewVisualUtility.CreateLineSegment($"{name}_Top", parent, topLeft, topRight, LineWidth, color);
+		PreviewVisualUtility.CreateLineSegment($"{name}_Right", parent, topRight, bottomRight, LineWidth, color);
+		PreviewVisualUtility.CreateLineSegment($"{name}_Bottom", parent, bottomRight, bottomLeft, LineWidth, color);
+		PreviewVisualUtility.CreateLineSegment($"{name}_Left", parent, bottomLeft, topLeft, LineWidth, color);
+	}
+
+	// STRIP: end_attenuation is the capsule diameter; strip_length is the length to the sides
+	// (0 = sphere). Drawn as a white wireframe capsule along the strip axis.
+	private static void BuildStrip(Node3D parent, LightVisualParams parameters)
+	{
+		float radius = Mathf.Max(parameters.EndAttenuation * 0.5f, MinDistance);
+		float halfLength = Mathf.Max(parameters.StripLength * 0.5f, 0f);
+
+		if (halfLength < MinDistance)
+		{
+			BuildWireSphere(parent, Vector3.Zero, radius, WhiteColor, "StripSphere");
+			return;
+		}
+
+		BuildWireCapsule(parent, StripAxis, halfLength, radius, WhiteColor, "Strip");
 	}
 
 	private static void BuildCircle(
@@ -210,6 +325,78 @@ public static class LevelViewerLightRadius
 		}
 	}
 
+	private static void BuildWireSphere(Node3D parent, Vector3 center, float radius, Color color, string prefix)
+	{
+		const int longitudeCount = 4;
+		for (int i = 0; i < longitudeCount; i++)
+		{
+			float a = i / (float)longitudeCount * Mathf.Pi;
+			Vector3 normal = new Vector3(Mathf.Cos(a), 0f, Mathf.Sin(a));
+			BuildCircle(parent, normal, radius, color, $"{prefix}_Lon{i}", center);
+		}
+
+		const int latitudeCount = 3;
+		for (int i = 1; i <= latitudeCount; i++)
+		{
+			float t = i / (float)(latitudeCount + 1);
+			float y = Mathf.Cos(t * Mathf.Pi);
+			float r = radius * Mathf.Sin(t * Mathf.Pi);
+			if (r < MinDistance)
+				continue;
+			Vector3 ringCenter = center + Vector3.Up * (radius * y);
+			BuildCircle(parent, Vector3.Up, r, color, $"{prefix}_Lat{i}", ringCenter);
+		}
+	}
+
+	private static void BuildWireCapsule(Node3D parent, Vector3 axis, float halfLength, float radius, Color color, string prefix)
+	{
+		axis = axis.Normalized();
+		if (axis.LengthSquared() < 0.0001f)
+			axis = Vector3.Right;
+
+		Vector3 centerA = axis * halfLength;
+		Vector3 centerB = -axis * halfLength;
+
+		BuildCircle(parent, axis, radius, color, prefix + "RingA", centerA);
+		BuildCircle(parent, axis, radius, color, prefix + "RingB", centerB);
+
+		Vector3 tangent = PreviewVisualUtility.GetSafeLookUpVector(axis);
+		Vector3 bitangent = axis.Cross(tangent).Normalized();
+		tangent = bitangent.Cross(axis).Normalized();
+
+		Vector3[] dirs = { tangent, -tangent, bitangent, -bitangent };
+		for (int i = 0; i < dirs.Length; i++)
+		{
+			Vector3 dir = dirs[i];
+			PreviewVisualUtility.CreateLineSegment(
+				$"{prefix}Side{i}",
+				parent,
+				centerB + dir * radius,
+				centerA + dir * radius,
+				LineWidth,
+				color);
+			BuildArcRib(parent, centerA, dir, axis, radius, color, $"{prefix}CapA{i}");
+			BuildArcRib(parent, centerB, dir, -axis, radius, color, $"{prefix}CapB{i}");
+		}
+	}
+
+	// Quarter-circle rib from a ring direction up to the pole direction (both unit and perpendicular).
+	private static void BuildArcRib(Node3D parent, Vector3 center, Vector3 fromDir, Vector3 poleDir, float radius, Color color, string name)
+	{
+		fromDir = fromDir.Normalized();
+		poleDir = poleDir.Normalized();
+
+		const int segments = 8;
+		Vector3 previous = center + fromDir * radius;
+		for (int i = 1; i <= segments; i++)
+		{
+			float angle = i / (float)segments * (Mathf.Pi * 0.5f);
+			Vector3 point = center + (Mathf.Cos(angle) * fromDir + Mathf.Sin(angle) * poleDir) * radius;
+			PreviewVisualUtility.CreateLineSegment($"{name}_{i}", parent, previous, point, LineWidth, color);
+			previous = point;
+		}
+	}
+
 	private static Vector3 ConeBasisOffset(Vector3 axis, float angle, float radius)
 	{
 		axis = axis.Normalized();
@@ -233,10 +420,11 @@ public static class LevelViewerLightRadius
 		public readonly LIGHT_TYPE Type;
 		public readonly float StartAttenuation;
 		public readonly float EndAttenuation;
-		public readonly float NearDist;
 		public readonly float InnerConeAngle;
 		public readonly float OuterConeAngle;
 		public readonly float StripLength;
+		public readonly bool IsSquareLight;
+		public readonly float AspectRatio;
 
 		public static LightVisualParams Read(FunctionEntity entity)
 		{
@@ -253,28 +441,31 @@ public static class LevelViewerLightRadius
 				type,
 				startAttenuation,
 				endAttenuation,
-				GetFloat(entity, "near_dist", 0.1f),
 				GetFloat(entity, "inner_cone_angle", 22.5f),
 				GetFloat(entity, "outer_cone_angle", 45f),
-				GetFloat(entity, "strip_length", 10f));
+				GetFloat(entity, "strip_length", 10f),
+				GetBool(entity, "is_square_light", false),
+				GetFloat(entity, "aspect_ratio", 1f));
 		}
 
 		private LightVisualParams(
 			LIGHT_TYPE type,
 			float startAttenuation,
 			float endAttenuation,
-			float nearDist,
 			float innerConeAngle,
 			float outerConeAngle,
-			float stripLength)
+			float stripLength,
+			bool isSquareLight,
+			float aspectRatio)
 		{
 			Type = type;
 			StartAttenuation = startAttenuation;
 			EndAttenuation = endAttenuation;
-			NearDist = nearDist;
 			InnerConeAngle = innerConeAngle;
 			OuterConeAngle = outerConeAngle;
 			StripLength = stripLength;
+			IsSquareLight = isSquareLight;
+			AspectRatio = aspectRatio;
 		}
 	}
 
@@ -282,6 +473,15 @@ public static class LevelViewerLightRadius
 	{
 		Parameter parameter = entity?.GetParameter(name);
 		if (parameter?.content is cFloat value)
+			return value.value;
+
+		return fallback;
+	}
+
+	private static bool GetBool(Entity entity, string name, bool fallback)
+	{
+		Parameter parameter = entity?.GetParameter(name);
+		if (parameter?.content is cBool value)
 			return value.value;
 
 		return fallback;

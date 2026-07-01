@@ -121,6 +121,18 @@ public partial class LevelViewerCamera : Camera3D
 
     public override void _UnhandledInput(InputEvent @event)
     {
+        try
+        {
+            UnhandledInputInternal(@event);
+        }
+        catch (Exception ex)
+        {
+            ViewerLog.PrintErr("[Viewer] Camera _UnhandledInput failed: " + ex);
+        }
+    }
+
+    private void UnhandledInputInternal(InputEvent @event)
+    {
         if (!IsProcessing())
             SetProcess(true);
 
@@ -238,6 +250,20 @@ public partial class LevelViewerCamera : Camera3D
 
     public override void _Process(double delta)
     {
+        try
+        {
+            ProcessInternal(delta);
+        }
+        catch (Exception ex)
+        {
+            // A per-frame exception (e.g. a disposed node surfacing as ObjectDisposedException)
+            // must never escape the engine callback and terminate the process.
+            ViewerLog.PrintErr("[Viewer] Camera _Process failed: " + ex);
+        }
+    }
+
+    private void ProcessInternal(double delta)
+    {
         LevelViewerRenderIdleThrottle.Update();
         if (LevelViewerRenderIdleThrottle.IsSuspended)
         {
@@ -313,6 +339,19 @@ public partial class LevelViewerCamera : Camera3D
 
     private async void FrameLoadedContentWhenReadyAsync()
     {
+        // async void: an escaping exception becomes unobserved and can terminate the process.
+        try
+        {
+            await FrameLoadedContentWhenReadyCoreAsync();
+        }
+        catch (Exception ex)
+        {
+            ViewerLog.PrintErr("[Viewer] FrameLoadedContentWhenReady failed: " + ex);
+        }
+    }
+
+    private async System.Threading.Tasks.Task FrameLoadedContentWhenReadyCoreAsync()
+    {
         if (_alienScene == null)
             return;
 
@@ -321,7 +360,11 @@ public partial class LevelViewerCamera : Camera3D
         const int maxFrames = 60;
         for (int i = 0; i < maxFrames; i++)
         {
-            await ToSignal(GetTree(), SceneTree.SignalName.ProcessFrame);
+            SceneTree tree = GetTree();
+            if (tree == null)
+                return;
+
+            await ToSignal(tree, SceneTree.SignalName.ProcessFrame);
 
             if (_alienScene == null || _alienScene.ContentGeneration != contentGeneration)
                 return;

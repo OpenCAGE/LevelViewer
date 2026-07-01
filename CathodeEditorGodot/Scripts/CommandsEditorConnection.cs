@@ -211,7 +211,16 @@ public partial class CommandsEditorConnection : Node3D
             return;
         }
 
-        FlushPendingParameterSyncs();
+        // Never let a per-frame exception (e.g. a stale/disposed node reference surfacing as
+        // ObjectDisposedException) escape the engine callback and tear down the process.
+        try
+        {
+            FlushPendingParameterSyncs();
+        }
+        catch (Exception ex)
+        {
+            ViewerLog.PrintErr("[Viewer] _Process failed: " + ex);
+        }
     }
 
     public override void _UnhandledInput(InputEvent @event)
@@ -243,8 +252,14 @@ public partial class CommandsEditorConnection : Node3D
 
     private void WakePhysicsProcess()
     {
-        if (!IsPhysicsProcessing())
-            Callable.From(() => SetPhysicsProcess(true)).CallDeferred();
+        // Called from the WebSocket receive thread as well as the main thread. IsPhysicsProcessing()
+        // and SetPhysicsProcess() touch Node internals and must only run on the main thread, so the
+        // whole check is marshalled there (accessing them off-thread can hard-crash the process).
+        Callable.From(() =>
+        {
+            if (GodotObject.IsInstanceValid(this) && !IsPhysicsProcessing())
+                SetPhysicsProcess(true);
+        }).CallDeferred();
     }
 
     private bool HasPendingPhysicsWork()
@@ -1059,6 +1074,24 @@ public partial class CommandsEditorConnection : Node3D
     {
         await Task.Yield();
 
+        // Fire-and-forget task: an escaping exception would be unobserved. The inner try handles
+        // per-attempt reconnects; this outer guard ensures nothing (even prologue failures) can
+        // surface as an unobserved task exception.
+        try
+        {
+            await ReconnectLoopBodyAsync(cancellationToken);
+        }
+        catch (OperationCanceledException)
+        {
+        }
+        catch (Exception ex)
+        {
+            ViewerLog.PrintErr("[Viewer] Reconnect loop terminated unexpectedly: " + ex);
+        }
+    }
+
+    private async Task ReconnectLoopBodyAsync(CancellationToken cancellationToken)
+    {
         while (!cancellationToken.IsCancellationRequested)
         {
             _client?.Dispose();
@@ -1168,7 +1201,16 @@ public partial class CommandsEditorConnection : Node3D
 
     public async void SendMessage(Packet content)
     {
-        await SendMessageAsync(content);
+        // async void: any escaping exception would become an unobserved exception and can
+        // terminate the process, so everything must be caught here.
+        try
+        {
+            await SendMessageAsync(content);
+        }
+        catch (Exception ex)
+        {
+            ViewerLog.PrintErr("Failed to send websocket message: " + ex.Message);
+        }
     }
 
     public void SendViewportModeToEditor()
@@ -1186,10 +1228,13 @@ public partial class CommandsEditorConnection : Node3D
 
     private async Task SendMessageAsync(Packet content)
     {
-        if (_client == null || _client.State != WebSocketState.Open)
+        // Capture locally: _connectionCts is nulled/disposed on _ExitTree, possibly from another thread.
+        CancellationTokenSource cts = _connectionCts;
+        if (cts == null || _client == null || _client.State != WebSocketState.Open)
             return;
 
-        await _sendLock.WaitAsync(_connectionCts.Token);
+        CancellationToken token = cts.Token;
+        await _sendLock.WaitAsync(token);
         try
         {
             if (_client == null || _client.State != WebSocketState.Open)
@@ -1200,7 +1245,7 @@ public partial class CommandsEditorConnection : Node3D
             WebSocketPacketLog.LogSent(content, json.Length);
             try
             {
-                await _client.SendAsync(new ArraySegment<byte>(bytes), WebSocketMessageType.Text, true, _connectionCts.Token);
+                await _client.SendAsync(new ArraySegment<byte>(bytes), WebSocketMessageType.Text, true, token);
             }
             catch (Exception ex)
             {
@@ -2412,13 +2457,21 @@ public partial class CommandsEditorConnection : Node3D
         if (!IsEmbeddedInOpenCage)
             return;
 
+        SceneTree tree = GetTree();
+        if (tree == null)
+            return;
+
         Callable.From(RestoreEmbeddedInputFocus).CallDeferred();
-        SceneTreeTimer timer = GetTree().CreateTimer(0.05);
+        SceneTreeTimer timer = tree.CreateTimer(0.05);
         timer.Timeout += () => RestoreEmbeddedInputFocus();
     }
 
     private void RestoreEmbeddedInputFocus()
     {
+        // Deferred/timer callback: the node may have left the tree in the meantime.
+        if (!GodotObject.IsInstanceValid(this) || !IsInsideTree())
+            return;
+
         Window window = GetViewport()?.GetWindow();
         if (window == null)
             return;

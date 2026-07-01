@@ -2103,32 +2103,42 @@ public partial class AlienScene : Node3D
 		if (syncDataType == DataType.TRANSFORM && !fromPointer && visualLimitNode == null)
 			touchedEntityNodes = new HashSet<Node3D>();
 
-		for (int i = 0; i < entityNodes.Count; i++)
+		// Batch pick-bounds invalidation so moving an entity with many instances doesn't rescan the
+		// entire pick-owner registry once per instance (previously O(instances x owners)).
+		LevelViewerPick.BeginBatchPickBoundsInvalidation();
+		try
 		{
-			Node3D entityNode = entityNodes[i];
-			if (entityNode == null || !GodotObject.IsInstanceValid(entityNode))
-				continue;
-
-			ParameterVisualContext context = new ParameterVisualContext()
+			for (int i = 0; i < entityNodes.Count; i++)
 			{
-				Composite = visualComposite,
-				Entity = visualEntity,
-				EntityNode = entityNode,
-				Sync = sync,
-				FromPointer = fromPointer,
-				PointedOverride = pointedOverride,
-			};
+				Node3D entityNode = entityNodes[i];
+				if (entityNode == null || !GodotObject.IsInstanceValid(entityNode))
+					continue;
 
-			if (_parameterVisualHandlers.TryGetValue(syncDataType, out ParameterVisualHandler handler))
-				handler(context);
-			else if (syncDataType != DataType.VECTOR && syncDataType != DataType.SPLINE && syncDataType != DataType.BOOL)
-				RefreshFunctionEntityPreviews(entityNode);
+				ParameterVisualContext context = new ParameterVisualContext()
+				{
+					Composite = visualComposite,
+					Entity = visualEntity,
+					EntityNode = entityNode,
+					Sync = sync,
+					FromPointer = fromPointer,
+					PointedOverride = pointedOverride,
+				};
 
-			touchedEntityNodes?.Add(entityNode);
+				if (_parameterVisualHandlers.TryGetValue(syncDataType, out ParameterVisualHandler handler))
+					handler(context);
+				else if (syncDataType != DataType.VECTOR && syncDataType != DataType.SPLINE && syncDataType != DataType.BOOL)
+					RefreshFunctionEntityPreviews(entityNode);
+
+				touchedEntityNodes?.Add(entityNode);
+			}
+
+			if (touchedEntityNodes != null && touchedEntityNodes.Count > 0)
+				ReapplyAliasOverridesPointingAt(touchedEntityNodes);
 		}
-
-		if (touchedEntityNodes != null && touchedEntityNodes.Count > 0)
-			ReapplyAliasOverridesPointingAt(touchedEntityNodes);
+		finally
+		{
+			LevelViewerPick.EndBatchPickBoundsInvalidation();
+		}
 	}
 
 	/// <summary>

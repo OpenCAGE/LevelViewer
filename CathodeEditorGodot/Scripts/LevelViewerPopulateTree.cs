@@ -164,19 +164,28 @@ public static class LevelViewerPopulateTree
 
 		(int ParentLocalIndex, Composite Nested, uint NestedMappingScopeInstanceEntityId)[] branches = nestedBranches.ToArray();
 		List<Command>[] nestedPlans = new List<Command>[branches.Length];
+		// Each branch collects into its own model-reference list; List<T>.Add is not thread-safe,
+		// so a shared list would corrupt/crash under Parallel.For on multi-core machines.
+		List<FunctionEntity>[] nestedModelReferences = new List<FunctionEntity>[branches.Length];
 		Parallel.For(0, branches.Length, i =>
 		{
+			List<FunctionEntity> branchModelReferences = new List<FunctionEntity>();
 			nestedPlans[i] = CollectCompositeSubtree(
 				branches[i].Nested,
 				content,
 				deferAliasProxy,
 				includeVariables,
-				modelReferences,
+				branchModelReferences,
 				branches[i].NestedMappingScopeInstanceEntityId);
+			nestedModelReferences[i] = branchModelReferences;
 		});
 
 		for (int i = 0; i < branches.Length; i++)
+		{
+			if (nestedModelReferences[i] != null)
+				modelReferences.AddRange(nestedModelReferences[i]);
 			MergeSubtree(commands, nestedPlans[i], branches[i].ParentLocalIndex);
+		}
 
 		return commands;
 	}

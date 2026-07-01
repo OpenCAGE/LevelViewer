@@ -1,8 +1,5 @@
 using CATHODE;
-using CATHODE.Scripting;
-using CATHODE.Scripting.Internal;
 using Godot;
-using System;
 using System.Collections.Generic;
 
 /// <summary>
@@ -13,42 +10,26 @@ public static class LevelViewerAliasHighlight
 {
 	public static readonly Color HighlightOrange = new(1f, 0.55f, 0.15f, 1f);
 
-	private static readonly Dictionary<MeshInstance3D, Material> _savedOverlays = new();
-	private static readonly List<MeshInstance3D> _highlightMeshes = new();
-	private static readonly List<MeshInstance3D> _meshCollectBuffer = new();
+	private static readonly EntityHighlightState _state =
+		new EntityHighlightState(LevelViewerHighlightOverlay.HighlightOverlayMode.Alias);
 
-	private static uint _cachedActiveCompositeId;
-	private static uint[] _cachedInstancePath = Array.Empty<uint>();
-	private static bool _cacheValid;
+	public static bool NeedsRebuild(uint activeCompositeId) => _state.NeedsRebuild(activeCompositeId);
 
-	public static bool NeedsRebuild(uint activeCompositeId)
-	{
-		if (!_cacheValid)
-			return true;
-
-		if (_cachedActiveCompositeId != activeCompositeId)
-			return true;
-
-		return !PreviewVisibilitySettings.InstancePathsEqual(
-			_cachedInstancePath,
-			PreviewVisibilitySettings.ActiveInstanceEntityPath);
-	}
-
-	public static void InvalidateCache() => _cacheValid = false;
+	public static void InvalidateCache() => _state.InvalidateCache();
 
 	public static void Rebuild(AlienScene scene, Commands commands, uint activeCompositeId)
 	{
-		Clear();
+		_state.Clear();
 		if (scene == null || commands == null || activeCompositeId == 0)
 		{
-			_cacheValid = false;
+			_state.MarkRebuildFailed();
 			return;
 		}
 
 		Node3D contentRoot = scene.ParentNode;
 		if (contentRoot == null)
 		{
-			_cacheValid = false;
+			_state.MarkRebuildFailed();
 			return;
 		}
 
@@ -79,122 +60,18 @@ public static class LevelViewerAliasHighlight
 				if (!LevelViewerCompositeFocus.IsNodeInScope(pointedNode, contentRoot, commands))
 					continue;
 
-				ApplyToNode(pointedNode, tintedMeshIds);
+				_state.ApplyToNode(pointedNode, tintedMeshIds);
 			}
 		});
 
-		_cachedActiveCompositeId = activeCompositeId;
-		_cachedInstancePath = (uint[])(PreviewVisibilitySettings.ActiveInstanceEntityPath ?? Array.Empty<uint>()).Clone();
-		_cacheValid = true;
+		_state.MarkRebuilt(activeCompositeId);
 	}
 
 	/// <summary>Re-applies cached orange overlay while skipping the current selection subtree.</summary>
-	public static void SyncWithSelection() => ReapplyIfActive();
+	public static void SyncWithSelection() => _state.ReapplyIfActive();
 
-	public static void Clear()
-	{
-		LevelViewerHighlightOverlay.RestoreOverlays(_savedOverlays);
-		_highlightMeshes.Clear();
-		_cacheValid = false;
-	}
+	public static void Clear() => _state.Clear();
 
 	/// <summary>Restores alias overlay under <paramref name="root"/> so selection green can take over.</summary>
-	public static void ReleaseNode(Node3D root)
-	{
-		if (root == null || !GodotObject.IsInstanceValid(root))
-			return;
-
-		for (int i = _highlightMeshes.Count - 1; i >= 0; i--)
-		{
-			MeshInstance3D mesh = _highlightMeshes[i];
-			if (mesh == null || !GodotObject.IsInstanceValid(mesh))
-				continue;
-
-			if (mesh != root && !root.IsAncestorOf(mesh))
-				continue;
-
-			ReleaseMeshForSelection(mesh);
-		}
-	}
-
-	public static void ReapplyIfActive()
-	{
-		for (int i = 0; i < _highlightMeshes.Count; i++)
-		{
-			MeshInstance3D mesh = _highlightMeshes[i];
-			if (mesh == null || !GodotObject.IsInstanceValid(mesh))
-				continue;
-
-			if (_savedOverlays.ContainsKey(mesh))
-				continue;
-
-			if (IsMeshUnderSelection(mesh))
-				continue;
-
-			ApplyMeshHighlight(mesh);
-		}
-	}
-
-	private static void ReleaseMeshForSelection(MeshInstance3D mesh)
-	{
-		if (mesh == null || !GodotObject.IsInstanceValid(mesh))
-			return;
-
-		if (_savedOverlays.TryGetValue(mesh, out Material saved))
-			mesh.MaterialOverlay = saved;
-
-		_savedOverlays.Remove(mesh);
-	}
-
-	private static bool IsMeshUnderSelection(MeshInstance3D mesh)
-	{
-		Node current = mesh;
-		while (current != null)
-		{
-			if (LevelViewerSelection.IsUnderSelection(current))
-				return true;
-
-			current = current.GetParent();
-		}
-
-		return false;
-	}
-
-	private static void ApplyToNode(Node3D root, HashSet<ulong> tintedMeshIds)
-	{
-		if (root == null || !GodotObject.IsInstanceValid(root))
-			return;
-
-		_meshCollectBuffer.Clear();
-		CollectMeshes(root, _meshCollectBuffer);
-		for (int i = 0; i < _meshCollectBuffer.Count; i++)
-		{
-			MeshInstance3D mesh = _meshCollectBuffer[i];
-			if (mesh == null || !GodotObject.IsInstanceValid(mesh))
-				continue;
-
-			ulong meshId = mesh.GetInstanceId();
-			if (tintedMeshIds.Contains(meshId))
-				continue;
-
-			tintedMeshIds.Add(meshId);
-			if (!_highlightMeshes.Contains(mesh))
-				_highlightMeshes.Add(mesh);
-
-			if (_savedOverlays.ContainsKey(mesh) || IsMeshUnderSelection(mesh))
-				continue;
-
-			ApplyMeshHighlight(mesh);
-		}
-	}
-
-	private static void CollectMeshes(Node node, List<MeshInstance3D> meshes)
-	{
-		PreviewVisualUtility.CollectMeshInstances(node, meshes);
-	}
-
-	private static void ApplyMeshHighlight(MeshInstance3D meshInstance)
-	{
-		LevelViewerHighlightOverlay.TryApplyOverlay(meshInstance, _savedOverlays, LevelViewerHighlightOverlay.HighlightOverlayMode.Alias);
-	}
+	public static void ReleaseNode(Node3D root) => _state.ReleaseNode(root);
 }

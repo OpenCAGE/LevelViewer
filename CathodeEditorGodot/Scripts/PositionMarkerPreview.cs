@@ -74,28 +74,15 @@ public partial class PositionMarkerPreview : FunctionEntityPreview
         if (_root != null)
             return;
 
-        _root = new Node3D { Name = "PositionMarkerPreview" };
-        AddChild(_root);
-
-        ArrayMesh torusMesh = PreviewVisualUtility.CreateTorusMesh(TorusRadius, TubeRadius);
-        PreviewVisualUtility.CreateMeshPreview("Torus", _root, torusMesh, Colors.White);
-
-        CreateAxisLine("AxisX", Vector3.Right, AxisLength, AxisX);
-        CreateAxisLine("AxisY", Vector3.Up, AxisLength, AxisY);
-        CreateAxisLine("AxisZ", Vector3.Back, AxisLength, AxisZ);
-    }
-
-    protected void CreateAxisLine(string name, Vector3 direction, float length, Color color)
-    {
-        Vector3 axis = direction.Normalized();
-        CylinderMesh cylinder = new CylinderMesh
-        {
-            TopRadius = AxisWidth,
-            BottomRadius = AxisWidth,
-            Height = length,
-        };
-        Node3D axisObject = PreviewVisualUtility.CreatePrimitivePreview(name, _root, cylinder, color);
-        axisObject.Rotation = PreviewVisualUtility.GetAxisStubEuler(axis);
-        axisObject.Position = axis * (length * 0.5f);
+        // Torus starts white; ApplyColors() (called right after EnsureVisual) recolors it and the
+        // RGB axes match the shared marker's axis colours.
+        _root = PreviewVisualUtility.CreatePositionStyleMarker(
+            "PositionMarkerPreview",
+            this,
+            Colors.White,
+            TorusRadius,
+            TubeRadius,
+            AxisLength,
+            AxisWidth);
     }
 }

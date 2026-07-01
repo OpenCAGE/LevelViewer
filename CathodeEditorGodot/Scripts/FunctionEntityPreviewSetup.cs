@@ -1,6 +1,7 @@
 using CATHODE.Scripting;
 using Godot;
 using OpenCAGE;
+using System;
 
 public static class FunctionEntityPreviewSetup
 {
@@ -24,20 +25,18 @@ public static class FunctionEntityPreviewSetup
             if (functionType != FunctionType.ModelReference)
                 return false;
 
-            ModelReferencePreview modelPreview = new ModelReferencePreview();
-            entityNode.AddChild(modelPreview);
-            modelPreview.Setup(scene, function, ownerCompositeId, mappingScopeInstanceEntityId);
-            return true;
+            return AddPreview<ModelReferencePreview>(
+                entityNode,
+                p => p.Setup(scene, function, ownerCompositeId, mappingScopeInstanceEntityId));
         }
 
         if (!RenderFilterDefinitions.IsSupported(functionType))
         {
             if (functionType == FunctionType.ModelReference)
             {
-                ModelReferencePreview preview = new ModelReferencePreview();
-                entityNode.AddChild(preview);
-                preview.Setup(scene, function, ownerCompositeId, mappingScopeInstanceEntityId);
-                return true;
+                return AddPreview<ModelReferencePreview>(
+                    entityNode,
+                    p => p.Setup(scene, function, ownerCompositeId, mappingScopeInstanceEntityId));
             }
             return false;
         }
@@ -45,91 +44,47 @@ public static class FunctionEntityPreviewSetup
         switch (RenderFilterDefinitions.GetPreviewKind(functionType))
         {
             case RenderPreviewKind.Box:
-            {
-                BoxPreview preview = new BoxPreview();
-                entityNode.AddChild(preview);
-                preview.Setup(function, utils, ownerCompositeId);
-                return true;
-            }
+                return AddPreview<BoxPreview>(entityNode, p => p.Setup(function, utils, ownerCompositeId));
             case RenderPreviewKind.Sound:
-            {
-                IconBillboardPreview preview = new IconBillboardPreview();
-                entityNode.AddChild(preview);
-                preview.Setup(function, IconBillboardPreview.IconKind.Sound, ownerCompositeId);
-                return true;
-            }
+                return AddIcon(entityNode, function, IconBillboardPreview.IconKind.Sound, ownerCompositeId);
             case RenderPreviewKind.PositionMarker:
-            {
-                PositionMarkerPreview preview = new PositionMarkerPreview();
-                entityNode.AddChild(preview);
-                preview.Setup(function, ownerCompositeId);
-                return true;
-            }
+                return AddPreview<PositionMarkerPreview>(entityNode, p => p.Setup(function, ownerCompositeId));
             case RenderPreviewKind.SoundEnvironmentMarker:
-            {
-                SoundEnvironmentMarkerPreview preview = new SoundEnvironmentMarkerPreview();
-                entityNode.AddChild(preview);
-                preview.Setup(function, ownerCompositeId);
-                return true;
-            }
+                return AddPreview<SoundEnvironmentMarkerPreview>(entityNode, p => p.Setup(function, ownerCompositeId));
             case RenderPreviewKind.LightReference:
-            {
-                IconBillboardPreview preview = new IconBillboardPreview();
-                entityNode.AddChild(preview);
-                preview.Setup(function, IconBillboardPreview.IconKind.Light, ownerCompositeId);
-                return true;
-            }
+                return AddIcon(entityNode, function, IconBillboardPreview.IconKind.Light, ownerCompositeId);
             case RenderPreviewKind.Character:
-            {
-                CharacterPreview preview = new CharacterPreview();
-                entityNode.AddChild(preview);
-                preview.Setup(function, ownerCompositeId);
-                return true;
-            }
+                return AddPreview<CharacterPreview>(entityNode, p => p.Setup(function, ownerCompositeId));
             case RenderPreviewKind.ParticleEmitter:
-            {
-                IconBillboardPreview preview = new IconBillboardPreview();
-                entityNode.AddChild(preview);
-                preview.Setup(function, IconBillboardPreview.IconKind.Particle, ownerCompositeId);
-                return true;
-            }
+                return AddIcon(entityNode, function, IconBillboardPreview.IconKind.Particle, ownerCompositeId);
             case RenderPreviewKind.SplinePath:
-            {
-                SplinePathPreview preview = new SplinePathPreview();
-                entityNode.AddChild(preview);
-                preview.Setup(function, ownerCompositeId);
-                return true;
-            }
+                return AddPreview<SplinePathPreview>(entityNode, p => p.Setup(function, ownerCompositeId));
             case RenderPreviewKind.EnvironmentMap:
-            {
-                EnvironmentMapPreview preview = new EnvironmentMapPreview();
-                entityNode.AddChild(preview);
-                preview.Setup(function, ownerCompositeId);
-                return true;
-            }
+                return AddPreview<EnvironmentMapPreview>(entityNode, p => p.Setup(function, ownerCompositeId));
             case RenderPreviewKind.SoundNetworkNode:
-            {
-                SoundNetworkNodePreview preview = new SoundNetworkNodePreview();
-                entityNode.AddChild(preview);
-                preview.Setup(function, ownerCompositeId);
-                return true;
-            }
+                return AddPreview<SoundNetworkNodePreview>(entityNode, p => p.Setup(function, ownerCompositeId));
             case RenderPreviewKind.SoundObject:
-            {
-                IconBillboardPreview preview = new IconBillboardPreview();
-                entityNode.AddChild(preview);
-                preview.Setup(function, IconBillboardPreview.IconKind.SoundObject, ownerCompositeId);
-                return true;
-            }
+                return AddIcon(entityNode, function, IconBillboardPreview.IconKind.SoundObject, ownerCompositeId);
             case RenderPreviewKind.CameraResource:
-            {
-                IconBillboardPreview preview = new IconBillboardPreview();
-                entityNode.AddChild(preview);
-                preview.Setup(function, IconBillboardPreview.IconKind.Camera, ownerCompositeId);
-                return true;
-            }
+                return AddIcon(entityNode, function, IconBillboardPreview.IconKind.Camera, ownerCompositeId);
             default:
                 return false;
         }
+    }
+
+    private static bool AddIcon(
+        Node3D entityNode,
+        FunctionEntity function,
+        IconBillboardPreview.IconKind kind,
+        uint ownerCompositeId)
+        => AddPreview<IconBillboardPreview>(entityNode, p => p.Setup(function, kind, ownerCompositeId));
+
+    private static bool AddPreview<T>(Node3D entityNode, Action<T> setup)
+        where T : FunctionEntityPreview, new()
+    {
+        T preview = new T();
+        entityNode.AddChild(preview);
+        setup(preview);
+        return true;
     }
 }

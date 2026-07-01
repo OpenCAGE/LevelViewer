@@ -28,6 +28,13 @@ public static class LevelViewerPick
 	private static readonly HashSet<Node3D> _suppressedPickOwners = new();
 	private static bool _scopedPickablesDirty = true;
 
+	// Batched bounds invalidation: while a batch is open, moved nodes are collected and the (expensive)
+	// per-node registry scan is deferred to BatchInvalidatePickBounds. Above the threshold we just drop
+	// the whole AABB cache, which is O(1) and rebuilt lazily on the next pick.
+	private static readonly HashSet<Node3D> _batchInvalidateNodes = new();
+	private static bool _batchInvalidateActive;
+	private const int BatchInvalidateClearAllThreshold = 16;
+
 	public readonly struct PickHit
 	{
 		public PickHit(Node hitNode, float distance)
@@ -63,6 +70,8 @@ public static class LevelViewerPick
 		_registeredPickables.Clear();
 		_suppressedPickOwners.Clear();
 		_scopedPickablesDirty = true;
+		_batchInvalidateActive = false;
+		_batchInvalidateNodes.Clear();
 	}
 
 	public static int PickOwnerCount => _pickablesByOwner.Count;
@@ -180,9 +189,59 @@ public static class LevelViewerPick
 	}
 
 	/// <summary>
+	/// Opens a batch so repeated <see cref="InvalidatePickBounds"/> calls (e.g. moving every instance of
+	/// an entity) collapse into a single registry pass on <see cref="EndBatchPickBoundsInvalidation"/>,
+	/// instead of rescanning the whole owner registry once per moved node.
+	/// </summary>
+	public static void BeginBatchPickBoundsInvalidation()
+	{
+		_batchInvalidateActive = true;
+		_batchInvalidateNodes.Clear();
+	}
+
+	/// <summary>Flushes and closes a batch opened by <see cref="BeginBatchPickBoundsInvalidation"/>.</summary>
+	public static void EndBatchPickBoundsInvalidation()
+	{
+		if (!_batchInvalidateActive)
+			return;
+
+		_batchInvalidateActive = false;
+
+		if (_batchInvalidateNodes.Count == 0)
+			return;
+
+		// Many nodes moved: clearing the whole cache is O(1) and cheaper than N owner scans.
+		if (_batchInvalidateNodes.Count >= BatchInvalidateClearAllThreshold)
+		{
+			_ownerGlobalBounds.Clear();
+			_batchInvalidateNodes.Clear();
+			return;
+		}
+
+		foreach (Node3D node in _batchInvalidateNodes)
+			InvalidatePickBoundsImmediate(node);
+
+		_batchInvalidateNodes.Clear();
+	}
+
+	/// <summary>
 	/// Drop cached broad-phase AABBs for pick owners whose meshes moved with <paramref name="node"/>.
 	/// </summary>
 	public static void InvalidatePickBounds(Node3D node)
+	{
+		if (node == null || !GodotObject.IsInstanceValid(node))
+			return;
+
+		if (_batchInvalidateActive)
+		{
+			_batchInvalidateNodes.Add(node);
+			return;
+		}
+
+		InvalidatePickBoundsImmediate(node);
+	}
+
+	private static void InvalidatePickBoundsImmediate(Node3D node)
 	{
 		if (node == null || !GodotObject.IsInstanceValid(node))
 			return;

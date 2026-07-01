@@ -131,6 +131,18 @@ public partial class LevelViewerTransformGizmo : Node3D
     // ─────────────────────────────────────────────────────────────────────────
     public override void _Process(double delta)
     {
+        try
+        {
+            ProcessInternal();
+        }
+        catch (Exception ex)
+        {
+            ViewerLog.PrintErr("[Viewer] Gizmo _Process failed: " + ex);
+        }
+    }
+
+    private void ProcessInternal()
+    {
         if (_mode == GizmoMode.None
             || _target == null || !GodotObject.IsInstanceValid(_target)
             || !PreviewVisualUtility.HasValidWorldAnchor(_target))

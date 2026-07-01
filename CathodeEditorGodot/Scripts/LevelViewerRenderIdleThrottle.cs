@@ -10,6 +10,9 @@ public static class LevelViewerRenderIdleThrottle
 	private const int SuspendedMaxFps = 1;
 	private const int EmbeddedIdleMaxFps = 30;
 
+	// Guards all mutable state below. NotifyUserActivity is called from the WebSocket receive
+	// thread as well as the main thread, so reads/writes must be synchronized.
+	private static readonly object _stateLock = new object();
 	private static double _lastActivitySeconds;
 	private static bool _suspended;
 	private static bool _embeddedMode;
@@ -21,80 +24,124 @@ public static class LevelViewerRenderIdleThrottle
 		get
 		{
 			double now = Time.GetTicksMsec() / 1000.0;
-			return now - _lastActivitySeconds >= IdleSecondsBeforeSuspend;
+			lock (_stateLock)
+				return now - _lastActivitySeconds >= IdleSecondsBeforeSuspend;
 		}
 	}
 
 	/// <summary>Full suspend (standalone viewer): drops to 1 FPS and stops _Process on gated nodes.</summary>
-	public static bool IsSuspended => _suspended;
+	public static bool IsSuspended
+	{
+		get { lock (_stateLock) return _suspended; }
+	}
 
 	/// <summary>Embedded idle: lower FPS and skip heavy camera work, but keep processing alive.</summary>
-	public static bool IsRenderIdle => _renderIdle;
+	public static bool IsRenderIdle
+	{
+		get { lock (_stateLock) return _renderIdle; }
+	}
 
 	public static void ConfigureEmbeddedMode(bool embedded)
 	{
-		_embeddedMode = embedded;
+		lock (_stateLock)
+			_embeddedMode = embedded;
 	}
 
+	/// <summary>
+	/// Safe to call from any thread. State is updated under lock; the actual <c>Engine.MaxFps</c>
+	/// mutation is marshalled to the main thread since this is also called from the WebSocket
+	/// receive thread and Godot engine objects must not be mutated off the main thread.
+	/// </summary>
 	public static void NotifyUserActivity()
 	{
-		_lastActivitySeconds = Time.GetTicksMsec() / 1000.0;
-		if (_suspended || _renderIdle)
-			Restore();
+		bool restore;
+		lock (_stateLock)
+		{
+			_lastActivitySeconds = Time.GetTicksMsec() / 1000.0;
+			restore = _suspended || _renderIdle;
+			if (restore)
+			{
+				_suspended = false;
+				_renderIdle = false;
+			}
+		}
+
+		// Only fires on the rare idle->active transition. On the main thread (input path) apply
+		// immediately; from the WebSocket receive thread, marshal so the engine object is never
+		// mutated off the main thread.
+		if (restore)
+		{
+			if (OS.GetThreadCallerId() == OS.GetMainThreadId())
+				Engine.MaxFps = 0;
+			else
+				Callable.From(static () => Engine.MaxFps = 0).CallDeferred();
+		}
 	}
 
 	/// <summary>While &gt; 0, idle throttling is disabled so level load can run at full frame rate.</summary>
 	public static void SetLoadActive(bool active)
 	{
-		if (active)
+		bool restore = false;
+		lock (_stateLock)
 		{
-			_loadActiveCount++;
-			_lastActivitySeconds = Time.GetTicksMsec() / 1000.0;
-			if (_suspended || _renderIdle)
-				Restore();
-			return;
+			if (active)
+			{
+				_loadActiveCount++;
+				_lastActivitySeconds = Time.GetTicksMsec() / 1000.0;
+				restore = _suspended || _renderIdle;
+				if (restore)
+				{
+					_suspended = false;
+					_renderIdle = false;
+				}
+			}
+			else if (_loadActiveCount > 0)
+			{
+				_loadActiveCount--;
+			}
 		}
 
-		if (_loadActiveCount > 0)
-			_loadActiveCount--;
+		if (restore)
+			Engine.MaxFps = 0;
 	}
 
+	/// <summary>Main-thread only: may release Win32 focus/capture to the OpenCAGE host.</summary>
 	public static void Update()
 	{
-		if (_loadActiveCount > 0)
-			return;
-
-		double now = Time.GetTicksMsec() / 1000.0;
-		double idleSeconds = now - _lastActivitySeconds;
-		if (_suspended || _renderIdle)
-			return;
-
-		if (idleSeconds >= IdleSecondsBeforeSuspend)
+		bool enterEmbeddedIdle = false;
+		bool enterSuspend = false;
+		lock (_stateLock)
 		{
+			if (_loadActiveCount > 0)
+				return;
+
+			if (_suspended || _renderIdle)
+				return;
+
+			double now = Time.GetTicksMsec() / 1000.0;
+			if (now - _lastActivitySeconds < IdleSecondsBeforeSuspend)
+				return;
+
 			if (_embeddedMode)
-				EnterEmbeddedIdle();
+			{
+				_renderIdle = true;
+				enterEmbeddedIdle = true;
+			}
 			else
-				EnterSuspend();
+			{
+				_suspended = true;
+				enterSuspend = true;
+			}
 		}
-	}
 
-	private static void EnterSuspend()
-	{
-		_suspended = true;
-		Engine.MaxFps = SuspendedMaxFps;
-	}
-
-	private static void EnterEmbeddedIdle()
-	{
-		_renderIdle = true;
-		Engine.MaxFps = EmbeddedIdleMaxFps;
-		LevelViewerEmbeddedFocus.ReleaseFocusAndCaptureToHost();
-	}
-
-	private static void Restore()
-	{
-		_suspended = false;
-		_renderIdle = false;
-		Engine.MaxFps = 0;
+		if (enterSuspend)
+		{
+			Engine.MaxFps = SuspendedMaxFps;
+		}
+		else if (enterEmbeddedIdle)
+		{
+			Engine.MaxFps = EmbeddedIdleMaxFps;
+			LevelViewerEmbeddedFocus.ReleaseFocusAndCaptureToHost();
+		}
 	}
 }

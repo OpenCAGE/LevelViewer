@@ -110,9 +110,12 @@ public static class ParameterSync
         switch (dataType)
         {
             case DataType.TRANSFORM:
+                // Store in Cathode space to match disk-loaded data and every read-back path
+                // (TryGetSpawnTransform, spline preview, alias-override reapply) which converts to
+                // Godot on read. Converting here would double-flip and mirror live-edited positions.
                 return new cTransform(
-                    CathodeCoordinates.PositionToGodot(ToVector3(sync.vector3_a)),
-                    CathodeCoordinates.EulerDegreesToGodot(ToVector3(sync.vector3_b)));
+                    ToVector3(sync.vector3_a),
+                    ToVector3(sync.vector3_b));
             case DataType.VECTOR:
                 return new cVector3(ToVector3(sync.vector3_a));
             case DataType.BOOL:
@@ -139,9 +142,10 @@ public static class ParameterSync
                     {
                         if (point == null || point.Length < 6)
                             continue;
+                        // Cathode space (see TRANSFORM note); ReadSplinePoints converts on read.
                         points.Add(new cTransform(
-                            CathodeCoordinates.PositionToGodot(ToVector3(point, 0)),
-                            CathodeCoordinates.EulerDegreesToGodot(ToVector3(point, 3))));
+                            ToVector3(point, 0),
+                            ToVector3(point, 3)));
                     }
                 }
                 return new cSpline(points);

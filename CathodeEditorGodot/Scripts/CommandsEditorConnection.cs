@@ -124,7 +124,9 @@ public partial class CommandsEditorConnection : Node3D
 
     public override void _Ready()
     {
+        ViewerLog.InstallGlobalExceptionHandlers();
         LevelViewerEmbeddedFocus.ConfigureEmbeddedStartup();
+        ViewerLog.Print("Level Viewer starting. Viewer log: " + (ViewerLog.LogFilePath ?? "<unavailable>"));
         _scene = GetNode<AlienScene>("../AlienScene");
         _connectionCts = new CancellationTokenSource();
         ViewerLogBridge.RegisterConnection(this);
@@ -442,6 +444,12 @@ public partial class CommandsEditorConnection : Node3D
 
         WebSocketPacketLog.LogReceived(packet, data?.Length ?? 0);
 
+        // Diagnostic breadcrumb (skip the high-frequency drag/param spam) so viewer.log shows the
+        // exact packet sequence leading up to a crash.
+        if (packet.packet_event != PacketEvent.ENTITY_MOVED
+            && packet.packet_event != PacketEvent.ENTITY_PARAMETER_MODIFIED)
+            ViewerLog.Print("Packet: " + packet.packet_event);
+
         if (packet.version != new Packet().version)
         {
             ViewerLog.PrintErr("Your Commands Editor is utilising a different API version than this Godot client!!\nPlease ensure both are up to date.");
@@ -482,7 +490,9 @@ public partial class CommandsEditorConnection : Node3D
                         && _scene.ContentGeneration == contentGeneration
                         && mappingSync != null)
                     {
+                        ViewerLog.Print("MaterialMapping apply start (id=" + mappingSync.mapping_id + ")");
                         _scene.ApplySyncedMaterialMapping(mappingSync);
+                        ViewerLog.Print("MaterialMapping apply complete");
                     }
                 }
                 catch (Exception ex)

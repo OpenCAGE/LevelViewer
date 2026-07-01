@@ -2033,6 +2033,11 @@ public partial class AlienScene : Node3D
 		if (dataEntity == null)
 			return;
 
+		DataType diagDataType = ParameterSync.GetDataType(sync);
+		if (diagDataType == DataType.RESOURCE)
+			ViewerLog.Print("ApplyEntityParameter RESOURCE start (entity=" + dataEntityID.AsUInt32
+				+ " visual=" + visualEntityID.AsUInt32 + " fromPointer=" + fromPointer + ")");
+
 		ParameterSync.ApplyToEntity(dataEntity, sync, _content);
 
 		ShortGuid paramName = new ShortGuid(sync.name);
@@ -2085,6 +2090,8 @@ public partial class AlienScene : Node3D
 			else if (syncDataType != DataType.VECTOR && syncDataType != DataType.SPLINE && syncDataType != DataType.BOOL)
 				RefreshFunctionEntityPreviews(visualLimitNode);
 
+			if (diagDataType == DataType.RESOURCE)
+				ViewerLog.Print("ApplyEntityParameter RESOURCE complete (limited path)");
 			return;
 		}
 
@@ -2139,6 +2146,9 @@ public partial class AlienScene : Node3D
 		{
 			LevelViewerPick.EndBatchPickBoundsInvalidation();
 		}
+
+		if (diagDataType == DataType.RESOURCE)
+			ViewerLog.Print("ApplyEntityParameter RESOURCE complete");
 	}
 
 	/// <summary>
@@ -3109,25 +3119,40 @@ public partial class AlienScene : Node3D
 	{
 		string entityNodeName = entity.AsUInt32.ToString();
 		bool removed = false;
-		if (_compositeNodes.ContainsKey(composite))
+		int instancesProcessed = 0;
+
+		if (_compositeNodes.TryGetValue(composite, out List<Node3D> compositeInstances))
 		{
-			foreach (Node3D compositeInstance in _compositeNodes[composite])
+			// Snapshot: QueueFree / restore-pointed below can mutate the tree and this list.
+			foreach (Node3D compositeInstance in compositeInstances.ToArray())
 			{
 				if (compositeInstance == null || !GodotObject.IsInstanceValid(compositeInstance))
 					continue;
 
 				foreach (Node child in compositeInstance.GetChildren().ToArray())
 				{
-					if (child.Name == entityNodeName && child is Node3D entityNode)
+					if (child == null || !GodotObject.IsInstanceValid(child))
+						continue;
+					if (child.Name != entityNodeName || child is not Node3D entityNode)
+						continue;
+
+					// One bad instance must not abort the whole removal (and must not escape to
+					// the engine callback as a hard failure). Native use-after-free can't be caught
+					// here, which is why every node touched below is IsInstanceValid-guarded first.
+					try
 					{
 						EntityOverride entityOverride = entityNode as EntityOverride;
-						if (entityOverride?.PointedEntity != null
-							&& _nodeEntities.TryGetValue(entityOverride.PointedEntity, out Entity pointedEntity))
+						Node3D pointedNode = entityOverride?.PointedEntity;
+						if (pointedNode != null
+							&& GodotObject.IsInstanceValid(pointedNode)
+							&& _nodeEntities.TryGetValue(pointedNode, out Entity pointedEntity))
 						{
+							// Restore the pointed (aliased/proxied) entity to its own transform now that
+							// the override pointing at it is going away.
 							GetEntityTransform(pointedEntity, out Vector3 position, out Vector3 rotation);
-							entityOverride.PointedEntity.Position = position;
-							entityOverride.PointedEntity.RotationDegrees = rotation;
-							EntityNodeUtil.SetPointed(entityOverride.PointedEntity, false);
+							pointedNode.Position = position;
+							pointedNode.RotationDegrees = rotation;
+							EntityNodeUtil.SetPointed(pointedNode, false);
 						}
 
 						UntrackEntityNode(composite, entity, entityNode);
@@ -3135,13 +3160,22 @@ public partial class AlienScene : Node3D
 						_nodeEntities.Remove(entityNode);
 						_functionEntityPreviewsCacheDirty = true;
 						removed = true;
+						instancesProcessed++;
+					}
+					catch (Exception ex)
+					{
+						ViewerLog.PrintErr("[Viewer] RemoveEntity instance failed (" + entityNodeName + "): " + ex);
 					}
 				}
 			}
 		}
 
 		if (removed)
+		{
+			ViewerLog.Print("Removed entity " + entityNodeName + " x" + instancesProcessed + "; rebuilding highlights");
 			RefreshEntityHighlights(forceRebuild: true);
+			ViewerLog.Print("Removed entity " + entityNodeName + " complete");
+		}
 	}
 
 	public void UpdateRenderable(ShortGuid composite, ShortGuid entity, List<Tuple<int, int>> renderables)

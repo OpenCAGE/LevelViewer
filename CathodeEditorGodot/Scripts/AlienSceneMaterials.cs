@@ -1,4 +1,3 @@
-using System.Collections.Generic;
 using CATHODE;
 using CATHODE.ShaderTypes;
 using Godot;
@@ -75,7 +74,7 @@ public static class AlienSceneMaterials
 	{
 		bool doubleSided = IsDoubleSided(shader);
 		ResolveMaterialTextures(material, shader, scene, diffuseSamplerIndex, out Texture2D diffuse, out Texture2D separateAlphaMap);
-		bool useAlpha = ShouldUseAlpha(shader, diffuse, separateAlphaMap);
+		bool useAlpha = ShouldUseAlpha(shader, separateAlphaMap);
 		ShaderMaterial godotMaterial = new ShaderMaterial
 		{
 			ResourceName = name,
@@ -97,7 +96,7 @@ public static class AlienSceneMaterials
 	{
 		bool doubleSided = IsDoubleSided(shader);
 		ResolveMaterialTextures(material, shader, scene, diffuseSamplerIndex, out Texture2D diffuse, out Texture2D separateAlphaMap);
-		bool useAlpha = ShouldUseAlpha(shader, diffuse, separateAlphaMap);
+		bool useAlpha = ShouldUseAlpha(shader, separateAlphaMap);
 		ShaderMaterial godotMaterial = new ShaderMaterial
 		{
 			ResourceName = name + " (wireframe)",
@@ -229,27 +228,36 @@ public static class AlienSceneMaterials
 
 	/// <summary>
 	/// Whether this material should use the transparent/cutout shader path.
+	/// Decided purely from the material's CathodeLib shader flags (requirement bits and feature
+	/// flags) - never by sampling the diffuse texture, which previously produced false positives
+	/// (opaque materials whose diffuse happened to carry an alpha channel were forced transparent).
 	/// </summary>
-	public static bool ShouldUseAlpha(Shaders.Shader shader, Texture2D diffuse, Texture2D separateAlphaMap)
+	public static bool ShouldUseAlpha(Shaders.Shader shader, Texture2D separateAlphaMap)
 	{
 		if (shader == null)
 			return false;
 
+		// Lightmap environment is opaque unless it explicitly cuts out or requests a blend feature.
 		if (shader.Ubershader == SHADER_LIST.CA_LIGHTMAP_ENVIRONMENT)
 			return ShouldUseAlphaLightmapEnvironment(shader);
 
+		// A bound separate-alpha map means the SEPARATE_ALPHA feature is enabled for this material.
 		if (separateAlphaMap != null)
 			return true;
 
+		// Pipeline alpha requirement bits + per-material alpha-blend feature flags.
 		if (HasAlphaBlendingEnabled(shader))
 			return true;
 
+		// Alpha testing (cutout).
 		if (HasShaderFeature(shader, "ALPHA_TEST"))
 			return true;
 
-		return diffuse != null
-			&& UbershaderCanSupportAlpha(shader.Ubershader)
-			&& AlienSceneTextures.HasTransparency(diffuse);
+		// Decals blend onto the surface beneath them.
+		if (HasShaderFeature(shader, "DECAL"))
+			return true;
+
+		return false;
 	}
 
 	/// <summary>
@@ -299,27 +307,6 @@ public static class AlienSceneMaterials
 		}
 
 		return HasAlphaBlendingFeatureFlags(shader);
-	}
-
-	public static bool UbershaderCanSupportAlpha(SHADER_LIST ubershader)
-	{
-		List<string> features = ShaderUtility.GetShaderFunctionality(ubershader, ShaderIndexType.FEATURES);
-		if (features.Contains("USE_ALPHA_AS_BLENDFACTOR") ||
-			features.Contains("FORCE_TO_ALPHA") ||
-			features.Contains("GLASS") ||
-			features.Contains("SEPARATE_ALPHA") ||
-			features.Contains("ALPHA_TEST"))
-		{
-			return true;
-		}
-
-		foreach (string featureName in AlphaBlendFeatureNames)
-		{
-			if (features.Contains(featureName))
-				return true;
-		}
-
-		return false;
 	}
 
 	private static bool HasShaderFeature(Shaders.Shader shader, string featureName)

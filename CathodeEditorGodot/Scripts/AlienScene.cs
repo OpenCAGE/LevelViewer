@@ -3231,6 +3231,13 @@ public partial class AlienScene : Node3D
 				sourceMaterialWriteIndex);
 		}
 
+		if (TryResolveSubmeshWriteIndex(submesh, out int modelWriteIndex))
+		{
+			meshInstance.SetMeta(
+				ModelReferenceMaterialMapping.ModelWriteIndexMetaKey,
+				modelWriteIndex);
+		}
+
 		if (modelReferenceEntity != null)
 		{
 			meshInstance.SetMeta(

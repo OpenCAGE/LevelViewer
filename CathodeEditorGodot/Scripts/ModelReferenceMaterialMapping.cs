@@ -17,6 +17,8 @@ public static class ModelReferenceMaterialMapping
 	public const string InstanceMappingMetaKey = "instance_material_mapping";
 	/// <summary>Original ModelReference material write index before instance mapping is applied.</summary>
 	public const string SourceMaterialWriteIndexMetaKey = "source_material_write_index";
+	/// <summary>MODELS write index for the spawned submesh.</summary>
+	public const string ModelWriteIndexMetaKey = "model_write_index";
 
 	private static readonly ShortGuid MappingParameterId = ShortGuidUtils.Generate(MappingParameterName);
 	private static readonly Dictionary<uint, List<AliasMappingSource>> AliasesByTargetEntityId = new Dictionary<uint, List<AliasMappingSource>>();

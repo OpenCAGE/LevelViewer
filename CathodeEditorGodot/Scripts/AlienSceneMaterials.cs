@@ -74,15 +74,24 @@ public static class AlienSceneMaterials
 	{
 		bool doubleSided = IsDoubleSided(shader);
 		ResolveMaterialTextures(material, shader, scene, diffuseSamplerIndex, out Texture2D diffuse, out Texture2D separateAlphaMap);
-		bool useAlpha = ShouldUseAlpha(shader, separateAlphaMap);
+		bool useTransparentBlend = ShouldUseTransparentBlend(shader, separateAlphaMap);
+		bool useAlphaCutout = ShouldUseAlphaCutout(shader);
 		ShaderMaterial godotMaterial = new ShaderMaterial
 		{
 			ResourceName = name,
-			Shader = GetShadedShader(doubleSided, useAlpha),
-			RenderPriority = useAlpha ? TransparentRenderPriority : OpaqueRenderPriority,
+			Shader = GetShadedShader(doubleSided, useTransparentBlend),
+			RenderPriority = useTransparentBlend ? TransparentRenderPriority : OpaqueRenderPriority,
 		};
 
-		ApplyDiffuseParameters(godotMaterial, material, shader, useAlpha, diffuse, separateAlphaMap, environmentScalars);
+		ApplyDiffuseParameters(
+			godotMaterial,
+			material,
+			shader,
+			useTransparentBlend,
+			useAlphaCutout,
+			diffuse,
+			separateAlphaMap,
+			environmentScalars);
 		return new MaterialResult(godotMaterial, true);
 	}
 
@@ -96,15 +105,24 @@ public static class AlienSceneMaterials
 	{
 		bool doubleSided = IsDoubleSided(shader);
 		ResolveMaterialTextures(material, shader, scene, diffuseSamplerIndex, out Texture2D diffuse, out Texture2D separateAlphaMap);
-		bool useAlpha = ShouldUseAlpha(shader, separateAlphaMap);
+		bool useTransparentBlend = ShouldUseTransparentBlend(shader, separateAlphaMap);
+		bool useAlphaCutout = ShouldUseAlphaCutout(shader);
 		ShaderMaterial godotMaterial = new ShaderMaterial
 		{
 			ResourceName = name + " (wireframe)",
-			Shader = GetWireframeShader(doubleSided, useAlpha),
-			RenderPriority = useAlpha ? TransparentWireframeRenderPriority : TransparentRenderPriority,
+			Shader = GetWireframeShader(doubleSided, useTransparentBlend),
+			RenderPriority = useTransparentBlend ? TransparentWireframeRenderPriority : TransparentRenderPriority,
 		};
 
-		ApplyDiffuseParameters(godotMaterial, material, shader, useAlpha, diffuse, separateAlphaMap, environmentScalars);
+		ApplyDiffuseParameters(
+			godotMaterial,
+			material,
+			shader,
+			useTransparentBlend,
+			useAlphaCutout,
+			diffuse,
+			separateAlphaMap,
+			environmentScalars);
 		return godotMaterial;
 	}
 
@@ -179,13 +197,15 @@ public static class AlienSceneMaterials
 		ShaderMaterial godotMaterial,
 		Materials.Material material,
 		Shaders.Shader shader,
-		bool useAlpha,
+		bool useTransparentBlend,
+		bool useAlphaCutout,
 		Texture2D diffuse,
 		Texture2D separateAlphaMap,
 		ModelReferenceMaterialOverrides.EnvironmentColourScalars? environmentScalars = null)
 	{
+		bool preserveDiffuseAlpha = useTransparentBlend || useAlphaCutout;
 		AlienSceneShaderParams.MaterialParams shaderParams = AlienSceneShaderParams.GetParams(shader.Ubershader);
-		Color diffuseTint = AlienSceneShaderParams.GetDiffuseTint(material, shader, shaderParams, useAlpha);
+		Color diffuseTint = AlienSceneShaderParams.GetDiffuseTint(material, shader, shaderParams, preserveDiffuseAlpha);
 		Color vertexColourTint = Colors.White;
 		if (environmentScalars.HasValue)
 		{
@@ -218,42 +238,32 @@ public static class AlienSceneMaterials
 		bool alphaFromLuminance = false;
 		if (useSeparateAlpha)
 			alphaFromLuminance = !AlienSceneTextures.HasTransparency(separateAlphaMap);
-		else if (useAlpha && diffuse != null && !AlienSceneTextures.HasTransparency(diffuse))
+		else if (useAlphaCutout && diffuse != null && !AlienSceneTextures.HasTransparency(diffuse))
 			alphaFromLuminance = true;
 
 		godotMaterial.SetShaderParameter("alpha_from_luminance", alphaFromLuminance);
-		godotMaterial.SetShaderParameter("alpha_cutout", useAlpha && HasShaderFeature(shader, "ALPHA_TEST"));
+		godotMaterial.SetShaderParameter("alpha_cutout", useAlphaCutout);
 		godotMaterial.SetShaderParameter("alpha_cutout_threshold", AlienSceneShaderParams.GetAlphaScissorThreshold(material, shader));
 	}
 
 	/// <summary>
-	/// Whether this material should use the transparent/cutout shader path.
-	/// Decided purely from the material's CathodeLib shader flags (requirement bits and feature
-	/// flags) - never by sampling the diffuse texture, which previously produced false positives
-	/// (opaque materials whose diffuse happened to carry an alpha channel were forced transparent).
+	/// Alpha-blended transparent shader (separate-alpha maps, pipeline blend requirements, decals).
+	/// Does not include ALPHA_TEST cutout-only materials — those stay on the opaque shader with discard.
 	/// </summary>
-	public static bool ShouldUseAlpha(Shaders.Shader shader, Texture2D separateAlphaMap)
+	public static bool ShouldUseTransparentBlend(Shaders.Shader shader, Texture2D separateAlphaMap)
 	{
 		if (shader == null)
 			return false;
 
-		// Lightmap environment is opaque unless it explicitly cuts out or requests a blend feature.
 		if (shader.Ubershader == SHADER_LIST.CA_LIGHTMAP_ENVIRONMENT)
 			return ShouldUseAlphaLightmapEnvironment(shader);
 
-		// A bound separate-alpha map means the SEPARATE_ALPHA feature is enabled for this material.
 		if (separateAlphaMap != null)
 			return true;
 
-		// Pipeline alpha requirement bits + per-material alpha-blend feature flags.
 		if (HasAlphaBlendingEnabled(shader))
 			return true;
 
-		// Alpha testing (cutout).
-		if (HasShaderFeature(shader, "ALPHA_TEST"))
-			return true;
-
-		// Decals blend onto the surface beneath them.
 		if (HasShaderFeature(shader, "DECAL"))
 			return true;
 
@@ -261,14 +271,37 @@ public static class AlienSceneMaterials
 	}
 
 	/// <summary>
-	/// CA_LIGHTMAP_ENVIRONMENT: opaque unless cutout or a per-instance blend feature is enabled.
-	/// Ignores bound separate-alpha maps, pipeline requirement flags, and diffuse alpha noise.
+	/// Alpha-test cutout on the opaque shader path (discard, not alpha blending).
+	/// The ALPHA_TEST <em>feature</em> only selects a shader permutation that supports
+	/// alpha testing; cutout is only active when the material render state enables it
+	/// (D3D AlphaTestEnable). OpenCAGE's MaterialApplier ignores the feature flag for
+	/// transparency — this matches that behaviour.
+	/// </summary>
+	public static bool ShouldUseAlphaCutout(Shaders.Shader shader)
+	{
+		if (shader == null || !HasShaderFeature(shader, "ALPHA_TEST"))
+			return false;
+
+		return IsRenderStateEnabled(shader, Shaders.RenderState.AlphaTestEnable);
+	}
+
+	/// <summary>Whether the shader permutation includes alpha-test code (not necessarily active at runtime).</summary>
+	public static bool HasAlphaTestShaderFeature(Shaders.Shader shader) =>
+		HasShaderFeature(shader, "ALPHA_TEST");
+
+	/// <summary>
+	/// Whether this material needs any alpha-aware shader path (blend and/or cutout).
+	/// </summary>
+	public static bool ShouldUseAlpha(Shaders.Shader shader, Texture2D separateAlphaMap)
+	{
+		return ShouldUseTransparentBlend(shader, separateAlphaMap) || ShouldUseAlphaCutout(shader);
+	}
+
+	/// <summary>
+	/// CA_LIGHTMAP_ENVIRONMENT: opaque unless a per-instance alpha-blend feature is enabled.
 	/// </summary>
 	private static bool ShouldUseAlphaLightmapEnvironment(Shaders.Shader shader)
 	{
-		if (HasShaderFeature(shader, "ALPHA_TEST"))
-			return true;
-
 		return HasAlphaBlendingFeatureFlags(shader);
 	}
 
@@ -316,6 +349,31 @@ public static class AlienSceneMaterials
 			return false;
 
 		return (shader.UbershaderFeatureFlags & (1L << index.Value)) != 0;
+	}
+
+	public static bool TryGetRenderStateValue(Shaders.Shader shader, Shaders.RenderState state, out int value)
+	{
+		value = 0;
+		if (shader?.RenderStates?.Entries == null)
+			return false;
+
+		int stateId = (int)state;
+		for (int i = 0; i < shader.RenderStates.Entries.Count; i++)
+		{
+			Shaders.StateBlock.Entry entry = shader.RenderStates.Entries[i];
+			if (entry.StateId != stateId)
+				continue;
+
+			value = entry.Value;
+			return true;
+		}
+
+		return false;
+	}
+
+	public static bool IsRenderStateEnabled(Shaders.Shader shader, Shaders.RenderState state)
+	{
+		return TryGetRenderStateValue(shader, state, out int value) && value != 0;
 	}
 
 	public static int GetSeparateAlphaSamplerIndex(Shaders.Shader shader)

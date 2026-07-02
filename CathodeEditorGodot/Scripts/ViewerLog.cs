@@ -1,14 +1,14 @@
 using Godot;
 
 /// <summary>
-/// Level Viewer logging. Every line is:
-///  - mirrored to OpenCAGE via <see cref="ViewerLogBridge"/>,
-///  - written to a dedicated <c>user://viewer.log</c> file that is flushed on every line so nothing
-///    is lost if the process dies (Godot's own godot.log is buffered and its tail is lost on a hard
-///    crash, and in embedded mode GD.Print is suppressed - so that file can't be relied on).
+/// Level Viewer logging. Disabled by default; enable <see cref="Enabled"/> for diagnostics.
+/// When enabled, each line is mirrored to OpenCAGE via <see cref="ViewerLogBridge"/> and
+/// written to <c>user://viewer.log</c>.
 /// </summary>
 public static class ViewerLog
 {
+	public static bool Enabled { get; set; }
+
 	private static readonly bool _embedded = System.Environment.GetEnvironmentVariable("OPENCAGE_EMBEDDED") == "1";
 
 	private static readonly object _fileLock = new object();
@@ -16,12 +16,6 @@ public static class ViewerLog
 	private static bool _logFileResolved;
 	private static bool _globalHandlersInstalled;
 
-	/// <summary>
-	/// Installs process-wide handlers so a managed exception escaping ANY thread we don't explicitly
-	/// wrap (background Task, GC finalizer, native-&gt;managed signal callback) is still flushed to the
-	/// viewer log before the process dies. If a crash leaves no line here, it was a native crash.
-	/// Safe to call multiple times; only the first call takes effect.
-	/// </summary>
 	public static void InstallGlobalExceptionHandlers()
 	{
 		if (_globalHandlersInstalled)
@@ -42,6 +36,9 @@ public static class ViewerLog
 
 	public static void Print(string message)
 	{
+		if (!Enabled)
+			return;
+
 		if (!_embedded)
 			GD.Print(message);
 		WriteToFile(message, false);
@@ -50,13 +47,15 @@ public static class ViewerLog
 
 	public static void PrintErr(string message)
 	{
+		if (!Enabled)
+			return;
+
 		if (!_embedded)
 			GD.PrintErr(message);
 		WriteToFile(message, true);
 		ViewerLogBridge.TryForward(message, true);
 	}
 
-	/// <summary>Absolute path of the dedicated viewer log, or null if it couldn't be resolved.</summary>
 	public static string LogFilePath
 	{
 		get { lock (_fileLock) return LogFilePathLocked(); }
@@ -74,8 +73,6 @@ public static class ViewerLog
 				if (path == null)
 					return;
 
-				// AppendAllText opens, writes and closes (flushing to disk) each call, so a hard crash
-				// can't discard buffered log lines.
 				System.IO.File.AppendAllText(path, line);
 			}
 		}
@@ -90,6 +87,9 @@ public static class ViewerLog
 		if (!_logFileResolved)
 		{
 			_logFileResolved = true;
+			if (!Enabled)
+				return null;
+
 			try
 			{
 				_logFilePath = ProjectSettings.GlobalizePath("user://viewer.log");

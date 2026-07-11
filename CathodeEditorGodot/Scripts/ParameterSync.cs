@@ -60,6 +60,8 @@ public static class ParameterSync
     {
         if (name == ShortGuidUtils.Generate("resource"))
             return DataType.RESOURCE;
+        if (name == ShortGuidUtils.Generate("mapping"))
+            return DataType.RESOURCE;
         if (name == ShortGuidUtils.Generate("position"))
             return DataType.TRANSFORM;
         if (name == ShortGuidUtils.Generate("half_dimensions"))
@@ -68,6 +70,14 @@ public static class ParameterSync
             return DataType.SPLINE;
         if (name == ShortGuidUtils.Generate("loop"))
             return DataType.BOOL;
+        if (name == ShortGuidUtils.Generate(ModelReferenceMaterialOverrides.MaterialParameterName))
+            return DataType.STRING;
+        if (name == ShortGuidUtils.Generate(ModelReferenceMaterialOverrides.VertexColourScaleParameterName)
+            || name == ShortGuidUtils.Generate(ModelReferenceMaterialOverrides.DiffuseColourScaleParameterName))
+            return DataType.VECTOR;
+        if (name == ShortGuidUtils.Generate(ModelReferenceMaterialOverrides.VertexOpacityScaleParameterName)
+            || name == ShortGuidUtils.Generate(ModelReferenceMaterialOverrides.DiffuseOpacityScaleParameterName))
+            return DataType.FLOAT;
         return DataType.NONE;
     }
 
@@ -100,9 +110,12 @@ public static class ParameterSync
         switch (dataType)
         {
             case DataType.TRANSFORM:
+                // Store in Cathode space to match disk-loaded data and every read-back path
+                // (TryGetSpawnTransform, spline preview, alias-override reapply) which converts to
+                // Godot on read. Converting here would double-flip and mirror live-edited positions.
                 return new cTransform(
-                    CathodeCoordinates.PositionToGodot(ToVector3(sync.vector3_a)),
-                    CathodeCoordinates.EulerDegreesToGodot(ToVector3(sync.vector3_b)));
+                    ToVector3(sync.vector3_a),
+                    ToVector3(sync.vector3_b));
             case DataType.VECTOR:
                 return new cVector3(ToVector3(sync.vector3_a));
             case DataType.BOOL:
@@ -118,6 +131,8 @@ public static class ParameterSync
             case DataType.ENUM_STRING:
                 return new cEnumString(new ShortGuid(sync.enum_id), sync.string_value ?? "");
             case DataType.RESOURCE:
+                if (new ShortGuid(sync.name) == ShortGuidUtils.Generate("mapping"))
+                    return UnpackMappingResource(sync);
                 return UnpackResource(sync, content);
             case DataType.SPLINE:
                 List<cTransform> points = new List<cTransform>();
@@ -127,9 +142,10 @@ public static class ParameterSync
                     {
                         if (point == null || point.Length < 6)
                             continue;
+                        // Cathode space (see TRANSFORM note); ReadSplinePoints converts on read.
                         points.Add(new cTransform(
-                            CathodeCoordinates.PositionToGodot(ToVector3(point, 0)),
-                            CathodeCoordinates.EulerDegreesToGodot(ToVector3(point, 3))));
+                            ToVector3(point, 0),
+                            ToVector3(point, 3)));
                     }
                 }
                 return new cSpline(points);
@@ -179,6 +195,12 @@ public static class ParameterSync
             list.Add(element);
         }
         return list;
+    }
+
+    private static cResource UnpackMappingResource(SyncedParameter sync)
+    {
+        ShortGuid mappingId = new ShortGuid(sync.enum_id);
+        return mappingId == ShortGuid.Invalid ? new cResource() : new cResource(mappingId);
     }
 
     private static cResource UnpackResource(SyncedParameter sync, LevelContent content)

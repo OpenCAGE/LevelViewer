@@ -4,13 +4,13 @@ using System.Collections.Generic;
 
 /// <summary>
 /// In-viewport transform gizmo attached to the currently selected entity.
-/// Modes: Translate, local/world rotation rings, or hidden.
+/// Modes: local/world translate arrows, local/world rotation rings, or hidden.
 /// <see cref="OnTransformChanged"/> fires on every drag update so callers can push
 /// position / rotation back to OpenCAGE.
 /// </summary>
 public partial class LevelViewerTransformGizmo : Node3D
 {
-    public enum GizmoMode { None, Translate, RotateLocal, RotateWorld }
+    public enum GizmoMode { None, TranslateWorld, RotateLocal, RotateWorld, TranslateLocal }
 
     /// <summary>Fired when dragging moves/rotates the target. Args: local position, local euler rotation degrees.</summary>
     public Action<Vector3, Vector3> OnTransformChanged;
@@ -84,6 +84,7 @@ public partial class LevelViewerTransformGizmo : Node3D
     {
         TopLevel = true;   // position ourselves in world space, not relative to parent
         Visible  = false;
+        SetProcess(false);
     }
 
     public void SetMode(GizmoMode mode)
@@ -129,6 +130,18 @@ public partial class LevelViewerTransformGizmo : Node3D
 
     // ─────────────────────────────────────────────────────────────────────────
     public override void _Process(double delta)
+    {
+        try
+        {
+            ProcessInternal();
+        }
+        catch (Exception ex)
+        {
+            ViewerLog.PrintErr("[Viewer] Gizmo _Process failed: " + ex);
+        }
+    }
+
+    private void ProcessInternal()
     {
         if (_mode == GizmoMode.None
             || _target == null || !GodotObject.IsInstanceValid(_target)
@@ -222,7 +235,7 @@ public partial class LevelViewerTransformGizmo : Node3D
         _dragStartPos = _dragPivot;
         _dragStartRot = _target.RotationDegrees;
 
-        if (_mode == GizmoMode.Translate)
+        if (IsTranslateMode)
         {
             if (IsPlane(_dragAxis))
             {
@@ -275,7 +288,7 @@ public partial class LevelViewerTransformGizmo : Node3D
         if (currentHit == null)
             return;
 
-        if (_mode == GizmoMode.Translate)
+        if (IsTranslateMode)
         {
             Vector3 worldDelta = currentHit.Value - _dragStartHit;
 
@@ -330,7 +343,7 @@ public partial class LevelViewerTransformGizmo : Node3D
             return;
 
         float grid = LevelViewerTransformSnap.GridSize;
-        if (grid > 0f && _mode == GizmoMode.Translate)
+        if (grid > 0f && IsTranslateMode)
         {
             Vector3 pos = _target.Position;
             _target.Position = new Vector3(
@@ -372,7 +385,7 @@ public partial class LevelViewerTransformGizmo : Node3D
             return hit;
 
         // Fallback when the primary plane is edge-on to the ray (e.g. axis pointing at camera).
-        if (_mode == GizmoMode.Translate && !IsPlane(_dragAxis) && _dragAxisDir.LengthSquared() > 1e-8f)
+        if (IsTranslateMode && !IsPlane(_dragAxis) && _dragAxisDir.LengthSquared() > 1e-8f)
         {
             Vector3 altNormal = _dragAxisDir.Cross(GetCameraForward());
             if (altNormal.LengthSquared() > 1e-8f)
@@ -428,7 +441,7 @@ public partial class LevelViewerTransformGizmo : Node3D
         DragAxis bestAxis = DragAxis.None;
         float bestDist    = float.MaxValue;
 
-        if (_mode == GizmoMode.Translate)
+        if (IsTranslateMode)
         {
             float half = PlaneSize * 0.5f * _worldScale;
             float po   = PlaneOffset * _worldScale;
@@ -564,7 +577,7 @@ public partial class LevelViewerTransformGizmo : Node3D
         _planeMats = null;
         _ringMats  = null;
 
-        if (_mode == GizmoMode.Translate)
+        if (IsTranslateMode)
             BuildTranslateMeshes();
         else if (IsRotateMode)
             BuildRotateMeshes();
@@ -729,6 +742,7 @@ public partial class LevelViewerTransformGizmo : Node3D
     {
         Visible = _mode != GizmoMode.None
                && _target != null && GodotObject.IsInstanceValid(_target);
+        SetProcess(Visible);
     }
 
     /// <summary>Orient a CylinderMesh node so its +Y axis points along <paramref name="dir"/>.</summary>
@@ -784,16 +798,19 @@ public partial class LevelViewerTransformGizmo : Node3D
         return ray.Origin + ray.Dir * t;
     }
 
+    private bool IsTranslateMode
+        => _mode == GizmoMode.TranslateLocal || _mode == GizmoMode.TranslateWorld;
+
     private bool IsRotateMode
         => _mode == GizmoMode.RotateLocal || _mode == GizmoMode.RotateWorld;
 
     private Basis GetOrientationBasis()
     {
-        if (_mode == GizmoMode.RotateLocal
-            && _target != null && GodotObject.IsInstanceValid(_target))
-        {
+        if (_target == null || !GodotObject.IsInstanceValid(_target))
+            return Basis.Identity;
+
+        if (_mode == GizmoMode.RotateLocal || _mode == GizmoMode.TranslateLocal)
             return _target.GlobalBasis;
-        }
 
         return Basis.Identity;
     }

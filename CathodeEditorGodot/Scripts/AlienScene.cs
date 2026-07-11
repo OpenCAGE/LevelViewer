@@ -3,6 +3,7 @@ using CATHODE.Scripting;
 using CATHODE.Scripting.Internal;
 using CathodeLib;
 using Godot;
+using OpenCAGE;
 using OpenCAGE.UnityConnection;
 using System;
 using System.Collections.Generic;
@@ -22,22 +23,27 @@ public partial class AlienScene : Node3D
 
 	private Node3D _parentNode = null;
 	public Node3D ParentNode => _parentNode;
+	public IReadOnlyDictionary<Node3D, Entity> NodeEntities => _nodeEntities;
 
 	private Composite _loadedComposite = null;
 	private Node3D _selectedEntity;
-	private LevelViewerSelectionHud _selectionHud;
 	public uint CompositeID => _loadedComposite == null ? 0 : _loadedComposite.shortGUID.AsUInt32;
 	public string CompositeIDString => _loadedComposite == null || _loadedComposite.shortGUID == ShortGuid.Invalid ? "" : _loadedComposite.shortGUID.ToByteString();
 	public int ModelReferenceMeshCount => _modelReferenceMeshes.Count;
 	public string CompositeName => _loadedComposite == null ? "" : _loadedComposite.name;
 
-	private Dictionary<Textures.TEX4, TexOrCube> _texturesGlobal = new Dictionary<Textures.TEX4, TexOrCube>();
-	private Dictionary<Textures.TEX4, TexOrCube> _texturesLevel = new Dictionary<Textures.TEX4, TexOrCube>();
+	// Shared Godot texture cache: one entry per Cathode TEX4 write index.
+	private Dictionary<int, TexOrCube> _texturesGlobalByIndex = new Dictionary<int, TexOrCube>();
+	private Dictionary<int, TexOrCube> _texturesLevelByIndex = new Dictionary<int, TexOrCube>();
 	private Dictionary<Materials.Material, ShaderMaterial> _materials = new Dictionary<Materials.Material, ShaderMaterial>();
 	private Dictionary<Materials.Material, ShaderMaterial> _wireframeMaterials = new Dictionary<Materials.Material, ShaderMaterial>();
 	private Dictionary<ShaderMaterial, bool> _materialSupport = new Dictionary<ShaderMaterial, bool>();
+	private readonly Dictionary<ulong, ShaderMaterial> _modelReferenceOverrideMaterials = new Dictionary<ulong, ShaderMaterial>();
 	private Dictionary<MeshInstance3D, Materials.Material> _modelReferenceMeshes = new Dictionary<MeshInstance3D, Materials.Material>();
-	private Dictionary<Models.CS2.Component.LOD.Submesh, MeshHolder> _modelMeshes = new Dictionary<Models.CS2.Component.LOD.Submesh, MeshHolder>();
+	// Shared Godot mesh cache: one ArrayMesh per models write index (shared by all instances).
+	private readonly Dictionary<int, MeshHolder> _modelMeshesByWriteIndex = new Dictionary<int, MeshHolder>();
+	private readonly Dictionary<Models.CS2.Component.LOD.Submesh, int> _submeshWriteIndexByReference =
+		new Dictionary<Models.CS2.Component.LOD.Submesh, int>(ReferenceEqualityComparer.Instance);
 	private MeshInstance3D[] _largeScenePolicyMeshes = System.Array.Empty<MeshInstance3D>();
 	private int _largeScenePolicyIndex;
 	private bool _largeScenePolicyRunning;
@@ -90,12 +96,29 @@ public partial class AlienScene : Node3D
 
 	private const int LoadUiRedrawFrameCount = 2;
 
+	private bool _isBulkPopulating;
+	internal bool IsBulkPopulating => _isBulkPopulating;
+	private bool _deferMeshTreeActivation;
+	private bool _wiringCompositeLinks;
+	private readonly List<Node3D> _deferredPickOwners = new List<Node3D>();
+	private readonly List<FunctionEntityPreview> _bulkPopulatePreviews = new List<FunctionEntityPreview>();
+	private readonly List<ModelReferencePreview> _bulkModelReferencePreviews = new List<ModelReferencePreview>();
+	private readonly List<BulkMeshSpawnJob> _bulkMeshSpawnJobs = new List<BulkMeshSpawnJob>();
+	private Dictionary<ulong, List<Tuple<int, int>>> _modelRefRenderablesByEntityId;
+	private Dictionary<Node3D, Entity> _aliasParameterEntityByRenderTarget;
+	private bool _bulkMeshSpawning;
+	private bool _deferBulkPickRegistration;
+	private readonly List<(MeshInstance3D Mesh, Node3D Owner)> _bulkPickableMeshes = new List<(MeshInstance3D, Node3D)>();
+
 	private LoadPipelineStep _loadStep = LoadPipelineStep.None;
 	private int _loadUiFrameCounter;
 	private string _queuedLevelName = "";
 	private string _queuedLevelPath = "";
 	private ShortGuid _queuedCompositeGuid = ShortGuid.Invalid;
 	private Composite _queuedComposite;
+	private int _contentGeneration;
+
+	public int ContentGeneration => _contentGeneration;
 
 	public override void _Ready()
 	{
@@ -107,7 +130,15 @@ public partial class AlienScene : Node3D
 	{
 		AdvanceLoadPipeline();
 		AdvanceLargeSceneRenderPolicyBatch();
-		_selectionHud?.UpdateFade((float)delta);
+		UpdateLoadPipelineProcessing();
+	}
+
+	private void UpdateLoadPipelineProcessing()
+	{
+		bool needsProcess = _loadStep != LoadPipelineStep.None
+			|| _largeScenePolicyRunning;
+		if (IsProcessing() != needsProcess)
+			SetProcess(needsProcess);
 	}
 
 	public void RegisterParameterVisualHandler(DataType dataType, ParameterVisualHandler handler)
@@ -125,18 +156,28 @@ public partial class AlienScene : Node3D
 
 	public override void _ExitTree()
 	{
-		if (_parentNode != null && GodotObject.IsInstanceValid(_parentNode))
-			_parentNode.QueueFree();
+		_contentGeneration++;
+		_loadStep = LoadPipelineStep.None;
+		CancelLargeSceneRenderPolicy();
 
+		ClearSelectedEntity();
+		LevelViewerSelection.Clear();
+		LevelViewerPick.ClearRegistry();
+		LevelViewerCompositeFocus.Clear();
+		LevelViewerEntityHide.ClearAll();
+
+		// Do not QueueFree _parentNode here — Godot frees children when this node leaves the tree.
 		_parentNode = null;
 
 		if (_loadingScreen != null && GodotObject.IsInstanceValid(_loadingScreen))
-			_loadingScreen.QueueFree();
-		_loadingScreen = null;
+		{
+			if (_loadingScreen.GetParent() == this)
+				_loadingScreen.QueueFree();
+			else
+				_loadingScreen.HideScreen();
+		}
 
-		if (_selectionHud != null && GodotObject.IsInstanceValid(_selectionHud))
-			_selectionHud.QueueFree();
-		_selectionHud = null;
+		_loadingScreen = null;
 
 		base._ExitTree();
 	}
@@ -208,23 +249,24 @@ public partial class AlienScene : Node3D
 		if (selectedNode == null || !GodotObject.IsInstanceValid(selectedNode) || _parentNode == null)
 			return false;
 
-		Node3D entityNode = LevelViewerPick.ResolveNearestEntityNode(selectedNode, _nodeEntities);
-		if (entityNode == null || !_nodeEntities.TryGetValue(entityNode, out Entity entity))
-			return false;
-
-		if (entity is not FunctionEntity function)
+		Node3D entityNode = LevelViewerPick.ResolveNearestEntityNode(selectedNode, _nodeEntities) ?? selectedNode;
+		if (!_nodeEntities.TryGetValue(entityNode, out Entity entity))
 			return false;
 
 		Commands commands = _content?.Level?.Commands;
 		if (commands != null && LevelViewerPick.IsCompositeInstanceEntity(entity, commands))
-			return true;
+			return PreviewVisualUtility.HasValidWorldAnchor(entityNode);
 
 		uint ownerCompositeId = entityNode.HasMeta(OwnerCompositeMetaKey)
 			? entityNode.GetMeta(OwnerCompositeMetaKey).AsUInt32()
 			: 0;
 
-		return PreviewVisualUtility.SupportsTransformGizmo(function, ownerCompositeId)
-			&& PreviewVisualUtility.HasValidWorldAnchor(selectedNode);
+		FunctionEntity functionForGizmo = ResolveFunctionEntityForTransformGizmo(entity, entityNode, ownerCompositeId);
+		if (functionForGizmo == null)
+			return false;
+
+		return PreviewVisualUtility.SupportsTransformGizmo(functionForGizmo, ownerCompositeId)
+			&& PreviewVisualUtility.HasValidWorldAnchor(entityNode);
 	}
 
 	public bool TryHideSelectedEntity()
@@ -244,7 +286,8 @@ public partial class AlienScene : Node3D
 			return false;
 
 		LevelViewerAliasHighlight.InvalidateCache();
-		RefreshAliasHighlights(forceRebuild: true);
+		LevelViewerProxyHighlight.InvalidateCache();
+		RefreshEntityHighlights(forceRebuild: true);
 		return true;
 	}
 
@@ -255,7 +298,8 @@ public partial class AlienScene : Node3D
 
 		LevelViewerEntityHide.ClearAll();
 		LevelViewerAliasHighlight.InvalidateCache();
-		RefreshAliasHighlights(forceRebuild: true);
+		LevelViewerProxyHighlight.InvalidateCache();
+		RefreshEntityHighlights(forceRebuild: true);
 	}
 
 	public void ResetCompositeScopedHides()
@@ -273,13 +317,154 @@ public partial class AlienScene : Node3D
 	{
 		_selectedEntity = null;
 		LevelViewerSelection.Clear();
+		LevelViewerLightRadius.Clear();
 		RefreshAliasHighlights(forceRebuild: false);
-		_selectionHud?.Hide();
+		RefreshProxyHighlights(forceRebuild: false);
 		OnSelectionChanged?.Invoke(null);
+	}
+
+	private void RefreshSelectedLightRadiusVisual()
+	{
+		if (_selectedEntity == null || !GodotObject.IsInstanceValid(_selectedEntity))
+		{
+			LevelViewerLightRadius.Clear();
+			return;
+		}
+
+		Node3D entityNode = LevelViewerPick.ResolveNearestEntityNode(_selectedEntity, _nodeEntities);
+		if (entityNode == null
+			|| !_nodeEntities.TryGetValue(entityNode, out Entity entity)
+			|| entity is not FunctionEntity function)
+		{
+			LevelViewerLightRadius.Clear();
+			return;
+		}
+
+		uint ownerCompositeId = entityNode.HasMeta(OwnerCompositeMetaKey)
+			? entityNode.GetMeta(OwnerCompositeMetaKey).AsUInt32()
+			: 0;
+
+		List<Entity> overrideEntities = BuildLightOverrideChain(entityNode);
+		LevelViewerLightRadius.Apply(entityNode, function, ownerCompositeId, overrideEntities);
+	}
+
+	/// <summary>
+	/// Collects the parameterized aliases whose resolved instance is <paramref name="lightNode"/>,
+	/// ordered outermost-first (smallest scene depth wins). These supply parameter overrides for the
+	/// light gizmo, layered above the light entity's own parameters.
+	/// </summary>
+	private List<Entity> BuildLightOverrideChain(Node3D lightNode)
+	{
+		if (lightNode == null || !GodotObject.IsInstanceValid(lightNode) || _content?.Level?.Commands == null)
+			return null;
+
+		List<(Entity Alias, int Depth)> matches = null;
+		foreach (KeyValuePair<Node3D, Entity> entry in _nodeEntities)
+		{
+			if (entry.Key is not EntityOverride aliasOverride || entry.Value is not AliasEntity alias)
+				continue;
+
+			if (alias.parameters == null || alias.parameters.Count == 0)
+				continue;
+
+			if (!entry.Key.HasMeta(OwnerCompositeMetaKey))
+				continue;
+
+			Node3D pointedNode = aliasOverride.PointedEntity;
+			if (pointedNode == null || !GodotObject.IsInstanceValid(pointedNode))
+			{
+				Composite ownerComposite = _content.Level.Commands.GetComposite(
+					new ShortGuid(entry.Key.GetMeta(OwnerCompositeMetaKey).AsUInt32()));
+				if (ownerComposite == null
+					|| !TryResolveAliasPointedSceneNode(aliasOverride, alias, ownerComposite, out pointedNode))
+				{
+					continue;
+				}
+			}
+
+			if (pointedNode != lightNode)
+				continue;
+
+			matches ??= new List<(Entity, int)>();
+			matches.Add((alias, GetSceneNodeDepth(aliasOverride)));
+		}
+
+		if (matches == null)
+			return null;
+
+		matches.Sort((a, b) => a.Depth.CompareTo(b.Depth));
+
+		List<Entity> overrides = new List<Entity>(matches.Count);
+		for (int i = 0; i < matches.Count; i++)
+			overrides.Add(matches[i].Alias);
+
+		return overrides;
+	}
+
+	private static int GetSceneNodeDepth(Node node)
+	{
+		int depth = 0;
+		Node current = node;
+		while (current != null)
+		{
+			depth++;
+			current = current.GetParent();
+		}
+
+		return depth;
+	}
+
+	/// <summary>
+	/// Refreshes the selected light's range gizmo when <paramref name="changedEntity"/> is the selected
+	/// light itself or a parameterized alias that overrides it, so live alias edits update the overlay.
+	/// </summary>
+	private void RefreshSelectedLightRadiusIfAffected(Entity changedEntity, Composite changedComposite)
+	{
+		if (changedEntity == null || _selectedEntity == null || !GodotObject.IsInstanceValid(_selectedEntity))
+			return;
+
+		Node3D lightNode = LevelViewerPick.ResolveNearestEntityNode(_selectedEntity, _nodeEntities);
+		if (lightNode == null
+			|| !_nodeEntities.TryGetValue(lightNode, out Entity selectedEntity)
+			|| selectedEntity is not FunctionEntity selectedFunction
+			|| !selectedFunction.function.IsFunctionType
+			|| selectedFunction.function.AsFunctionType != FunctionType.LightReference)
+		{
+			return;
+		}
+
+		bool affects = ReferenceEquals(changedEntity, selectedEntity);
+		if (!affects
+			&& changedEntity is AliasEntity alias
+			&& changedComposite != null
+			&& TryGetCachedEntityNodes(changedComposite.shortGUID, alias.shortGUID, out List<Node3D> aliasNodes))
+		{
+			for (int i = 0; i < aliasNodes.Count && !affects; i++)
+			{
+				if (aliasNodes[i] is not EntityOverride aliasOverride)
+					continue;
+
+				Node3D pointedNode = aliasOverride.PointedEntity;
+				if (pointedNode == null || !GodotObject.IsInstanceValid(pointedNode))
+					TryResolveAliasPointedSceneNode(aliasOverride, alias, changedComposite, out pointedNode);
+
+				if (pointedNode == lightNode)
+					affects = true;
+			}
+		}
+
+		if (affects)
+			RefreshSelectedLightRadiusVisual();
 	}
 
 	private void ResetLevel()
 	{
+		_contentGeneration++;
+		PreviewVisibilitySettings.LevelRootCompositeId = 0;
+		_isBulkPopulating = false;
+		_loadStep = LoadPipelineStep.None;
+		LevelViewerRenderIdleThrottle.SetLoadActive(false);
+
 		PreviewVisualUtility.CleanupAllFunctionEntityPreviews(this);
 		ClearSelectedEntity();
 		LevelViewerSelection.Clear();
@@ -292,28 +477,43 @@ public partial class AlienScene : Node3D
 
 		_parentNode = null;
 
-		_materials.Clear();
-		_wireframeMaterials.Clear();
+		ClearPopulateMaterialCaches();
 		_modelReferenceMeshes.Clear();
 		CancelLargeSceneRenderPolicy();
 		ModelReferenceRenderSettings.ResetForLevelLoad();
-		_materialSupport.Clear();
 
-		foreach (KeyValuePair<Textures.TEX4, TexOrCube> kvp in _texturesLevel)
+		foreach (KeyValuePair<int, TexOrCube> kvp in _texturesLevelByIndex)
 		{
 			if (kvp.Value.Texture != null && GodotObject.IsInstanceValid(kvp.Value.Texture))
 				kvp.Value.Texture.Dispose();
 			if (kvp.Value.Cubemap != null && GodotObject.IsInstanceValid(kvp.Value.Cubemap))
 				kvp.Value.Cubemap.Dispose();
 		}
-		_texturesLevel.Clear();
+		_texturesLevelByIndex.Clear();
 
-		foreach (KeyValuePair<Models.CS2.Component.LOD.Submesh, MeshHolder> kvp in _modelMeshes)
+		foreach (KeyValuePair<int, TexOrCube> kvp in _texturesGlobalByIndex)
+		{
+			if (kvp.Value.Texture != null && GodotObject.IsInstanceValid(kvp.Value.Texture))
+				kvp.Value.Texture.Dispose();
+			if (kvp.Value.Cubemap != null && GodotObject.IsInstanceValid(kvp.Value.Cubemap))
+				kvp.Value.Cubemap.Dispose();
+		}
+		_texturesGlobalByIndex.Clear();
+
+		AlienSceneTextures.ClearTransparencyCache();
+
+		foreach (KeyValuePair<int, MeshHolder> kvp in _modelMeshesByWriteIndex)
 			kvp.Value.MainMesh?.Dispose();
-		_modelMeshes.Clear();
+		_modelMeshesByWriteIndex.Clear();
+		_submeshWriteIndexByReference.Clear();
 
 		_compositeNodes.Clear();
 		_nodeEntities.Clear();
+		_bulkPopulatePreviews.Clear();
+		_bulkModelReferencePreviews.Clear();
+		_bulkMeshSpawnJobs.Clear();
+		_bulkPickableMeshes.Clear();
+		_modelRefRenderablesByEntityId = null;
 		ClearEntityNodeCache();
 
 		_contentOrigin = Vector3.Zero;
@@ -351,7 +551,10 @@ public partial class AlienScene : Node3D
 		if (comp == null)
 			return;
 		if (_loadedComposite != null && _loadedComposite.shortGUID == guid)
+		{
+			ViewerPopulateBridge.NotifySkipped();
 			return;
+		}
 		if (_loadStep != LoadPipelineStep.None)
 			return;
 
@@ -363,6 +566,7 @@ public partial class AlienScene : Node3D
 	{
 		_loadStep = LoadPipelineStep.WaitUiBeforeLevelLoad;
 		_loadUiFrameCounter = 0;
+		SetProcess(true);
 		RequestShowLoading(message);
 	}
 
@@ -371,6 +575,7 @@ public partial class AlienScene : Node3D
 		_queuedComposite = comp;
 		_loadStep = LoadPipelineStep.WaitUiBeforeCompositePopulate;
 		_loadUiFrameCounter = 0;
+		SetProcess(true);
 		RequestShowLoading(message);
 	}
 
@@ -411,10 +616,22 @@ public partial class AlienScene : Node3D
 			return;
 		}
 
-		GD.Print("Loading level " + _queuedLevelName + "...");
+		ViewerLog.Print("Loading level " + _queuedLevelName + "...");
 		ResetLevel();
+
 		_levelName = _queuedLevelName;
 		_content.Load(_queuedLevelPath, _queuedLevelName);
+
+		LevelViewerShaderBytecode.ClearAsync(_content.Level?.Shaders?.Entries);
+		BuildSubmeshWriteIndexCache();
+
+		if (_content.Loaded && _content.Level.Commands.EntryPoints[0] != null)
+		{
+			PreviewVisibilitySettings.LevelRootCompositeId = _content.Level.Commands.EntryPoints[0].shortGUID.AsUInt32;
+			Composite levelRoot = _content.Level.Commands.EntryPoints[0];
+			if (_queuedCompositeGuid == ShortGuid.Invalid)
+				_queuedCompositeGuid = levelRoot.shortGUID;
+		}
 
 		if (_queuedCompositeGuid != ShortGuid.Invalid && _content.Loaded)
 		{
@@ -428,6 +645,8 @@ public partial class AlienScene : Node3D
 		}
 
 		_loadStep = LoadPipelineStep.None;
+		ViewerPopulateBridge.NotifySkipped();
+		UpdateLoadPipelineProcessing();
 	}
 
 	private void ExecutePopulateComposite()
@@ -438,26 +657,72 @@ public partial class AlienScene : Node3D
 			return;
 		}
 
-		PopulateCompositeInternal(_queuedComposite);
+		Composite comp = _queuedComposite;
 		_queuedComposite = null;
 		_queuedCompositeGuid = ShortGuid.Invalid;
+
+		ViewerPopulateBridge.NotifyStarted(GetPopulateDisplayLabel(comp));
+
+		_isBulkPopulating = true;
+		_deferMeshTreeActivation = true;
+		FunctionEntityPreview.DeferVisualRefresh = true;
+		PopulateCompositeInternal(comp);
+
 		_loadStep = LoadPipelineStep.None;
+		UpdateLoadPipelineProcessing();
+		CompletePopulate();
+	}
+
+	private void CompletePopulate()
+	{
+		LevelViewerRenderIdleThrottle.SetLoadActive(false);
+		FunctionEntityPreview.DeferVisualRefresh = false;
+		_deferMeshTreeActivation = false;
+		_isBulkPopulating = false;
+
+		// Filters are often applied from OpenCAGE before the entity tree exists; refresh now that spawn finished.
+		RefreshRenderFilters(null);
+		RefreshCompositeFocus();
 
 		OnLoaded?.Invoke();
+		ViewerPopulateBridge.NotifyFinished();
 		Callable.From(HideLoading).CallDeferred();
+		UpdateLoadPipelineProcessing();
+	}
+
+	private static string GetPopulateDisplayLabel(Composite comp)
+	{
+		if (comp == null)
+			return "composite";
+
+		if (!string.IsNullOrWhiteSpace(comp.name))
+			return comp.name;
+
+		return comp.shortGUID.ToString();
 	}
 
 	private void PopulateCompositeInternal(Composite comp)
 	{
+		_contentGeneration++;
 		_compositeNodes.Clear();
 		_nodeEntities.Clear();
+		_aliasParameterEntityByRenderTarget = null;
+		_deferredPickOwners.Clear();
+		_bulkPopulatePreviews.Clear();
+		_bulkModelReferencePreviews.Clear();
+		_bulkMeshSpawnJobs.Clear();
+		_bulkPickableMeshes.Clear();
+		_modelRefRenderablesByEntityId = null;
 		ClearEntityNodeCache();
 		PreviewVisualUtility.CleanupAllFunctionEntityPreviews(this);
 		ClearSelectedEntity();
 		LevelViewerSelection.Clear();
 		LevelViewerPick.ClearRegistry();
+		LevelViewerCompositeFocus.Clear();
 		CancelLargeSceneRenderPolicy();
 		ModelReferenceRenderSettings.ResetForLevelLoad();
+		ClearPopulateMaterialCaches();
+		ModelReferenceMaterialMapping.PrepareForLevelPopulate(_content.Level.Commands);
 
 		if (_parentNode != null && GodotObject.IsInstanceValid(_parentNode))
 			_parentNode.QueueFree();
@@ -467,15 +732,159 @@ public partial class AlienScene : Node3D
 		_parentNode.AddToGroup(LevelViewerView.ContentGroup);
 		AddChild(_parentNode);
 
-		GD.Print("Loading composite " + comp?.name + "...");
+		ViewerLog.Print("Loading composite " + comp?.name + "...");
 		_loadedComposite = comp;
-		AddCompositeInstance(comp, _parentNode, null);
 
-		InvalidateFunctionEntityPreviewCache();
-		RefreshRenderFilters();
-		RefreshCompositeFocus();
+		LevelViewerPopulateTree.Plan spawnPlan =
+			LevelViewerPopulateTree.Collect(comp, _content, deferAliasProxy: true, includeVariables: false);
+
+		LevelViewerPopulatePrewarm.ModelReferenceCache modelRefCache =
+			LevelViewerPopulatePrewarm.BuildModelReferenceCache(spawnPlan.ModelReferences, _content, spawnPlan);
+		_modelRefRenderablesByEntityId = modelRefCache.RenderablesByInstanceKey;
+		LevelViewerPopulatePrewarm.Plan prewarmPlan = modelRefCache.PrewarmPlan;
+		ViewerLog.Print(
+			"Population plan: "
+			+ prewarmPlan.MeshWriteIndices.Count + " meshes, "
+			+ prewarmPlan.Textures.Count + " textures, "
+			+ prewarmPlan.Materials.Count + " materials.");
+
+		LevelViewerPopulatePrewarm.Result prewarmResult = LevelViewerPopulatePrewarm.Execute(prewarmPlan, _content.Level);
+
+		FinalizePrewarmGodotResources(prewarmResult, prewarmPlan);
+
+		ViewerLog.Print("Spawn plan: " + spawnPlan.Commands.Count + " entities.");
+
+		LevelViewerRenderIdleThrottle.SetLoadActive(true);
+		RegisterCompositeNode(comp, _parentNode);
+
+		ShowLoading("Spawning " + spawnPlan.Commands.Count + " entities...");
+		_nodeEntities.EnsureCapacity(spawnPlan.Commands.Count);
+		_parentNode.ProcessMode = Node.ProcessModeEnum.Disabled;
+		try
+		{
+			ApplyPopulateTree(spawnPlan, comp, _parentNode);
+		}
+		finally
+		{
+			_parentNode.ProcessMode = Node.ProcessModeEnum.Inherit;
+		}
+
+		_wiringCompositeLinks = true;
+		try
+		{
+			WireCompositeAliasProxies(comp, _parentNode);
+		}
+		finally
+		{
+			_wiringCompositeLinks = false;
+		}
+
+		RebuildAliasParameterEntityIndex();
+
+		// Mesh jobs need alias wiring and instance mapping meta before material remaps resolve.
+		RebuildBulkMeshSpawnJobsFromPreviews();
+
+		ShowLoading("Spawning model-reference meshes...");
+		FinishBulkPopulateVisuals();
+		ViewerLog.Print("Spawned " + _modelReferenceMeshes.Count + " model-reference meshes.");
+
 		ModelReferenceRenderSettings.FinalizeLevelLoad(_modelReferenceMeshes.Count);
+		ReleaseCathodeBinarySourceData();
+		ViewerLog.Print(
+			"Scene resources: "
+			+ _modelReferenceMeshes.Count + " mesh instances, "
+			+ _modelMeshesByWriteIndex.Count + " unique meshes, "
+			+ CachedTextureCount + " cached textures.");
 		QueueLargeSceneRenderPolicyApply();
+	}
+
+	private int CachedTextureCount => _texturesLevelByIndex.Count + _texturesGlobalByIndex.Count;
+
+	private void FinishBulkPopulateVisuals()
+	{
+		InvalidateFunctionEntityPreviewCache();
+		EnsureFunctionEntityPreviewCache();
+
+		Models models = _content.Level.Models;
+		Materials materials = _content.Level.Materials;
+		_bulkMeshSpawning = true;
+		_deferBulkPickRegistration = true;
+		try
+		{
+			for (int i = 0; i < _bulkMeshSpawnJobs.Count; i++)
+			{
+				BulkMeshSpawnJob job = _bulkMeshSpawnJobs[i];
+				if (job.RenderTarget == null || !GodotObject.IsInstanceValid(job.RenderTarget))
+					continue;
+
+				Models.CS2.Component.LOD.Submesh submesh = models.GetAtWriteIndex(job.ModelWriteIndex);
+				Materials.Material material = materials.GetAtWriteIndex(job.MaterialWriteIndex);
+				if (submesh == null || material == null)
+					continue;
+
+				SpawnRenderable(
+					job.RenderTarget,
+					submesh,
+					material,
+					job.SourceMaterialWriteIndex,
+					ModelReferenceMaterialMapping.TryGetEntityById(job.ModelReferenceEntityId),
+					ModelReferenceMaterialMapping.TryGetEntityById(job.OverrideParameterEntityId),
+					ModelReferenceMaterialMapping.TryGetEntityById(job.ModelReferenceEntityId));
+			}
+		}
+		finally
+		{
+			_bulkMeshSpawning = false;
+			_deferBulkPickRegistration = false;
+		}
+
+		RegisterBulkMeshPickables();
+
+		ActivateDeferredMeshes();
+
+		RefreshSelectedLightRadiusVisual();
+	}
+
+	private void RegisterBulkMeshPickables()
+	{
+		for (int i = 0; i < _bulkPickableMeshes.Count; i++)
+		{
+			(MeshInstance3D mesh, Node3D owner) = _bulkPickableMeshes[i];
+			if (mesh == null || !GodotObject.IsInstanceValid(mesh))
+				continue;
+
+			LevelViewerPick.RegisterPickableMesh(mesh, owner);
+		}
+
+		_bulkPickableMeshes.Clear();
+	}
+
+	private void FinalizeBulkPickRegistration()
+	{
+		for (int i = 0; i < _deferredPickOwners.Count; i++)
+		{
+			Node3D owner = _deferredPickOwners[i];
+			if (owner != null && GodotObject.IsInstanceValid(owner))
+				LevelViewerPick.RegisterPickableSubtree(owner);
+		}
+
+		_deferredPickOwners.Clear();
+	}
+
+	private void ActivateDeferredMeshes()
+	{
+		foreach (MeshInstance3D mesh in _modelReferenceMeshes.Keys)
+		{
+			if (mesh == null || !GodotObject.IsInstanceValid(mesh))
+				continue;
+
+			if (!mesh.IsInGroup("model_reference_renderable"))
+				mesh.AddToGroup("model_reference_renderable");
+			mesh.Visible = true;
+			MeshInstance3D overlay = FindWireframeOverlay(mesh);
+			if (overlay != null)
+				overlay.Visible = ModelReferenceRenderSettings.WireframeEnabled;
+		}
 	}
 
 	/// <summary>Moves level root so the initial focus point sits near the origin for stable rendering.</summary>
@@ -642,31 +1051,255 @@ public partial class AlienScene : Node3D
 		return true;
 	}
 
-	private void AddCompositeInstance(Composite composite, Node3D compositeNode, Entity parentEntity)
+	private void RegisterCompositeNode(Composite composite, Node3D compositeNode)
 	{
-		if (composite == null) return;
+		if (composite == null || compositeNode == null)
+			return;
 
 		if (_compositeNodes.ContainsKey(composite.shortGUID))
-		{
 			_compositeNodes[composite.shortGUID].Add(compositeNode);
-		}
 		else
-		{
-			List<Node3D> compositeNodes = new List<Node3D>();
-			compositeNodes.Add(compositeNode);
-			_compositeNodes.Add(composite.shortGUID, compositeNodes);
-		}
+			_compositeNodes[composite.shortGUID] = new List<Node3D> { compositeNode };
+	}
+
+	private void AddCompositeInstance(Composite composite, Node3D compositeNode, Entity parentEntity)
+	{
+		if (composite == null)
+			return;
+
+		RegisterCompositeNode(composite, compositeNode);
 
 		foreach (Entity entity in composite.functions)
 			AddEntity(composite, entity, compositeNode);
 		foreach (Entity entity in composite.variables)
 			AddEntity(composite, entity, compositeNode);
-		foreach (Entity entity in composite.aliases)
-			AddEntity(composite, entity, compositeNode);
-		foreach (Entity entity in composite.proxies)
-			AddEntity(composite, entity, compositeNode);
 
-		InvalidateFunctionEntityPreviewCache();
+		if (!_isBulkPopulating)
+		{
+			foreach (Entity entity in composite.aliases)
+				AddEntity(composite, entity, compositeNode);
+			foreach (Entity entity in composite.proxies)
+				AddEntity(composite, entity, compositeNode);
+		}
+	}
+
+	private void ApplyPopulateTree(LevelViewerPopulateTree.Plan plan, Composite rootComposite, Node3D rootNode)
+	{
+		if (rootComposite == null || rootNode == null)
+			return;
+
+		RegisterCompositeNode(rootComposite, rootNode);
+		if (plan?.Commands == null || plan.Commands.Count == 0)
+			return;
+
+		Node3D[] spawnedNodes = new Node3D[plan.Commands.Count];
+		Commands commands = _content.Level.Commands;
+		Dictionary<ShortGuid, Composite> compositeCache = new Dictionary<ShortGuid, Composite>();
+		bool addedPreview = false;
+
+		for (int i = 0; i < plan.Commands.Count; i++)
+		{
+			LevelViewerPopulateTree.Command command = plan.Commands[i];
+			if (!compositeCache.TryGetValue(command.CompositeId, out Composite composite))
+			{
+				composite = commands.GetComposite(command.CompositeId);
+				compositeCache[command.CompositeId] = composite;
+			}
+
+			if (composite == null)
+				continue;
+
+			Node3D parentNode = command.ParentIndex < 0 ? rootNode : spawnedNodes[command.ParentIndex];
+			if (parentNode == null)
+				continue;
+
+			spawnedNodes[i] = SpawnEntityFromPopulateCommand(
+				composite,
+				command.Entity,
+				parentNode,
+				command,
+				ref addedPreview);
+		}
+
+		if (addedPreview)
+			_functionEntityPreviewsCacheDirty = true;
+	}
+
+	private Node3D SpawnEntityFromPopulateCommand(
+		Composite composite,
+		Entity entity,
+		Node3D parentNode,
+		LevelViewerPopulateTree.Command? planCommand = null)
+	{
+		bool unused = false;
+		return SpawnEntityFromPopulateCommand(composite, entity, parentNode, planCommand, ref unused);
+	}
+
+	private Node3D SpawnEntityFromPopulateCommand(
+		Composite composite,
+		Entity entity,
+		Node3D parentNode,
+		LevelViewerPopulateTree.Command? planCommand,
+		ref bool addedPreview)
+	{
+		if (_isBulkPopulating && !_wiringCompositeLinks
+			&& (entity.variant == EntityVariant.ALIAS || entity.variant == EntityVariant.PROXY))
+		{
+			return null;
+		}
+
+		Vector3 position;
+		Vector3 rotation;
+		if (planCommand.HasValue && planCommand.Value.HasTransform)
+		{
+			position = planCommand.Value.Position;
+			rotation = planCommand.Value.RotationDegrees;
+		}
+		else
+		{
+			GetEntityTransform(entity, out position, out rotation);
+		}
+
+		string nodeName = planCommand.HasValue ? planCommand.Value.NodeName : entity.shortGUID.AsUInt32.ToString();
+
+		Node3D entityNode;
+		switch (entity.variant)
+		{
+			case EntityVariant.ALIAS:
+			case EntityVariant.PROXY:
+				entityNode = new EntityOverride { Name = nodeName };
+				break;
+			default:
+				entityNode = new Node3D { Name = nodeName };
+				break;
+		}
+
+		parentNode.AddChild(entityNode);
+		entityNode.Position = position;
+		entityNode.RotationDegrees = rotation;
+		entityNode.SetMeta(OwnerCompositeMetaKey, composite.shortGUID.AsUInt32);
+		_nodeEntities.Add(entityNode, entity);
+		TrackEntityNode(composite.shortGUID, entity.shortGUID, entityNode);
+
+		switch (entity.variant)
+		{
+			case EntityVariant.ALIAS:
+			case EntityVariant.PROXY:
+				ApplyAliasOrProxyOverrides(composite, entity, entityNode);
+				break;
+			case EntityVariant.FUNCTION:
+			{
+				FunctionEntity function = (FunctionEntity)entity;
+				if (!function.function.IsFunctionType)
+				{
+					Composite compositeNext = _content.Level.Commands.GetComposite(function.function);
+					if (compositeNext != null)
+						RegisterCompositeNode(compositeNext, entityNode);
+				}
+				else
+				{
+					bool geometryOnly = _isBulkPopulating && !_wiringCompositeLinks;
+					uint mappingScopeInstanceEntityId = planCommand.HasValue
+						? planCommand.Value.MappingScopeInstanceEntityId
+						: 0;
+					if (FunctionEntityPreviewSetup.TryAddPreview(
+						this,
+						function,
+						entityNode,
+						_content.Level.Commands.Utils,
+						composite.shortGUID,
+						geometryOnly,
+						mappingScopeInstanceEntityId))
+					{
+						addedPreview = true;
+						if (_isBulkPopulating)
+							TrackBulkPopulatePreview(entityNode, function);
+					}
+
+					if (!_isBulkPopulating)
+						LevelViewerPick.RegisterPickableSubtree(entityNode);
+				}
+
+				break;
+			}
+		}
+
+		return entityNode;
+	}
+
+	/// <summary>Wires aliases/proxies after the full composite instance tree exists.</summary>
+	private void WireCompositeAliasProxies(Composite composite, Node3D instanceRoot)
+	{
+		if (composite == null || instanceRoot == null)
+			return;
+
+		foreach (Entity entity in composite.aliases)
+			AddEntity(composite, entity, instanceRoot);
+		foreach (Entity entity in composite.proxies)
+			AddEntity(composite, entity, instanceRoot);
+
+		foreach (Entity entity in composite.functions)
+		{
+			if (entity is not FunctionEntity function || function.function.IsFunctionType)
+				continue;
+
+			Composite nestedComposite = _content.Level.Commands.GetComposite(function.function);
+			if (nestedComposite == null)
+				continue;
+
+			Node3D nestedRoot = instanceRoot.GetNodeOrNull<Node3D>(entity.shortGUID.AsUInt32.ToString());
+			if (nestedRoot != null)
+				WireCompositeAliasProxies(nestedComposite, nestedRoot);
+		}
+	}
+
+	private void ApplyAliasOrProxyOverrides(Composite composite, Entity entity, Node3D entityNode)
+	{
+		switch (entity.variant)
+		{
+			case EntityVariant.ALIAS:
+			{
+				AliasEntity alias = (AliasEntity)entity;
+				EntityOverride aliasOverride = (EntityOverride)entityNode;
+				if (TryResolveAliasPointedSceneNode(aliasOverride, alias, composite, out Node3D aliasedNode))
+				{
+					ModelReferenceMaterialMapping.ApplyAliasInstanceMappingMeta(alias, aliasedNode);
+					if (alias.GetParameter("position") != null)
+					{
+						EntityNodeUtil.SetPointed(aliasedNode, true);
+						aliasedNode.Position = entityNode.Position;
+						aliasedNode.RotationDegrees = entityNode.RotationDegrees;
+						if (!_isBulkPopulating)
+						{
+							LevelViewerAliasHighlight.InvalidateCache();
+							LevelViewerProxyHighlight.InvalidateCache();
+						}
+					}
+				}
+
+				break;
+			}
+			case EntityVariant.PROXY:
+			{
+				ProxyEntity proxy = (ProxyEntity)entity;
+				Node3D proxiedNode = GetEntityNode(EntityPathToGUIDList(proxy.proxy), ParentNode);
+				if (proxiedNode != null)
+				{
+					((EntityOverride)entityNode).PointedEntity = proxiedNode;
+					if (proxy.GetParameter("position") != null)
+					{
+						EntityNodeUtil.SetPointed(proxiedNode, true);
+						proxiedNode.Position = entityNode.Position;
+						proxiedNode.RotationDegrees = entityNode.RotationDegrees;
+					}
+
+					if (!_isBulkPopulating)
+						LevelViewerProxyHighlight.InvalidateCache();
+				}
+
+				break;
+			}
+		}
 	}
 
 	public void RemoveComposite(ShortGuid composite)
@@ -705,79 +1338,15 @@ public partial class AlienScene : Node3D
 
 	private void AddEntity(Composite composite, Entity entity, Node3D parentNode)
 	{
-		GetEntityTransform(entity, out Vector3 position, out Vector3 rotation);
+		Node3D entityNode = SpawnEntityFromPopulateCommand(composite, entity, parentNode);
+		if (entityNode == null)
+			return;
 
-		Node3D entityNode;
-		switch (entity.variant)
+		if (entity is FunctionEntity function && !function.function.IsFunctionType)
 		{
-			case EntityVariant.ALIAS:
-			case EntityVariant.PROXY:
-				entityNode = new EntityOverride { Name = entity.shortGUID.AsUInt32.ToString() };
-				break;
-			default:
-				entityNode = new Node3D { Name = entity.shortGUID.AsUInt32.ToString() };
-				break;
-		}
-
-		parentNode.AddChild(entityNode);
-		entityNode.Position = position;
-		entityNode.RotationDegrees = rotation;
-		entityNode.SetMeta(OwnerCompositeMetaKey, composite.shortGUID.AsUInt32);
-		_nodeEntities.Add(entityNode, entity);
-		TrackEntityNode(composite.shortGUID, entity.shortGUID, entityNode);
-
-		switch (entity.variant)
-		{
-			case EntityVariant.ALIAS:
-			{
-				AliasEntity alias = (AliasEntity)entity;
-				EntityOverride aliasOverride = (EntityOverride)entityNode;
-				if (TryResolveAliasPointedSceneNode(aliasOverride, alias, composite, out Node3D aliasedNode)
-					&& alias.GetParameter("position") != null)
-				{
-					EntityNodeUtil.SetPointed(aliasedNode, true);
-					aliasedNode.Position = position;
-					aliasedNode.RotationDegrees = rotation;
-					LevelViewerAliasHighlight.InvalidateCache();
-				}
-
-				break;
-			}
-			case EntityVariant.PROXY:
-			{
-				ProxyEntity proxy = (ProxyEntity)entity;
-				Node3D proxiedNode = GetEntityNode(EntityPathToGUIDList(proxy.proxy), ParentNode);
-				if (proxiedNode != null)
-				{
-					((EntityOverride)entityNode).PointedEntity = proxiedNode;
-					if (proxy.GetParameter("position") != null)
-					{
-						EntityNodeUtil.SetPointed(proxiedNode, true);
-						proxiedNode.Position = position;
-						proxiedNode.RotationDegrees = rotation;
-					}
-				}
-				break;
-			}
-			case EntityVariant.FUNCTION:
-			{
-				FunctionEntity function = (FunctionEntity)entity;
-				if (!function.function.IsFunctionType)
-				{
-					Composite compositeNext = _content.Level.Commands.GetComposite(function.function);
-					if (compositeNext != null)
-						AddCompositeInstance(compositeNext, entityNode, function);
-					// Nested composites register pickables per inner entity — do not stamp this whole subtree.
-				}
-				else
-				{
-					if (FunctionEntityPreviewSetup.TryAddPreview(this, function, entityNode, _content.Level.Commands.Utils, composite.shortGUID))
-						_functionEntityPreviewsCacheDirty = true;
-					LevelViewerPick.RegisterPickableSubtree(entityNode);
-				}
-
-				break;
-			}
+			Composite compositeNext = _content.Level.Commands.GetComposite(function.function);
+			if (compositeNext != null)
+				AddCompositeInstance(compositeNext, entityNode, function);
 		}
 	}
 
@@ -802,7 +1371,7 @@ public partial class AlienScene : Node3D
 		if (!hit.HasValue)
 			return false;
 
-		hitEntityNode = LevelViewerPick.ResolveNearestEntityNode(hit.Value.HitNode, _nodeEntities);
+		hitEntityNode = LevelViewerPick.ResolvePickOwnerEntityNode(hit.Value.HitNode, _nodeEntities);
 		if (hitEntityNode == null)
 			return false;
 
@@ -890,6 +1459,84 @@ public partial class AlienScene : Node3D
 		return false;
 	}
 
+	public bool TryResolveProxyPointedSceneNode(
+		EntityOverride proxyOverride,
+		ProxyEntity proxy,
+		out Node3D pointedNode,
+		bool preferCached = true)
+	{
+		pointedNode = null;
+		if (proxyOverride == null
+			|| !GodotObject.IsInstanceValid(proxyOverride)
+			|| proxy?.proxy?.path == null
+			|| proxy.proxy.path.Length == 0)
+		{
+			return false;
+		}
+
+		if (preferCached
+			&& proxyOverride.PointedEntity != null
+			&& GodotObject.IsInstanceValid(proxyOverride.PointedEntity))
+		{
+			pointedNode = proxyOverride.PointedEntity;
+			return true;
+		}
+
+		pointedNode = GetEntityNode(EntityPathToGUIDList(proxy.proxy), ParentNode);
+		if (pointedNode != null)
+		{
+			proxyOverride.PointedEntity = pointedNode;
+			return true;
+		}
+
+		if (_content?.Level?.Commands == null)
+			return false;
+
+		CommandsUtils utils = _content.Level.Commands.Utils;
+		List<Tuple<Composite, Entity>> resolvedHierarchy = utils.ResolveProxy(proxy);
+		(Composite targetComposite, Entity targetEntity) = utils.GetResolvedTarget(resolvedHierarchy);
+		if (targetComposite == null || targetEntity == null)
+			return false;
+
+		if (!TryGetCachedEntityNodes(targetComposite.shortGUID, targetEntity.shortGUID, out List<Node3D> candidates))
+			return false;
+
+		for (int i = 0; i < candidates.Count; i++)
+		{
+			Node3D candidate = candidates[i];
+			if (candidate == null || !GodotObject.IsInstanceValid(candidate))
+				continue;
+
+			pointedNode = candidate;
+			proxyOverride.PointedEntity = pointedNode;
+			return true;
+		}
+
+		return false;
+	}
+
+	public void ForEachProxyInActiveComposite(Action<Composite, ProxyEntity> visitor)
+	{
+		if (visitor == null || _content?.Level?.Commands == null)
+			return;
+
+		uint activeCompositeId = PreviewVisibilitySettings.ActiveCompositeId;
+		if (activeCompositeId == 0)
+			return;
+
+		Composite composite = _content.Level.Commands.GetComposite(new ShortGuid(activeCompositeId));
+		if (composite == null)
+			return;
+
+		foreach (ProxyEntity proxy in composite.proxies)
+		{
+			if (proxy == null)
+				continue;
+
+			visitor(composite, proxy);
+		}
+	}
+
 	public void ForEachParameterizedAliasInActiveComposite(Action<Composite, AliasEntity> visitor)
 	{
 		if (visitor == null || _content?.Level?.Commands == null)
@@ -947,9 +1594,33 @@ public partial class AlienScene : Node3D
 		LevelViewerSelection.ReapplyIfSelectionActive();
 	}
 
+	public void RefreshEntityHighlights(bool forceRebuild = true)
+	{
+		RefreshProxyHighlights(forceRebuild);
+		RefreshAliasHighlights(forceRebuild);
+	}
+
+	public void RefreshProxyHighlights(bool forceRebuild = true)
+	{
+		if (!_content.Loaded || !PreviewVisibilitySettings.HighlightProxies)
+		{
+			LevelViewerProxyHighlight.Clear();
+			LevelViewerSelection.ReapplyIfSelectionActive();
+			return;
+		}
+
+		uint activeCompositeId = PreviewVisibilitySettings.ActiveCompositeId;
+		if (forceRebuild || LevelViewerProxyHighlight.NeedsRebuild(activeCompositeId))
+			LevelViewerProxyHighlight.Rebuild(this, _content.Level.Commands, activeCompositeId);
+		else
+			LevelViewerProxyHighlight.SyncWithSelection();
+
+		LevelViewerSelection.ReapplyIfSelectionActive();
+	}
+
 	public void RefreshCompositeFocus()
 	{
-		if (_parentNode == null || !_content.Loaded)
+		if (_parentNode == null || !GodotObject.IsInstanceValid(_parentNode) || !_content.Loaded)
 		{
 			LevelViewerCompositeFocus.Clear();
 			return;
@@ -957,16 +1628,24 @@ public partial class AlienScene : Node3D
 
 		try
 		{
-			LevelViewerCompositeFocus.Refresh(_parentNode, _parentNode, _content.Level.Commands);
+			LevelViewerCompositeFocus.SetScopeEvaluationContext(_nodeEntities, _parentNode);
+			Node3D focusAnchor = TryResolveInstanceFocusAnchor(PreviewVisibilitySettings.CompositeFocusInstancePath);
+			LevelViewerCompositeFocus.Refresh(
+				_parentNode,
+				_parentNode,
+				_content.Level.Commands,
+				focusAnchor,
+				_nodeEntities);
+			RefreshProxyHighlights(forceRebuild: false);
 			RefreshAliasHighlights(forceRebuild: false);
 		}
 		catch (System.Exception ex)
 		{
-			GD.PrintErr("[Viewer] Composite focus refresh failed: " + ex);
+			ViewerLog.PrintErr("[Viewer] Composite focus refresh failed: " + ex);
 		}
 	}
 
-	public void SelectEntity(List<uint> entityPath, List<uint> compositePath, bool entitySelected, bool focusSelected)
+	public void SelectEntity(List<uint> entityPath, List<uint> compositePath, bool entitySelected)
 	{
 		if (!entitySelected || entityPath == null || entityPath.Count == 0)
 		{
@@ -977,110 +1656,54 @@ public partial class AlienScene : Node3D
 			return;
 		}
 
-		Node3D entityNode = TryResolveSelectionNode(entityPath, compositePath);
-		if (entityNode == _selectedEntity && entityNode != null)
-		{
-			ShowEntitySelectionHud(entityPath, compositePath);
-			return;
-		}
-
-		_selectedEntity = entityNode;
-		LevelViewerAliasHighlight.ReleaseNode(entityNode);
-		LevelViewerSelection.Apply(entityNode);
 		try
 		{
-			if (PreviewVisibilitySettings.HighlightAliases)
+			Node3D entityNode = TryResolveSelectionNode(entityPath, compositePath);
+			if (entityNode == _selectedEntity && entityNode != null)
 			{
-				if (LevelViewerAliasHighlight.NeedsRebuild(PreviewVisibilitySettings.ActiveCompositeId))
-					LevelViewerAliasHighlight.Rebuild(this, _content.Level.Commands, PreviewVisibilitySettings.ActiveCompositeId);
-				else
-					LevelViewerAliasHighlight.SyncWithSelection();
+				RefreshSelectedLightRadiusVisual();
+				return;
 			}
+
+			_selectedEntity = entityNode;
+			LevelViewerProxyHighlight.ReleaseNode(entityNode);
+			LevelViewerAliasHighlight.ReleaseNode(entityNode);
+			LevelViewerSelection.Apply(entityNode);
+
+			try
+			{
+				if (PreviewVisibilitySettings.HighlightProxies && PreviewVisibilitySettings.IsSteppedDownFromLevelRoot())
+				{
+					if (LevelViewerProxyHighlight.NeedsRebuild(PreviewVisibilitySettings.ActiveCompositeId))
+						LevelViewerProxyHighlight.Rebuild(this, _content.Level.Commands, PreviewVisibilitySettings.ActiveCompositeId);
+					else
+						LevelViewerProxyHighlight.SyncWithSelection();
+				}
+
+				if (PreviewVisibilitySettings.HighlightAliases)
+				{
+					if (LevelViewerAliasHighlight.NeedsRebuild(PreviewVisibilitySettings.ActiveCompositeId))
+						LevelViewerAliasHighlight.Rebuild(this, _content.Level.Commands, PreviewVisibilitySettings.ActiveCompositeId);
+					else
+						LevelViewerAliasHighlight.SyncWithSelection();
+				}
+			}
+			catch (System.Exception ex)
+			{
+				LevelViewerAliasHighlight.InvalidateCache();
+				LevelViewerProxyHighlight.InvalidateCache();
+				ViewerLog.PrintErr("[Viewer] Entity highlight failed: " + ex);
+			}
+
+			LevelViewerSelection.ReapplyIfSelectionActive();
+			RefreshSelectedLightRadiusVisual();
+
+			Callable.From(() => OnSelectionChanged?.Invoke(entityNode)).CallDeferred();
 		}
 		catch (System.Exception ex)
 		{
-			LevelViewerAliasHighlight.InvalidateCache();
-			GD.PrintErr("[Viewer] Alias highlight failed: " + ex);
+			ViewerLog.PrintErr("[Viewer] Selection highlight failed: " + ex);
 		}
-
-		LevelViewerSelection.ReapplyIfSelectionActive();
-
-		ShowEntitySelectionHud(entityPath, compositePath);
-		Callable.From(() => OnSelectionChanged?.Invoke(entityNode)).CallDeferred();
-
-		if (focusSelected && entityNode != null)
-			Callable.From(() => FocusSelectedEntity(entityNode)).CallDeferred();
-	}
-
-	private void EnsureSelectionHud()
-	{
-		if (_selectionHud != null && GodotObject.IsInstanceValid(_selectionHud))
-			return;
-
-		Node host = GetTree()?.CurrentScene ?? this;
-		if (host == null || !GodotObject.IsInstanceValid(host))
-			return;
-
-		_selectionHud = new LevelViewerSelectionHud();
-		_selectionHud.AttachTo(host);
-	}
-
-	private void ShowEntitySelectionHud(List<uint> entityPath, List<uint> compositePath)
-	{
-		string displayText = TryGetEntitySelectionDisplayText(entityPath, compositePath);
-		if (string.IsNullOrWhiteSpace(displayText))
-			return;
-
-		EnsureSelectionHud();
-		_selectionHud?.ShowEntity(displayText);
-	}
-
-	private string TryGetEntitySelectionDisplayText(List<uint> entityPath, List<uint> compositePath, bool includeGuids = false)
-	{
-		if (!_content.Loaded || entityPath == null || entityPath.Count == 0 || compositePath == null || compositePath.Count == 0)
-			return null;
-
-		int last = Math.Min(entityPath.Count, compositePath.Count) - 1;
-		Commands commands = _content.Level.Commands;
-		CommandsUtils utils = commands.Utils;
-
-		Composite composite = commands.GetComposite(new ShortGuid(compositePath[last]));
-		Entity entity = composite?.GetEntityByID(new ShortGuid(entityPath[last]));
-		if (composite == null || entity == null)
-			return null;
-
-		switch (entity.variant)
-		{
-			case EntityVariant.ALIAS:
-			case EntityVariant.PROXY:
-			{
-				List<Tuple<Composite, Entity>> resolvedHierarchy = utils.ResolveAliasOrProxy(entity, composite);
-				(Composite targetComposite, Entity targetEntity) = utils.GetResolvedTarget(resolvedHierarchy);
-				if (targetComposite != null && targetEntity != null)
-				{
-					string targetName = utils.GetEntityName(targetComposite, targetEntity);
-					string hierarchy = utils.GetResolvedAsString(resolvedHierarchy, includeGuids);
-					if (!string.IsNullOrEmpty(hierarchy))
-						return "Selected " + targetName + "\n" + hierarchy;
-					return "Selected " + targetName;
-				}
-				break;
-			}
-		}
-
-		return "Selected " + utils.GetEntityName(composite, entity);
-	}
-
-	private void FocusSelectedEntity(Node3D target)
-	{
-		if (target == null || !GodotObject.IsInstanceValid(target))
-			return;
-
-		Camera3D camera = GetTree().Root.GetNodeOrNull<Camera3D>("Connection/Camera3D");
-		if (camera is LevelViewerCamera viewerCamera)
-			viewerCamera.FocusOnTarget(target);
-		else
-			LevelViewerView.FrameRuntimeCameraClose(target, camera);
 	}
 
 	private void RequestFrameView(Node3D target, bool focusEditor)
@@ -1111,10 +1734,61 @@ public partial class AlienScene : Node3D
 		if (entityNode == null)
 			return null;
 
+		if (_nodeEntities.TryGetValue(entityNode, out Entity entity))
+			return ResolveSelectionVisualRoot(entityNode, entity) ?? entityNode;
+
+		return entityNode;
+	}
+
+	private Node3D ResolveSelectionVisualRoot(Node3D entityNode, Entity entity)
+	{
 		if (entityNode is EntityOverride entityOverride && entityOverride.PointedEntity != null)
 			return entityOverride.PointedEntity;
 
+		if (entity is AliasEntity alias && entityNode is EntityOverride aliasOverride)
+		{
+			if (!entityNode.HasMeta(OwnerCompositeMetaKey))
+				return entityNode;
+
+			Composite composite = _content?.Level?.Commands?.GetComposite(
+				new ShortGuid(entityNode.GetMeta(OwnerCompositeMetaKey).AsUInt32()));
+			if (composite != null
+				&& TryResolveAliasPointedSceneNode(aliasOverride, alias, composite, out Node3D pointedNode))
+			{
+				return pointedNode;
+			}
+		}
+
+		if (entity is ProxyEntity proxy && entityNode is EntityOverride proxyOverride)
+		{
+			if (proxyOverride.PointedEntity != null)
+				return proxyOverride.PointedEntity;
+
+			Node3D proxiedNode = GetEntityNode(EntityPathToGUIDList(proxy.proxy), ParentNode);
+			if (proxiedNode != null)
+			{
+				proxyOverride.PointedEntity = proxiedNode;
+				return proxiedNode;
+			}
+		}
+
 		return entityNode;
+	}
+
+	private FunctionEntity ResolveFunctionEntityForTransformGizmo(Entity entity, Node3D entityNode, uint ownerCompositeId)
+	{
+		if (entity is FunctionEntity function)
+			return function;
+
+		Node3D visualRoot = ResolveSelectionVisualRoot(entityNode, entity);
+		if (visualRoot != null
+			&& _nodeEntities.TryGetValue(visualRoot, out Entity pointedEntity)
+			&& pointedEntity is FunctionEntity pointedFunction)
+		{
+			return pointedFunction;
+		}
+
+		return null;
 	}
 
 	private Node3D GetEntityNode(List<uint> path, Node3D parent)
@@ -1130,6 +1804,92 @@ public partial class AlienScene : Node3D
 		{
 		}
 		return null;
+	}
+
+	private Node3D TryResolveInstanceFocusAnchor(uint[] instanceEntityPath)
+	{
+		if (_parentNode == null)
+			return null;
+
+		if (instanceEntityPath == null || instanceEntityPath.Length == 0)
+			return _parentNode;
+
+		Node3D node = GetEntityNode(new List<uint>(instanceEntityPath), _parentNode);
+		if (node != null)
+			return node;
+
+		return TryFindCachedEntityNodeMatchingInstancePath(instanceEntityPath);
+	}
+
+	private Node3D TryFindCachedEntityNodeMatchingInstancePath(uint[] instanceEntityPath)
+	{
+		if (instanceEntityPath == null || instanceEntityPath.Length == 0)
+			return null;
+
+		uint leafEntity = instanceEntityPath[instanceEntityPath.Length - 1];
+		foreach (KeyValuePair<ulong, List<Node3D>> entry in _entityNodesByKey)
+		{
+			if ((entry.Key & 0xFFFFFFFF) != leafEntity)
+				continue;
+
+			List<Node3D> nodes = entry.Value;
+			if (nodes == null)
+				continue;
+
+			for (int i = 0; i < nodes.Count; i++)
+			{
+				Node3D candidate = nodes[i];
+				if (candidate == null || !GodotObject.IsInstanceValid(candidate))
+					continue;
+
+				if (!TryBuildEntityIdChainFromNode(candidate, out List<uint> chain))
+					continue;
+
+				if (InstanceEntityPathMatchesChain(instanceEntityPath, chain))
+					return candidate;
+			}
+		}
+
+		return null;
+	}
+
+	private bool TryBuildEntityIdChainFromNode(Node3D start, out List<uint> entityIds)
+	{
+		entityIds = new List<uint>();
+		if (start == null || _parentNode == null)
+			return false;
+
+		Node current = start;
+		while (current != null && current != _parentNode)
+		{
+			if (current is Node3D node3D && _nodeEntities.TryGetValue(node3D, out Entity entity))
+				entityIds.Add(entity.shortGUID.AsUInt32);
+
+			current = current.GetParent();
+		}
+
+		if (entityIds.Count == 0)
+			return false;
+
+		entityIds.Reverse();
+		return true;
+	}
+
+	private static bool InstanceEntityPathMatchesChain(uint[] instanceEntityPath, List<uint> chain)
+	{
+		if (instanceEntityPath == null || instanceEntityPath.Length == 0)
+			return true;
+
+		if (chain == null || chain.Count < instanceEntityPath.Length)
+			return false;
+
+		for (int i = 0; i < instanceEntityPath.Length; i++)
+		{
+			if (chain[i] != instanceEntityPath[i])
+				return false;
+		}
+
+		return true;
 	}
 
 	private List<uint> EntityPathToGUIDList(EntityPath path)
@@ -1149,6 +1909,107 @@ public partial class AlienScene : Node3D
 			return null;
 
 		return GetEntityNode(entityPath, _parentNode) as EntityOverride;
+	}
+
+	public Entity FindEntityById(uint entityId) => ModelReferenceMaterialMapping.TryGetEntityById(entityId);
+
+	internal bool TryGetAliasParameterEntityForRenderTarget(
+		Node3D renderTarget,
+		Entity modelReferenceEntity,
+		out Entity aliasEntity)
+	{
+		if (_aliasParameterEntityByRenderTarget == null && _nodeEntities.Count > 0)
+			RebuildAliasParameterEntityIndex();
+
+		if (ModelReferenceMaterialOverrides.TryGetAliasParameterEntityFromIndex(
+			_aliasParameterEntityByRenderTarget,
+			renderTarget,
+			modelReferenceEntity,
+			out aliasEntity))
+		{
+			return true;
+		}
+
+		return ModelReferenceMaterialOverrides.TryFindAliasParameterEntity(
+			_nodeEntities,
+			renderTarget,
+			modelReferenceEntity,
+			_content?.Level?.Commands,
+			out AliasEntity resolvedAlias)
+			&& (aliasEntity = resolvedAlias) != null;
+	}
+
+	private void RebuildAliasParameterEntityIndex()
+	{
+		Commands commands = _content?.Level?.Commands;
+		if (commands == null)
+		{
+			_aliasParameterEntityByRenderTarget = null;
+			return;
+		}
+
+		_aliasParameterEntityByRenderTarget =
+			ModelReferenceMaterialOverrides.BuildAliasParameterEntityIndex(_nodeEntities, commands);
+	}
+
+	internal bool TryGetModelRefRenderables(
+		uint entityId,
+		uint mappingScopeInstanceEntityId,
+		out List<Tuple<int, int>> renderables)
+	{
+		ulong cacheKey = ModelReferenceMaterialMapping.MakeModelRefRenderablesCacheKey(
+			entityId,
+			mappingScopeInstanceEntityId);
+		if (_modelRefRenderablesByEntityId != null
+			&& _modelRefRenderablesByEntityId.TryGetValue(cacheKey, out renderables))
+		{
+			return true;
+		}
+
+		renderables = null;
+		return false;
+	}
+
+	internal void CacheModelRefRenderables(
+		uint entityId,
+		uint mappingScopeInstanceEntityId,
+		List<Tuple<int, int>> renderables)
+	{
+		if (renderables == null)
+			return;
+
+		_modelRefRenderablesByEntityId ??= new Dictionary<ulong, List<Tuple<int, int>>>();
+		_modelRefRenderablesByEntityId[
+			ModelReferenceMaterialMapping.MakeModelRefRenderablesCacheKey(entityId, mappingScopeInstanceEntityId)] =
+			renderables;
+	}
+
+	internal void InvalidateModelRefRenderablesCache(uint mappingScopeInstanceEntityId = 0)
+	{
+		if (_modelRefRenderablesByEntityId == null || _modelRefRenderablesByEntityId.Count == 0)
+			return;
+
+		if (mappingScopeInstanceEntityId == 0)
+		{
+			_modelRefRenderablesByEntityId.Clear();
+			return;
+		}
+
+		List<ulong> keysToRemove = null;
+		foreach (ulong key in _modelRefRenderablesByEntityId.Keys)
+		{
+			if ((key & 0xFFFFFFFF) != mappingScopeInstanceEntityId)
+				continue;
+
+			keysToRemove ??= new List<ulong>();
+			keysToRemove.Add(key);
+		}
+
+		if (keysToRemove == null)
+			return;
+
+		for (int i = 0; i < keysToRemove.Count; i++)
+			_modelRefRenderablesByEntityId.Remove(keysToRemove[i]);
 	}
 
 	public void ApplyEntityParameter(
@@ -1172,10 +2033,27 @@ public partial class AlienScene : Node3D
 		if (dataEntity == null)
 			return;
 
+		DataType diagDataType = ParameterSync.GetDataType(sync);
+		if (diagDataType == DataType.RESOURCE)
+			ViewerLog.Print("ApplyEntityParameter RESOURCE start (entity=" + dataEntityID.AsUInt32
+				+ " visual=" + visualEntityID.AsUInt32 + " fromPointer=" + fromPointer + ")");
+
 		ParameterSync.ApplyToEntity(dataEntity, sync, _content);
 
+		ShortGuid paramName = new ShortGuid(sync.name);
+		ShortGuid mappingParameterId = ShortGuidUtils.Generate(ModelReferenceMaterialMapping.MappingParameterName);
+		if (paramName == mappingParameterId)
+			RefreshMaterialMappingForParameterChange(dataEntity, dataComposite);
+		else if (ModelReferenceMaterialOverrides.IsModelReferenceOverrideParameter(paramName))
+			RefreshModelReferenceOverridesForParameterChange(dataEntity, dataComposite);
+
+		// Light range gizmo reads from the entity plus any aliases that override it, so refresh when
+		// the selected light or an alias pointing at it changes (direct float/enum edits also reach
+		// this through RefreshFunctionEntityPreviews, but alias edits would otherwise be missed).
+		RefreshSelectedLightRadiusIfAffected(dataEntity, dataComposite);
+
 		DataType syncDataType = ParameterSync.GetDataType(sync);
-		if (syncDataType == DataType.RESOURCE)
+		if (syncDataType == DataType.RESOURCE && paramName != mappingParameterId)
 		{
 			FunctionEntity remapEntity = ModelReferencePreview.ResolveModelReferenceEntity(
 				dataEntity, dataComposite, _content.Level.Commands);
@@ -1212,6 +2090,8 @@ public partial class AlienScene : Node3D
 			else if (syncDataType != DataType.VECTOR && syncDataType != DataType.SPLINE && syncDataType != DataType.BOOL)
 				RefreshFunctionEntityPreviews(visualLimitNode);
 
+			if (diagDataType == DataType.RESOURCE)
+				ViewerLog.Print("ApplyEntityParameter RESOURCE complete (limited path)");
 			return;
 		}
 
@@ -1230,32 +2110,45 @@ public partial class AlienScene : Node3D
 		if (syncDataType == DataType.TRANSFORM && !fromPointer && visualLimitNode == null)
 			touchedEntityNodes = new HashSet<Node3D>();
 
-		for (int i = 0; i < entityNodes.Count; i++)
+		// Batch pick-bounds invalidation so moving an entity with many instances doesn't rescan the
+		// entire pick-owner registry once per instance (previously O(instances x owners)).
+		LevelViewerPick.BeginBatchPickBoundsInvalidation();
+		try
 		{
-			Node3D entityNode = entityNodes[i];
-			if (entityNode == null || !GodotObject.IsInstanceValid(entityNode))
-				continue;
-
-			ParameterVisualContext context = new ParameterVisualContext()
+			for (int i = 0; i < entityNodes.Count; i++)
 			{
-				Composite = visualComposite,
-				Entity = visualEntity,
-				EntityNode = entityNode,
-				Sync = sync,
-				FromPointer = fromPointer,
-				PointedOverride = pointedOverride,
-			};
+				Node3D entityNode = entityNodes[i];
+				if (entityNode == null || !GodotObject.IsInstanceValid(entityNode))
+					continue;
 
-			if (_parameterVisualHandlers.TryGetValue(syncDataType, out ParameterVisualHandler handler))
-				handler(context);
-			else if (syncDataType != DataType.VECTOR && syncDataType != DataType.SPLINE && syncDataType != DataType.BOOL)
-				RefreshFunctionEntityPreviews(entityNode);
+				ParameterVisualContext context = new ParameterVisualContext()
+				{
+					Composite = visualComposite,
+					Entity = visualEntity,
+					EntityNode = entityNode,
+					Sync = sync,
+					FromPointer = fromPointer,
+					PointedOverride = pointedOverride,
+				};
 
-			touchedEntityNodes?.Add(entityNode);
+				if (_parameterVisualHandlers.TryGetValue(syncDataType, out ParameterVisualHandler handler))
+					handler(context);
+				else if (syncDataType != DataType.VECTOR && syncDataType != DataType.SPLINE && syncDataType != DataType.BOOL)
+					RefreshFunctionEntityPreviews(entityNode);
+
+				touchedEntityNodes?.Add(entityNode);
+			}
+
+			if (touchedEntityNodes != null && touchedEntityNodes.Count > 0)
+				ReapplyAliasOverridesPointingAt(touchedEntityNodes);
+		}
+		finally
+		{
+			LevelViewerPick.EndBatchPickBoundsInvalidation();
 		}
 
-		if (touchedEntityNodes != null && touchedEntityNodes.Count > 0)
-			ReapplyAliasOverridesPointingAt(touchedEntityNodes);
+		if (diagDataType == DataType.RESOURCE)
+			ViewerLog.Print("ApplyEntityParameter RESOURCE complete");
 	}
 
 	/// <summary>
@@ -1288,6 +2181,8 @@ public partial class AlienScene : Node3D
 		if (entityNode == null)
 			return;
 
+		EnsureLazyFunctionEntityPreview(entityNode);
+
 		BoxPreview[] boxPreviews = EntityNodeUtil.FindPreviews<BoxPreview>(entityNode);
 		for (int i = 0; i < boxPreviews.Length; i++)
 			boxPreviews[i].Refresh();
@@ -1308,7 +2203,299 @@ public partial class AlienScene : Node3D
 			others[i].Refresh();
 		}
 
-		LevelViewerPick.RegisterPickableSubtree(entityNode);
+		for (int i = 0; i < others.Length; i++)
+			others[i].SyncPickablesWithVisibility();
+		if (_selectedEntity != null && GodotObject.IsInstanceValid(_selectedEntity))
+		{
+			Node3D selectedEntityNode = LevelViewerPick.ResolveNearestEntityNode(_selectedEntity, _nodeEntities);
+			if (selectedEntityNode == entityNode)
+				RefreshSelectedLightRadiusVisual();
+		}
+	}
+
+	/// <summary>
+	/// Applies a live material-mapping edit from OpenCAGE and updates affected meshes in place.
+	/// </summary>
+	public void ApplySyncedMaterialMapping(SyncedMaterialMappingSet sync)
+	{
+		if (!_content.Loaded || _parentNode == null || !GodotObject.IsInstanceValid(_parentNode) || sync == null)
+			return;
+
+		MaterialMappingSync.Apply(_content.Level, sync);
+		RefreshMaterialMappingVisuals(sync.mapping_id);
+	}
+
+	private void RefreshMaterialMappingVisuals(uint changedMappingId)
+	{
+		ModelReferenceMaterialMapping.InvalidateRuntimeMappingCaches(_content.Level.Commands);
+		InvalidateModelRefRenderablesCache();
+		RemapExistingModelReferenceMeshes(changedMappingId);
+	}
+
+	private void RemapExistingModelReferenceMeshes(uint changedMappingId)
+	{
+		if (changedMappingId == 0 || _content?.Level?.Materials == null)
+			return;
+
+		Level level = _content.Level;
+		Commands commands = level.Commands;
+		ShortGuid changedId = new ShortGuid(changedMappingId);
+
+		foreach (KeyValuePair<MeshInstance3D, Materials.Material> entry in _modelReferenceMeshes.ToArray())
+		{
+			MeshInstance3D mesh = entry.Key;
+			if (mesh == null || !GodotObject.IsInstanceValid(mesh))
+				continue;
+
+			if (!mesh.HasMeta(ModelReferenceMaterialMapping.SourceMaterialWriteIndexMetaKey))
+				continue;
+
+			Node3D owner = mesh.GetParent() as Node3D;
+			if (owner == null)
+				continue;
+
+			MaterialMappings.MaterialMapping mapping = ModelReferenceMaterialMapping.TryResolveMappingForEntityNode(
+				level,
+				owner,
+				_parentNode,
+				_nodeEntities,
+				commands);
+			if (mapping == null || mapping.ID != changedId)
+				continue;
+
+			int sourceMaterialWriteIndex = mesh.GetMeta(
+				ModelReferenceMaterialMapping.SourceMaterialWriteIndexMetaKey).AsInt32();
+			Materials.Material currentMaterial = entry.Value;
+			int currentWriteIndex = level.Materials.GetWriteIndex(currentMaterial);
+			int remappedWriteIndex = ModelReferenceMaterialMapping.RemapMaterialWriteIndex(
+				level,
+				mapping,
+				sourceMaterialWriteIndex,
+				sourceMaterialWriteIndex);
+			if (remappedWriteIndex < 0 || remappedWriteIndex == currentWriteIndex)
+				continue;
+
+			Materials.Material remappedMaterial = level.Materials.GetAtWriteIndex(remappedWriteIndex);
+			if (remappedMaterial == null)
+				continue;
+
+			ResolveMaterialOverrideEntitiesFromMesh(
+				mesh,
+				out Entity modelReferenceEntity,
+				out Entity overrideParameterEntity,
+				out Entity fallbackParameterEntity);
+			_modelReferenceMeshes[mesh] = remappedMaterial;
+			mesh.MaterialOverride = GetSolidMaterialForModelReference(
+				remappedMaterial,
+				modelReferenceEntity,
+				overrideParameterEntity,
+				fallbackParameterEntity);
+			if (ModelReferenceRenderSettings.WireframeEnabled)
+			{
+				UpdateWireframeOverlay(
+					mesh,
+					remappedMaterial,
+					modelReferenceEntity,
+					overrideParameterEntity,
+					fallbackParameterEntity);
+			}
+		}
+	}
+
+	private void ReapplyAllAliasInstanceMappingMeta()
+	{
+		Commands commands = _content.Level.Commands;
+		foreach (KeyValuePair<Node3D, Entity> entry in _nodeEntities)
+		{
+			if (entry.Value is not AliasEntity alias || entry.Key is not EntityOverride aliasOverride)
+				continue;
+			if (!entry.Key.HasMeta(OwnerCompositeMetaKey))
+				continue;
+
+			Composite ownerComposite = commands.GetComposite(
+				new ShortGuid(entry.Key.GetMeta(OwnerCompositeMetaKey).AsUInt32()));
+			if (ownerComposite == null)
+				continue;
+
+			if (!TryResolveAliasPointedSceneNode(aliasOverride, alias, ownerComposite, out Node3D pointedNode))
+				continue;
+
+			if (ModelReferenceMaterialMapping.TryGetMappingParameter(alias) == null)
+				ModelReferenceMaterialMapping.ClearAliasInstanceMappingMeta(pointedNode);
+			else
+				ModelReferenceMaterialMapping.ApplyAliasInstanceMappingMeta(alias, pointedNode);
+		}
+	}
+
+	private void RefreshMaterialMappingForParameterChange(Entity scopeEntity, Composite ownerComposite)
+	{
+		if (scopeEntity == null || ownerComposite == null)
+			return;
+
+		ModelReferenceMaterialMapping.InvalidateRuntimeMappingCaches(_content.Level.Commands);
+		InvalidateModelRefRenderablesCache();
+		_aliasParameterEntityByRenderTarget = null;
+
+		if (scopeEntity is FunctionEntity function
+			&& ModelReferenceMaterialMapping.IsCompositeInstanceEntity(function, _content.Level.Commands))
+		{
+			if (TryGetCachedEntityNodes(ownerComposite.shortGUID, scopeEntity.shortGUID, out List<Node3D> instanceNodes))
+			{
+				for (int i = 0; i < instanceNodes.Count; i++)
+					RefreshDirectModelReferencesInCompositeInstance(instanceNodes[i]);
+			}
+
+			return;
+		}
+
+		if (scopeEntity is not AliasEntity alias)
+			return;
+
+		if (!TryGetCachedEntityNodes(ownerComposite.shortGUID, alias.shortGUID, out List<Node3D> aliasNodes))
+			return;
+
+		for (int i = 0; i < aliasNodes.Count; i++)
+		{
+			if (aliasNodes[i] is not EntityOverride aliasOverride)
+				continue;
+
+			if (!TryResolveAliasPointedSceneNode(aliasOverride, alias, ownerComposite, out Node3D pointedNode))
+				continue;
+
+			if (ModelReferenceMaterialMapping.TryGetMappingParameter(alias) == null)
+				ModelReferenceMaterialMapping.ClearAliasInstanceMappingMeta(pointedNode);
+			else
+				ModelReferenceMaterialMapping.ApplyAliasInstanceMappingMeta(alias, pointedNode);
+
+			if (pointedNode != null
+				&& _nodeEntities.TryGetValue(pointedNode, out Entity pointedEntity)
+				&& pointedEntity is FunctionEntity pointedFunction
+				&& ModelReferenceMaterialMapping.IsCompositeInstanceEntity(pointedFunction, _content.Level.Commands))
+			{
+				RefreshDirectModelReferencesInCompositeInstance(pointedNode);
+			}
+		}
+	}
+
+	private void RefreshModelReferenceOverridesForParameterChange(Entity scopeEntity, Composite ownerComposite)
+	{
+		if (scopeEntity == null || ownerComposite == null)
+			return;
+
+		InvalidateModelRefRenderablesCache();
+		_aliasParameterEntityByRenderTarget = null;
+
+		if (scopeEntity is FunctionEntity function
+			&& ModelReferenceMaterialMapping.IsModelReferenceEntity(function))
+		{
+			RefreshModelReferencePreviewNodes(ownerComposite, function);
+			RefreshModelReferenceAliasOverrides(ownerComposite, function);
+			return;
+		}
+
+		if (scopeEntity is FunctionEntity compositeInstance
+			&& ModelReferenceMaterialMapping.IsCompositeInstanceEntity(compositeInstance, _content.Level.Commands))
+		{
+			if (TryGetCachedEntityNodes(ownerComposite.shortGUID, compositeInstance.shortGUID, out List<Node3D> instanceNodes))
+			{
+				for (int i = 0; i < instanceNodes.Count; i++)
+					RefreshDirectModelReferencesInCompositeInstance(instanceNodes[i]);
+			}
+
+			return;
+		}
+
+		if (scopeEntity is not AliasEntity alias)
+			return;
+
+		if (!TryGetCachedEntityNodes(ownerComposite.shortGUID, alias.shortGUID, out List<Node3D> aliasNodes))
+			return;
+
+		for (int i = 0; i < aliasNodes.Count; i++)
+		{
+			if (aliasNodes[i] is not EntityOverride aliasOverride)
+				continue;
+
+			if (!TryResolveAliasPointedSceneNode(aliasOverride, alias, ownerComposite, out Node3D pointedNode))
+				continue;
+
+			RefreshFunctionEntityPreviews(pointedNode);
+		}
+	}
+
+	private void RefreshModelReferencePreviewNodes(Composite ownerComposite, FunctionEntity modelReference)
+	{
+		if (!TryGetCachedEntityNodes(ownerComposite.shortGUID, modelReference.shortGUID, out List<Node3D> entityNodes))
+			return;
+
+		for (int i = 0; i < entityNodes.Count; i++)
+			RefreshFunctionEntityPreviews(entityNodes[i]);
+	}
+
+	private void RefreshModelReferenceAliasOverrides(Composite ownerComposite, FunctionEntity modelReference)
+	{
+		Commands commands = _content.Level.Commands;
+		HashSet<Node3D> refreshed = new HashSet<Node3D>();
+
+		foreach (KeyValuePair<Node3D, Entity> entry in _nodeEntities)
+		{
+			if (entry.Value is not AliasEntity alias)
+				continue;
+			if (entry.Key is not EntityOverride aliasOverride)
+				continue;
+			if (!entry.Key.HasMeta(OwnerCompositeMetaKey))
+				continue;
+
+			Composite aliasComposite = commands.GetComposite(
+				new ShortGuid(entry.Key.GetMeta(OwnerCompositeMetaKey).AsUInt32()));
+			if (aliasComposite != ownerComposite)
+				continue;
+
+			(_, Entity targetEntity) = commands.Utils.GetResolvedTarget(
+				commands.Utils.ResolveAlias(alias, aliasComposite));
+			if (targetEntity != modelReference)
+				continue;
+
+			if (!TryResolveAliasPointedSceneNode(aliasOverride, alias, aliasComposite, out Node3D pointedNode))
+				continue;
+
+			if (!refreshed.Add(pointedNode))
+				continue;
+
+			RefreshFunctionEntityPreviews(pointedNode);
+		}
+	}
+
+	private void RefreshDirectModelReferencesInCompositeInstance(Node3D instanceRoot)
+	{
+		if (instanceRoot == null || !GodotObject.IsInstanceValid(instanceRoot))
+			return;
+
+		Commands commands = _content.Level.Commands;
+		foreach (Node child in instanceRoot.GetChildren())
+		{
+			if (child is not Node3D childNode || !GodotObject.IsInstanceValid(childNode))
+				continue;
+
+			if (!_nodeEntities.TryGetValue(childNode, out Entity entity))
+				continue;
+
+			if (entity is FunctionEntity function
+				&& ModelReferenceMaterialMapping.IsCompositeInstanceEntity(function, commands))
+			{
+				continue;
+			}
+
+			if (entity is FunctionEntity modelRef
+				&& ModelReferenceMaterialMapping.IsModelReferenceEntity(modelRef))
+			{
+				RefreshFunctionEntityPreviews(childNode);
+				continue;
+			}
+
+			if (entity.variant == EntityVariant.ALIAS || entity.variant == EntityVariant.PROXY)
+				RefreshFunctionEntityPreviews(childNode);
+		}
 	}
 
 	public void InvalidateFunctionEntityPreviewCache()
@@ -1317,14 +2504,320 @@ public partial class AlienScene : Node3D
 		_previewsByOwnerComposite.Clear();
 	}
 
+	private bool EnsureLazyFunctionEntityPreview(Node3D entityNode)
+	{
+		if (entityNode == null || !_nodeEntities.TryGetValue(entityNode, out Entity entity))
+			return false;
+
+		if (entity is not FunctionEntity function || !function.function.IsFunctionType)
+			return false;
+
+		if (function.function.AsFunctionType == FunctionType.ModelReference)
+			return false;
+
+		if (EntityNodeUtil.FindAllPreviews(entityNode).Length > 0)
+			return false;
+
+		if (!entityNode.HasMeta(OwnerCompositeMetaKey))
+			return false;
+
+		ShortGuid ownerComposite = new ShortGuid(entityNode.GetMeta(OwnerCompositeMetaKey).AsUInt32());
+		if (!FunctionEntityPreviewSetup.TryAddPreview(
+			this,
+			function,
+			entityNode,
+			_content.Level.Commands.Utils,
+			ownerComposite))
+		{
+			return false;
+		}
+
+		TrackMaterializedFunctionEntityPreview(entityNode);
+		return true;
+	}
+
+	private void TrackMaterializedFunctionEntityPreview(Node3D entityNode)
+	{
+		_functionEntityPreviewsCacheDirty = true;
+		FunctionEntityPreview[] previews = EntityNodeUtil.FindAllPreviews(entityNode);
+		for (int i = 0; i < previews.Length; i++)
+		{
+			FunctionEntityPreview preview = previews[i];
+			if (preview == null || preview is ModelReferencePreview)
+				continue;
+
+			_bulkPopulatePreviews.Add(preview);
+		}
+	}
+
+	private static bool ShouldMaterializeFunctionPreview(
+		FunctionEntity function,
+		uint ownerCompositeId,
+		HashSet<uint> changedFunctionTypes)
+	{
+		if (function == null || !function.function.IsFunctionType)
+			return false;
+
+		FunctionType functionType = function.function.AsFunctionType;
+		if (functionType == FunctionType.ModelReference)
+			return false;
+
+		if (!RenderFilterDefinitions.IsSupported(functionType))
+			return false;
+
+		uint functionTypeId = (uint)functionType;
+		if (changedFunctionTypes != null && !changedFunctionTypes.Contains(functionTypeId))
+			return false;
+
+		if (!RenderFilters.IsEnabled(functionType))
+			return false;
+
+		return PreviewVisualUtility.IsPreviewVisible(function, ownerCompositeId);
+	}
+
+	private void MaterializeLazyPreviewsForRenderFilters(HashSet<uint> changedFunctionTypes)
+	{
+		if (changedFunctionTypes != null)
+		{
+			bool anyEnabled = false;
+			foreach (uint functionTypeId in changedFunctionTypes)
+			{
+				if (RenderFilters.IsEnabled(functionTypeId))
+				{
+					anyEnabled = true;
+					break;
+				}
+			}
+
+			if (!anyEnabled)
+				return;
+		}
+
+		foreach (KeyValuePair<Node3D, Entity> entry in _nodeEntities)
+		{
+			Node3D entityNode = entry.Key;
+			if (entityNode == null || !GodotObject.IsInstanceValid(entityNode))
+				continue;
+
+			if (entry.Value is not FunctionEntity function)
+				continue;
+
+			if (!entityNode.HasMeta(OwnerCompositeMetaKey))
+				continue;
+
+			uint ownerCompositeId = entityNode.GetMeta(OwnerCompositeMetaKey).AsUInt32();
+			if (!ShouldMaterializeFunctionPreview(function, ownerCompositeId, changedFunctionTypes))
+				continue;
+
+			EnsureLazyFunctionEntityPreview(entityNode);
+		}
+	}
+
+	private void MaterializeLazyPreviewsForComposite(uint ownerCompositeId, HashSet<uint> changedFunctionTypes = null)
+	{
+		foreach (KeyValuePair<Node3D, Entity> entry in _nodeEntities)
+		{
+			Node3D entityNode = entry.Key;
+			if (entityNode == null || !GodotObject.IsInstanceValid(entityNode))
+				continue;
+
+			if (!entityNode.HasMeta(OwnerCompositeMetaKey))
+				continue;
+
+			if (entityNode.GetMeta(OwnerCompositeMetaKey).AsUInt32() != ownerCompositeId)
+				continue;
+
+			if (entry.Value is not FunctionEntity function)
+				continue;
+
+			if (!ShouldMaterializeFunctionPreview(function, ownerCompositeId, changedFunctionTypes))
+				continue;
+
+			EnsureLazyFunctionEntityPreview(entityNode);
+		}
+	}
+
+	private void TrackBulkPopulatePreview(Node3D entityNode, FunctionEntity function)
+	{
+		if (entityNode == null || function == null)
+			return;
+
+		for (int i = entityNode.GetChildCount() - 1; i >= 0; i--)
+		{
+			if (entityNode.GetChild(i) is not FunctionEntityPreview preview)
+				continue;
+
+			_bulkPopulatePreviews.Add(preview);
+			if (preview is ModelReferencePreview modelPreview)
+				_bulkModelReferencePreviews.Add(modelPreview);
+
+			return;
+		}
+	}
+
+	private void RebuildBulkMeshSpawnJobsFromPreviews()
+	{
+		_bulkMeshSpawnJobs.Clear();
+		Dictionary<uint, List<Tuple<int, int>>> sourceRenderablesByEntityId = BuildBulkSourceRenderablesCache();
+		Dictionary<(uint EntityId, uint ScopeId, uint OverrideEntityId), List<Tuple<int, int>>> resolvedRenderablesCache =
+			new Dictionary<(uint, uint, uint), List<Tuple<int, int>>>();
+
+		for (int i = 0; i < _bulkModelReferencePreviews.Count; i++)
+		{
+			ModelReferencePreview modelPreview = _bulkModelReferencePreviews[i];
+			if (modelPreview == null || !GodotObject.IsInstanceValid(modelPreview))
+				continue;
+
+			QueueBulkMeshSpawnJobsForPreview(
+				modelPreview,
+				sourceRenderablesByEntityId,
+				resolvedRenderablesCache);
+		}
+	}
+
+	private Dictionary<uint, List<Tuple<int, int>>> BuildBulkSourceRenderablesCache()
+	{
+		Dictionary<uint, List<Tuple<int, int>>> sourceRenderablesByEntityId =
+			new Dictionary<uint, List<Tuple<int, int>>>();
+		for (int i = 0; i < _bulkModelReferencePreviews.Count; i++)
+		{
+			ModelReferencePreview modelPreview = _bulkModelReferencePreviews[i];
+			if (modelPreview?.Entity == null)
+				continue;
+
+			uint entityId = modelPreview.Entity.shortGUID.AsUInt32;
+			if (sourceRenderablesByEntityId.ContainsKey(entityId))
+				continue;
+
+			sourceRenderablesByEntityId[entityId] =
+				ModelReferencePreview.GetRenderableIndexes(_content, modelPreview.Entity);
+		}
+
+		return sourceRenderablesByEntityId;
+	}
+
+	private void QueueBulkMeshSpawnJobsForPreview(
+		ModelReferencePreview modelPreview,
+		Dictionary<uint, List<Tuple<int, int>>> sourceRenderablesByEntityId,
+		Dictionary<(uint EntityId, uint ScopeId, uint OverrideEntityId), List<Tuple<int, int>>> resolvedRenderablesCache)
+	{
+		if (modelPreview?.Entity == null)
+			return;
+
+		uint entityId = modelPreview.Entity.shortGUID.AsUInt32;
+		uint scopeId = modelPreview.MappingScopeInstanceEntityId;
+		if (!sourceRenderablesByEntityId.TryGetValue(entityId, out List<Tuple<int, int>> sourceRenderables)
+			|| sourceRenderables == null
+			|| sourceRenderables.Count == 0)
+		{
+			return;
+		}
+
+		Node3D renderTarget = modelPreview.GetPopulateRenderTarget();
+		if (renderTarget == null)
+			return;
+
+		uint overrideParameterEntityId = entityId;
+		if (_aliasParameterEntityByRenderTarget != null
+			&& _aliasParameterEntityByRenderTarget.TryGetValue(renderTarget, out Entity aliasEntity)
+			&& aliasEntity != null)
+		{
+			overrideParameterEntityId = aliasEntity.shortGUID.AsUInt32;
+		}
+
+		(uint EntityId, uint ScopeId, uint OverrideEntityId) resolvedKey =
+			(entityId, scopeId, overrideParameterEntityId);
+		if (!resolvedRenderablesCache.TryGetValue(resolvedKey, out List<Tuple<int, int>> renderables))
+		{
+			if (!TryGetMappedModelRefRenderables(
+					entityId,
+					scopeId,
+					sourceRenderables,
+					modelPreview,
+					out List<Tuple<int, int>> mapped))
+				return;
+
+			Entity parameterEntity = overrideParameterEntityId == entityId
+				? modelPreview.Entity
+				: ModelReferenceMaterialMapping.TryGetEntityById(overrideParameterEntityId);
+			if (ModelReferenceMaterialOverrides.NeedsInstanceMaterialRemap(parameterEntity, modelPreview.Entity))
+			{
+				renderables = new List<Tuple<int, int>>(mapped);
+				ModelReferenceMaterialOverrides.TryApplyMaterialParameterOverride(
+					_content.Level,
+					parameterEntity,
+					modelPreview.Entity,
+					renderables);
+			}
+			else
+			{
+				renderables = mapped;
+			}
+
+			resolvedRenderablesCache[resolvedKey] = renderables;
+		}
+
+		if (renderables == null || renderables.Count == 0)
+			return;
+
+		int count = Math.Min(sourceRenderables.Count, renderables.Count);
+		for (int j = 0; j < count; j++)
+		{
+			Tuple<int, int> renderable = renderables[j];
+			Tuple<int, int> source = sourceRenderables[j];
+			if (renderable.Item1 < 0 || renderable.Item2 < 0)
+				continue;
+
+			int sourceMaterialWriteIndex = source != null ? source.Item2 : renderable.Item2;
+			_bulkMeshSpawnJobs.Add(new BulkMeshSpawnJob(
+				renderTarget,
+				renderable.Item1,
+				renderable.Item2,
+				sourceMaterialWriteIndex,
+				entityId,
+				overrideParameterEntityId));
+		}
+	}
+
+	private bool TryGetMappedModelRefRenderables(
+		uint entityId,
+		uint scopeId,
+		List<Tuple<int, int>> sourceRenderables,
+		ModelReferencePreview preview,
+		out List<Tuple<int, int>> mapped)
+	{
+		if (TryGetModelRefRenderables(entityId, scopeId, out mapped) && mapped != null && mapped.Count > 0)
+			return true;
+
+		if (scopeId != 0
+			&& TryGetModelRefRenderables(entityId, 0, out mapped)
+			&& mapped != null
+			&& mapped.Count > 0)
+		{
+			return true;
+		}
+
+		if (preview != null)
+		{
+			mapped = preview.GetResolvedRenderableIndexes();
+			return mapped != null && mapped.Count > 0;
+		}
+
+		mapped = sourceRenderables;
+		return mapped != null && mapped.Count > 0;
+	}
+
 	private void EnsureFunctionEntityPreviewCache()
 	{
 		if (!_functionEntityPreviewsCacheDirty)
 			return;
 
-		_cachedFunctionEntityPreviews = _parentNode == null
-			? Array.Empty<FunctionEntityPreview>()
-			: EntityNodeUtil.FindAllPreviews(_parentNode);
+		if (_bulkPopulatePreviews.Count > 0)
+			_cachedFunctionEntityPreviews = _bulkPopulatePreviews.ToArray();
+		else if (_parentNode == null)
+			_cachedFunctionEntityPreviews = System.Array.Empty<FunctionEntityPreview>();
+		else
+			_cachedFunctionEntityPreviews = EntityNodeUtil.FindAllPreviews(_parentNode);
 		_previewsByOwnerComposite.Clear();
 
 		for (int i = 0; i < _cachedFunctionEntityPreviews.Length; i++)
@@ -1351,17 +2844,20 @@ public partial class AlienScene : Node3D
 		if (_parentNode == null)
 			return;
 
-		EnsureFunctionEntityPreviewCache();
-
 		if (previousActiveCompositeId != 0)
 			RefreshVisibilityForComposite(previousActiveCompositeId);
 
 		if (newActiveCompositeId != 0 && newActiveCompositeId != previousActiveCompositeId)
 			RefreshVisibilityForComposite(newActiveCompositeId);
+
+		RefreshCompositeFocus();
 	}
 
 	private void RefreshVisibilityForComposite(uint ownerCompositeId)
 	{
+		MaterializeLazyPreviewsForComposite(ownerCompositeId);
+		EnsureFunctionEntityPreviewCache();
+
 		if (!_previewsByOwnerComposite.TryGetValue(ownerCompositeId, out List<FunctionEntityPreview> previews))
 			return;
 
@@ -1378,6 +2874,7 @@ public partial class AlienScene : Node3D
 		if (_parentNode == null)
 			return;
 
+		MaterializeLazyPreviewsForRenderFilters(changedFunctionTypes);
 		EnsureFunctionEntityPreviewCache();
 
 		for (int i = 0; i < _cachedFunctionEntityPreviews.Length; i++)
@@ -1400,8 +2897,11 @@ public partial class AlienScene : Node3D
 			}
 
 			preview.Refresh();
-			preview.RegisterPickablesWithOwner();
+			preview.SyncPickablesWithVisibility();
 		}
+
+		RefreshCompositeFocus();
+		RefreshSelectedLightRadiusVisual();
 	}
 
 	private void ApplyVectorVisual(ParameterVisualContext context)
@@ -1554,24 +3054,39 @@ public partial class AlienScene : Node3D
 		if (parent == null)
 			return;
 
-		foreach (Node child in parent.GetChildren().ToArray())
+		for (int i = parent.GetChildCount() - 1; i >= 0; i--)
 		{
-			if (child is MeshInstance3D)
-				child.QueueFree();
+			if (parent.GetChild(i) is MeshInstance3D mesh)
+				mesh.QueueFree();
 		}
 	}
 
-	public void SpawnRenderable(Node3D parent, Models.CS2.Component.LOD.Submesh submesh, Materials.Material material)
+	public void SpawnRenderable(
+		Node3D parent,
+		Models.CS2.Component.LOD.Submesh submesh,
+		Materials.Material material,
+		int sourceMaterialWriteIndex = -1,
+		Entity modelReferenceEntity = null,
+		Entity overrideParameterEntity = null,
+		Entity fallbackParameterEntity = null)
 	{
-		CreateRenderable(parent, submesh, material);
+		CreateRenderable(
+			parent,
+			submesh,
+			material,
+			sourceMaterialWriteIndex,
+			modelReferenceEntity,
+			overrideParameterEntity,
+			fallbackParameterEntity);
 	}
 
 	public void SetModelReferenceWireframe(bool enabled)
 	{
 		ModelReferenceRenderSettings.SetWireframe(enabled);
 		if (!enabled)
-			HideAllWireframeOverlays();
-		ApplyModelReferenceWireframeToMeshes();
+			DestroyAllWireframeOverlays();
+		else
+			ApplyModelReferenceWireframeToMeshes();
 	}
 
 	public void RepositionEntity(ShortGuid composite, ShortGuid entity, Vector3 position, Vector3 rotationDegrees, bool fromPointer, bool pointedPos)
@@ -1603,34 +3118,63 @@ public partial class AlienScene : Node3D
 	public void RemoveEntity(ShortGuid composite, ShortGuid entity)
 	{
 		string entityNodeName = entity.AsUInt32.ToString();
-		if (_compositeNodes.ContainsKey(composite))
+		bool removed = false;
+		int instancesProcessed = 0;
+
+		if (_compositeNodes.TryGetValue(composite, out List<Node3D> compositeInstances))
 		{
-			foreach (Node3D compositeInstance in _compositeNodes[composite])
+			// Snapshot: QueueFree / restore-pointed below can mutate the tree and this list.
+			foreach (Node3D compositeInstance in compositeInstances.ToArray())
 			{
 				if (compositeInstance == null || !GodotObject.IsInstanceValid(compositeInstance))
 					continue;
 
 				foreach (Node child in compositeInstance.GetChildren().ToArray())
 				{
-					if (child.Name == entityNodeName && child is Node3D entityNode)
+					if (child == null || !GodotObject.IsInstanceValid(child))
+						continue;
+					if (child.Name != entityNodeName || child is not Node3D entityNode)
+						continue;
+
+					// One bad instance must not abort the whole removal (and must not escape to
+					// the engine callback as a hard failure). Native use-after-free can't be caught
+					// here, which is why every node touched below is IsInstanceValid-guarded first.
+					try
 					{
 						EntityOverride entityOverride = entityNode as EntityOverride;
-						if (entityOverride?.PointedEntity != null
-							&& _nodeEntities.TryGetValue(entityOverride.PointedEntity, out Entity pointedEntity))
+						Node3D pointedNode = entityOverride?.PointedEntity;
+						if (pointedNode != null
+							&& GodotObject.IsInstanceValid(pointedNode)
+							&& _nodeEntities.TryGetValue(pointedNode, out Entity pointedEntity))
 						{
+							// Restore the pointed (aliased/proxied) entity to its own transform now that
+							// the override pointing at it is going away.
 							GetEntityTransform(pointedEntity, out Vector3 position, out Vector3 rotation);
-							entityOverride.PointedEntity.Position = position;
-							entityOverride.PointedEntity.RotationDegrees = rotation;
-							EntityNodeUtil.SetPointed(entityOverride.PointedEntity, false);
+							pointedNode.Position = position;
+							pointedNode.RotationDegrees = rotation;
+							EntityNodeUtil.SetPointed(pointedNode, false);
 						}
 
 						UntrackEntityNode(composite, entity, entityNode);
 						entityNode.QueueFree();
 						_nodeEntities.Remove(entityNode);
 						_functionEntityPreviewsCacheDirty = true;
+						removed = true;
+						instancesProcessed++;
+					}
+					catch (Exception ex)
+					{
+						ViewerLog.PrintErr("[Viewer] RemoveEntity instance failed (" + entityNodeName + "): " + ex);
 					}
 				}
 			}
+		}
+
+		if (removed)
+		{
+			ViewerLog.Print("Removed entity " + entityNodeName + " x" + instancesProcessed + "; rebuilding highlights");
+			RefreshEntityHighlights(forceRebuild: true);
+			ViewerLog.Print("Removed entity " + entityNodeName + " complete");
 		}
 	}
 
@@ -1650,35 +3194,91 @@ public partial class AlienScene : Node3D
 		}
 	}
 
-	private void CreateRenderable(Node3D parent, Models.CS2.Component.LOD.Submesh submesh, Materials.Material material)
+	private void CreateRenderable(
+		Node3D parent,
+		Models.CS2.Component.LOD.Submesh submesh,
+		Materials.Material material,
+		int sourceMaterialWriteIndex = -1,
+		Entity modelReferenceEntity = null,
+		Entity overrideParameterEntity = null,
+		Entity fallbackParameterEntity = null)
 	{
 		MeshHolder holder = GetModel(submesh);
 		if (holder == null || holder.MainMesh == null || holder.MainMesh.GetSurfaceCount() == 0)
 		{
-			GD.Print("Attempted to load non-parsed model. Skipping!");
+			ViewerLog.Print("Attempted to load non-parsed model. Skipping!");
 			return;
 		}
 
 		if (!IsMaterialSupported(material))
 			return;
 
-		ModelReferenceRenderSettings.NotifyMeshSpawned(_modelReferenceMeshes.Count + 1);
+		if (!_bulkMeshSpawning)
+			ModelReferenceRenderSettings.NotifyMeshSpawned(_modelReferenceMeshes.Count + 1);
 
 		MeshInstance3D meshInstance = new MeshInstance3D
 		{
-			Name = holder.MainMesh.ResourceName + " (" + material.Name + ")",
 			Mesh = holder.MainMesh,
-			Visible = true,
+			Visible = !_deferMeshTreeActivation,
 		};
+		if (!_bulkMeshSpawning)
+			meshInstance.Name = holder.MainMesh.ResourceName + " (" + material.Name + ")";
+
+		if (sourceMaterialWriteIndex >= 0)
+		{
+			meshInstance.SetMeta(
+				ModelReferenceMaterialMapping.SourceMaterialWriteIndexMetaKey,
+				sourceMaterialWriteIndex);
+		}
+
+		if (TryResolveSubmeshWriteIndex(submesh, out int modelWriteIndex))
+		{
+			meshInstance.SetMeta(
+				ModelReferenceMaterialMapping.ModelWriteIndexMetaKey,
+				modelWriteIndex);
+		}
+
+		if (modelReferenceEntity != null)
+		{
+			meshInstance.SetMeta(
+				ModelReferenceMaterialOverrides.ModelReferenceEntityMetaKey,
+				modelReferenceEntity.shortGUID.AsUInt32);
+		}
+
+		Entity parameterEntity = overrideParameterEntity ?? modelReferenceEntity;
+		if (parameterEntity != null)
+		{
+			meshInstance.SetMeta(
+				ModelReferenceMaterialOverrides.OverrideParameterEntityMetaKey,
+				parameterEntity.shortGUID.AsUInt32);
+		}
+
+		Entity fallbackEntity = fallbackParameterEntity ?? modelReferenceEntity;
 		LevelViewerMeshUtil.ConfigureMeshInstance(meshInstance);
-		meshInstance.AddToGroup("model_reference_renderable");
-		meshInstance.TreeExited += () => _modelReferenceMeshes.Remove(meshInstance);
+		if (!_bulkMeshSpawning)
+			meshInstance.AddToGroup("model_reference_renderable");
+		if (!_bulkMeshSpawning)
+			meshInstance.TreeExited += () => _modelReferenceMeshes.Remove(meshInstance);
 		_modelReferenceMeshes[meshInstance] = material;
-		meshInstance.MaterialOverride = GetSolidMaterial(material);
+		meshInstance.MaterialOverride = GetSolidMaterialForModelReference(
+			material,
+			modelReferenceEntity,
+			parameterEntity,
+			fallbackEntity);
 		parent.AddChild(meshInstance);
-		if (ModelReferenceRenderSettings.WireframeEnabled)
-			UpdateWireframeOverlay(meshInstance, material);
-		LevelViewerPick.RegisterPickableMesh(meshInstance, parent);
+		if (!_bulkMeshSpawning && ModelReferenceRenderSettings.WireframeEnabled)
+			UpdateWireframeOverlay(meshInstance, material, modelReferenceEntity, parameterEntity, fallbackEntity);
+		if (_deferBulkPickRegistration)
+			_bulkPickableMeshes.Add((meshInstance, parent));
+		else if (!_bulkMeshSpawning)
+			LevelViewerPick.RegisterPickableMesh(meshInstance, parent);
+		if (_deferMeshTreeActivation)
+		{
+			meshInstance.Visible = false;
+			MeshInstance3D overlay = FindWireframeOverlay(meshInstance);
+			if (overlay != null)
+				overlay.Visible = false;
+		}
 	}
 
 	private void QueueLargeSceneRenderPolicyApply()
@@ -1690,6 +3290,7 @@ public partial class AlienScene : Node3D
 		_largeScenePolicyMeshes = _modelReferenceMeshes.Keys.ToArray();
 		_largeScenePolicyIndex = 0;
 		_largeScenePolicyRunning = _largeScenePolicyMeshes.Length > 0;
+		SetProcess(true);
 	}
 
 	private void CancelLargeSceneRenderPolicy()
@@ -1723,28 +3324,75 @@ public partial class AlienScene : Node3D
 		{
 			_largeScenePolicyRunning = false;
 			_largeScenePolicyMeshes = System.Array.Empty<MeshInstance3D>();
+			UpdateLoadPipelineProcessing();
 		}
 	}
 
 	private bool GetEntityTransform(Entity entity, out Vector3 position, out Vector3 rotation)
 	{
-		position = Vector3.Zero;
-		rotation = Vector3.Zero;
-		if (entity == null) return false;
+		return LevelViewerPopulateTree.TryGetSpawnTransform(entity, out position, out rotation);
+	}
 
-		Parameter positionParam = entity.GetParameter("position");
-		if (positionParam != null && positionParam.content != null)
+	private void BuildSubmeshWriteIndexCache()
+	{
+		_submeshWriteIndexByReference.Clear();
+		Models models = _content?.Level?.Models;
+		if (models?.Entries == null)
+			return;
+
+		object gate = new object();
+		System.Threading.Tasks.Parallel.ForEach(models.Entries, model =>
 		{
-			switch (positionParam.content.dataType)
+			if (model?.Components == null)
+				return;
+
+			foreach (Models.CS2.Component component in model.Components)
 			{
-				case DataType.TRANSFORM:
-					cTransform transform = (cTransform)positionParam.content;
-					position = CathodeCoordinates.PositionToGodot(transform.position);
-					rotation = CathodeCoordinates.EulerDegreesToGodot(transform.rotation);
-					return true;
+				if (component?.LODs == null)
+					continue;
+
+				foreach (Models.CS2.Component.LOD lod in component.LODs)
+				{
+					if (lod?.Submeshes == null)
+						continue;
+
+					foreach (Models.CS2.Component.LOD.Submesh submesh in lod.Submeshes)
+					{
+						if (submesh == null)
+							continue;
+
+						int writeIndex = models.GetWriteIndex(submesh);
+						if (writeIndex < 0)
+							continue;
+
+						lock (gate)
+						{
+							_submeshWriteIndexByReference[submesh] = writeIndex;
+						}
+					}
+				}
 			}
-		}
-		return false;
+		});
+	}
+
+	private bool TryResolveSubmeshWriteIndex(Models.CS2.Component.LOD.Submesh submesh, out int writeIndex)
+	{
+		writeIndex = -1;
+		if (submesh == null)
+			return false;
+
+		if (_submeshWriteIndexByReference.TryGetValue(submesh, out writeIndex))
+			return writeIndex >= 0;
+
+		Models models = _content?.Level?.Models;
+		if (models == null)
+			return false;
+
+		writeIndex = models.GetWriteIndex(submesh);
+		if (writeIndex >= 0)
+			_submeshWriteIndexByReference[submesh] = writeIndex;
+
+		return writeIndex >= 0;
 	}
 
 	private MeshHolder GetModel(Models.CS2.Component.LOD.Submesh submesh)
@@ -1752,30 +3400,209 @@ public partial class AlienScene : Node3D
 		if (submesh == null)
 			return null;
 
-		if (!_modelMeshes.ContainsKey(submesh))
+		if (TryResolveSubmeshWriteIndex(submesh, out int writeIndex)
+			&& _modelMeshesByWriteIndex.TryGetValue(writeIndex, out MeshHolder cached))
 		{
-			Models.CS2.Component.LOD lod = _content.Level.Models.FindModelLOD(submesh);
-			Models.CS2 mesh = _content.Level.Models.FindModel(submesh);
-			string modelName = ((mesh == null) ? "?" : mesh.Name) + ": " + ((lod == null) ? "?" : lod.Name);
-			ArrayMesh arrayMesh = submesh.ToArrayMesh();
-			arrayMesh.ResourceName = modelName;
-
-			submesh.Data = null;
-
-			MeshHolder holder = new MeshHolder
-			{
-				MainMesh = arrayMesh,
-				DefaultMaterial = submesh.Material,
-			};
-			_modelMeshes.Add(submesh, holder);
+			return cached;
 		}
-		return _modelMeshes[submesh];
+
+		Models models = _content?.Level?.Models;
+		Models.CS2.Component.LOD.Submesh sourceSubmesh = submesh;
+		if (writeIndex >= 0 && models != null)
+		{
+			Models.CS2.Component.LOD.Submesh canonical = models.GetAtWriteIndex(writeIndex);
+			if (canonical != null)
+				sourceSubmesh = canonical;
+		}
+
+		if (sourceSubmesh.Data == null || sourceSubmesh.Data.Length == 0)
+		{
+			if (writeIndex >= 0 && _modelMeshesByWriteIndex.TryGetValue(writeIndex, out cached))
+				return cached;
+
+			ViewerLog.PrintErr("Submesh mesh data is not available and no Godot cache exists.");
+			return null;
+		}
+
+		Models.CS2.Component.LOD lod = models.FindModelLOD(sourceSubmesh);
+		Models.CS2 mesh = models.FindModel(sourceSubmesh);
+		string modelName = ((mesh == null) ? "?" : mesh.Name) + ": " + ((lod == null) ? "?" : lod.Name);
+		ArrayMesh arrayMesh = sourceSubmesh.ToArrayMesh();
+		if (arrayMesh == null || arrayMesh.GetSurfaceCount() == 0)
+		{
+			arrayMesh?.Dispose();
+			return null;
+		}
+
+		arrayMesh.ResourceName = modelName;
+		arrayMesh.ResourceLocalToScene = false;
+		sourceSubmesh.Data = null;
+
+		MeshHolder holder = new MeshHolder
+		{
+			MainMesh = arrayMesh,
+			DefaultMaterial = sourceSubmesh.Material,
+		};
+
+		if (writeIndex >= 0)
+			_modelMeshesByWriteIndex[writeIndex] = holder;
+
+		return holder;
 	}
 
 	private bool IsMaterialSupported(Materials.Material material)
 	{
 		EnsureSolidMaterial(material);
 		return _materialSupport[_materials[material]];
+	}
+
+	private ShaderMaterial GetSolidMaterialForModelReference(
+		Materials.Material material,
+		Entity modelReferenceEntity,
+		Entity overrideParameterEntity = null,
+		Entity fallbackParameterEntity = null)
+	{
+		if (TryCreateModelReferenceMaterial(
+			material,
+			modelReferenceEntity,
+			overrideParameterEntity,
+			fallbackParameterEntity,
+			wireframe: false,
+			out ShaderMaterial customMaterial))
+		{
+			return customMaterial;
+		}
+
+		return GetSolidMaterial(material);
+	}
+
+	private ShaderMaterial GetWireframeMaterialForModelReference(
+		Materials.Material material,
+		Entity modelReferenceEntity,
+		Entity overrideParameterEntity = null,
+		Entity fallbackParameterEntity = null)
+	{
+		if (TryCreateModelReferenceMaterial(
+			material,
+			modelReferenceEntity,
+			overrideParameterEntity,
+			fallbackParameterEntity,
+			wireframe: true,
+			out ShaderMaterial customMaterial))
+		{
+			return customMaterial;
+		}
+
+		return GetWireframeMaterial(material);
+	}
+
+	private bool TryCreateModelReferenceMaterial(
+		Materials.Material material,
+		Entity modelReferenceEntity,
+		Entity overrideParameterEntity,
+		Entity fallbackParameterEntity,
+		bool wireframe,
+		out ShaderMaterial shaderMaterial)
+	{
+		shaderMaterial = null;
+		Entity parameterEntity = overrideParameterEntity ?? modelReferenceEntity;
+		Entity fallbackEntity = fallbackParameterEntity ?? modelReferenceEntity;
+		if (parameterEntity == null)
+			return false;
+
+		if (!ModelReferenceMaterialOverrides.TryGetEnvironmentColourScalars(
+				parameterEntity,
+				fallbackEntity,
+				material,
+				out ModelReferenceMaterialOverrides.EnvironmentColourScalars scalars)
+			|| scalars.IsDefault)
+		{
+			return false;
+		}
+
+		uint parameterEntityId = parameterEntity?.shortGUID.AsUInt32 ?? 0;
+		uint fallbackEntityId = fallbackEntity?.shortGUID.AsUInt32 ?? 0;
+		int materialWriteIndex = _content.Level.Materials.GetWriteIndex(material);
+		ulong cacheKey = MakeModelReferenceOverrideMaterialKey(
+			materialWriteIndex,
+			parameterEntityId,
+			fallbackEntityId,
+			scalars,
+			wireframe);
+		if (_modelReferenceOverrideMaterials.TryGetValue(cacheKey, out ShaderMaterial cachedMaterial)
+			&& cachedMaterial != null
+			&& GodotObject.IsInstanceValid(cachedMaterial))
+		{
+			shaderMaterial = cachedMaterial;
+			return true;
+		}
+
+		int diffuseSampler = AlienSceneMaterials.GetDiffuseSamplerIndex(material.Shader);
+		if (diffuseSampler < 0)
+			return false;
+
+		if (wireframe)
+		{
+			shaderMaterial = AlienSceneMaterials.CreateWireframeMaterial(
+				material,
+				material.Shader,
+				this,
+				material.Name + " " + material.Shader.Ubershader,
+				diffuseSampler,
+				scalars);
+		}
+		else
+		{
+			shaderMaterial = AlienSceneMaterials.GetMaterial(material, this, scalars).Material;
+		}
+
+		if (shaderMaterial != null)
+			_modelReferenceOverrideMaterials[cacheKey] = shaderMaterial;
+
+		return shaderMaterial != null;
+	}
+
+	private static ulong MakeModelReferenceOverrideMaterialKey(
+		int materialWriteIndex,
+		uint parameterEntityId,
+		uint fallbackEntityId,
+		ModelReferenceMaterialOverrides.EnvironmentColourScalars scalars,
+		bool wireframe)
+	{
+		ulong hash = (ulong)(uint)materialWriteIndex;
+		hash = unchecked(hash * 397 + parameterEntityId);
+		hash = unchecked(hash * 397 + fallbackEntityId);
+		hash = unchecked(hash * 397 + (wireframe ? 1u : 0u));
+		hash = unchecked(hash * 397 + (uint)scalars.Vertex.GetHashCode());
+		hash = unchecked(hash * 397 + (uint)scalars.Diffuse.GetHashCode());
+		return hash;
+	}
+
+	private Entity ResolveModelReferenceEntityFromMesh(MeshInstance3D meshInstance)
+	{
+		if (meshInstance == null || !meshInstance.HasMeta(ModelReferenceMaterialOverrides.ModelReferenceEntityMetaKey))
+			return null;
+
+		uint entityId = meshInstance.GetMeta(ModelReferenceMaterialOverrides.ModelReferenceEntityMetaKey).AsUInt32();
+		return ModelReferenceMaterialMapping.TryGetEntityById(entityId);
+	}
+
+	private void ResolveMaterialOverrideEntitiesFromMesh(
+		MeshInstance3D meshInstance,
+		out Entity modelReferenceEntity,
+		out Entity overrideParameterEntity,
+		out Entity fallbackParameterEntity)
+	{
+		modelReferenceEntity = ResolveModelReferenceEntityFromMesh(meshInstance);
+		fallbackParameterEntity = modelReferenceEntity;
+		overrideParameterEntity = modelReferenceEntity;
+		if (meshInstance == null || !meshInstance.HasMeta(ModelReferenceMaterialOverrides.OverrideParameterEntityMetaKey))
+			return;
+
+		uint overrideEntityId = meshInstance.GetMeta(ModelReferenceMaterialOverrides.OverrideParameterEntityMetaKey).AsUInt32();
+		Entity resolvedOverride = ModelReferenceMaterialMapping.TryGetEntityById(overrideEntityId);
+		if (resolvedOverride != null)
+			overrideParameterEntity = resolvedOverride;
 	}
 
 	private ShaderMaterial GetSolidMaterial(Materials.Material material)
@@ -1804,6 +3631,34 @@ public partial class AlienScene : Node3D
 		return _wireframeMaterials[material];
 	}
 
+	private void ClearPopulateMaterialCaches()
+	{
+		foreach (KeyValuePair<Materials.Material, ShaderMaterial> entry in _materials)
+		{
+			if (entry.Value != null && GodotObject.IsInstanceValid(entry.Value))
+				entry.Value.Dispose();
+		}
+
+		_materials.Clear();
+		_materialSupport.Clear();
+
+		foreach (KeyValuePair<Materials.Material, ShaderMaterial> entry in _wireframeMaterials)
+		{
+			if (entry.Value != null && GodotObject.IsInstanceValid(entry.Value))
+				entry.Value.Dispose();
+		}
+
+		_wireframeMaterials.Clear();
+
+		foreach (KeyValuePair<ulong, ShaderMaterial> entry in _modelReferenceOverrideMaterials)
+		{
+			if (entry.Value != null && GodotObject.IsInstanceValid(entry.Value))
+				entry.Value.Dispose();
+		}
+
+		_modelReferenceOverrideMaterials.Clear();
+	}
+
 	private void EnsureSolidMaterial(Materials.Material material)
 	{
 		if (_materials.ContainsKey(material))
@@ -1817,14 +3672,46 @@ public partial class AlienScene : Node3D
 	private const string WireframeOverlayNodeName = "WireframeOverlay";
 	private const string LegacyWireframeOverlaySuffix = " WireframeOverlay";
 
-	private void ApplyModelReferenceMaterial(MeshInstance3D solidMesh, Materials.Material material)
+	private void ApplyModelReferenceMaterial(
+		MeshInstance3D solidMesh,
+		Materials.Material material,
+		Entity modelReferenceEntity = null,
+		Entity overrideParameterEntity = null,
+		Entity fallbackParameterEntity = null)
 	{
-		solidMesh.MaterialOverride = GetSolidMaterial(material);
-		UpdateWireframeOverlay(solidMesh, material);
+		if (modelReferenceEntity == null || overrideParameterEntity == null || fallbackParameterEntity == null)
+			ResolveMaterialOverrideEntitiesFromMesh(
+				solidMesh,
+				out modelReferenceEntity,
+				out overrideParameterEntity,
+				out fallbackParameterEntity);
+
+		solidMesh.MaterialOverride = GetSolidMaterialForModelReference(
+			material,
+			modelReferenceEntity,
+			overrideParameterEntity,
+			fallbackParameterEntity);
+		UpdateWireframeOverlay(
+			solidMesh,
+			material,
+			modelReferenceEntity,
+			overrideParameterEntity,
+			fallbackParameterEntity);
 	}
 
-	private void UpdateWireframeOverlay(MeshInstance3D solidMesh, Materials.Material material)
+	private void UpdateWireframeOverlay(
+		MeshInstance3D solidMesh,
+		Materials.Material material,
+		Entity modelReferenceEntity = null,
+		Entity overrideParameterEntity = null,
+		Entity fallbackParameterEntity = null)
 	{
+		if (modelReferenceEntity == null || overrideParameterEntity == null || fallbackParameterEntity == null)
+			ResolveMaterialOverrideEntitiesFromMesh(
+				solidMesh,
+				out modelReferenceEntity,
+				out overrideParameterEntity,
+				out fallbackParameterEntity);
 		RemoveLegacySiblingWireframeOverlay(solidMesh);
 
 		MeshInstance3D overlay = FindWireframeOverlay(solidMesh);
@@ -1840,7 +3727,11 @@ public partial class AlienScene : Node3D
 
 		if (overlay != null)
 		{
-			ShaderMaterial wireframe = GetWireframeMaterial(material);
+			ShaderMaterial wireframe = GetWireframeMaterialForModelReference(
+				material,
+				modelReferenceEntity,
+				overrideParameterEntity,
+				fallbackParameterEntity);
 			if (wireframe != null)
 				overlay.MaterialOverride = wireframe;
 			overlay.Visible = true;
@@ -1889,17 +3780,24 @@ public partial class AlienScene : Node3D
 		return overlay;
 	}
 
-	private void HideAllWireframeOverlays()
+	private void DestroyAllWireframeOverlays()
 	{
 		SceneTree tree = GetTree();
-		if (tree == null)
-			return;
-
-		foreach (Node node in tree.GetNodesInGroup("model_reference_wireframe_overlay"))
+		if (tree != null)
 		{
-			if (node is MeshInstance3D meshInstance && GodotObject.IsInstanceValid(meshInstance))
-				meshInstance.Visible = false;
+			foreach (Node node in tree.GetNodesInGroup("model_reference_wireframe_overlay"))
+			{
+				if (node is Node3D node3D && GodotObject.IsInstanceValid(node3D))
+					node3D.QueueFree();
+			}
 		}
+
+		foreach (KeyValuePair<Materials.Material, ShaderMaterial> entry in _wireframeMaterials)
+		{
+			if (entry.Value != null && GodotObject.IsInstanceValid(entry.Value))
+				entry.Value.Dispose();
+		}
+		_wireframeMaterials.Clear();
 	}
 
 	private void ApplyModelReferenceWireframeToMeshes()
@@ -1923,7 +3821,7 @@ public partial class AlienScene : Node3D
 
 	public Texture2D GetDiffuseTexture(Materials.Material material, Shaders.Shader shader, int samplerIndex)
 	{
-		if (shader.SamplerRemaps.Count <= samplerIndex)
+		if (samplerIndex < 0 || shader.SamplerRemaps.Count <= samplerIndex)
 			return null;
 
 		int diffuseMapIndex = shader.SamplerRemaps[samplerIndex];
@@ -1938,21 +3836,49 @@ public partial class AlienScene : Node3D
 		return texture?.Texture;
 	}
 
+	private Textures GetTexturesForSource(TexturePtr.Source source) =>
+		source == TexturePtr.Source.GLOBAL ? LevelContent.Global?.Textures : _content?.Level?.Textures;
+
+	private Dictionary<int, TexOrCube> GetTextureCacheForSource(TexturePtr.Source source) =>
+		source == TexturePtr.Source.GLOBAL ? _texturesGlobalByIndex : _texturesLevelByIndex;
+
+	private int GetTextureWriteIndex(Textures.TEX4 tex, TexturePtr.Source source)
+	{
+		if (tex == null)
+			return -1;
+
+		return GetTexturesForSource(source)?.GetWriteIndex(tex) ?? -1;
+	}
+
+	private bool TryGetCachedTexture(TexturePtr.Source source, int writeIndex, out TexOrCube cached)
+	{
+		cached = null;
+		if (writeIndex < 0)
+			return false;
+
+		return GetTextureCacheForSource(source).TryGetValue(writeIndex, out cached);
+	}
+
+	private void StoreCachedTexture(TexturePtr.Source source, int writeIndex, TexOrCube tex)
+	{
+		if (writeIndex < 0 || tex == null)
+			return;
+
+		GetTextureCacheForSource(source)[writeIndex] = tex;
+	}
+
 	private TexOrCube GetTexOrCube(TexturePtr ptr)
 	{
 		if (ptr == null || ptr.Location == TexturePtr.Source.NONE || ptr.Texture == null)
 			return null;
 
-		if (!((ptr.Location == TexturePtr.Source.GLOBAL && !_texturesGlobal.ContainsKey(ptr.Texture)) ||
-			  (ptr.Location == TexturePtr.Source.LEVEL && !_texturesLevel.ContainsKey(ptr.Texture))))
-		{
-			if (ptr.Location == TexturePtr.Source.GLOBAL)
-				return _texturesGlobal[ptr.Texture];
-			return _texturesLevel[ptr.Texture];
-		}
+		int writeIndex = GetTextureWriteIndex(ptr.Texture, ptr.Location);
+		if (writeIndex >= 0 && TryGetCachedTexture(ptr.Location, writeIndex, out TexOrCube cached))
+			return cached;
 
-		if (ptr.Texture == null) return null;
-		Textures.TEX4.Texture texPart = AlienSceneTextures.GetTextureDataPart(ptr.Texture);
+		Dictionary<int, TexOrCube> cache = GetTextureCacheForSource(ptr.Location);
+
+		Textures.TEX4.Texture texPart = SelectTexPartForConversion(ptr.Texture);
 		if (texPart == null)
 			return null;
 
@@ -1962,7 +3888,7 @@ public partial class AlienScene : Node3D
 			Image.Format format = AlienSceneTextures.MapImageFormat(ptr.Texture.Format);
 			if (format == Image.Format.Max)
 			{
-				GD.PrintErr("Unsupported cubemap texture format: " + ptr.Texture.Format);
+				ViewerLog.PrintErr("Unsupported cubemap texture format: " + ptr.Texture.Format);
 				return null;
 			}
 
@@ -1977,26 +3903,237 @@ public partial class AlienScene : Node3D
 				ptr.Texture.Format,
 				ptr.Texture.Name);
 			if (image != null && !image.IsEmpty())
+			{
 				tex.Texture = ImageTexture.CreateFromImage(image);
+				if (tex.Texture != null)
+				{
+					tex.Texture.ResourceLocalToScene = false;
+					AlienSceneTextures.RegisterTransparency(
+						tex.Texture,
+						AlienSceneTextures.DetectTransparencyFromContent(
+							texPart.Content,
+							(int)texPart.Width,
+							(int)texPart.Height,
+							ptr.Texture.Format));
+				}
+			}
 		}
 		else
 		{
 			tex.Texture = AlienSceneTextures.CreateTextureFromTexPart(texPart, ptr.Texture.Format, ptr.Texture.Name);
 		}
 
-		if (ptr.Texture.TextureStreamed != null)
-			ptr.Texture.TextureStreamed.Content = null;
-		if (ptr.Texture.TexturePersistent != null)
-			ptr.Texture.TexturePersistent.Content = null;
+		if (tex.Texture == null)
+			return null;
 
-		if (ptr.Location == TexturePtr.Source.GLOBAL)
-			_texturesGlobal.Add(ptr.Texture, tex);
-		else
-			_texturesLevel.Add(ptr.Texture, tex);
+		ReleaseTex4SourceContent(ptr.Texture);
+
+		if (writeIndex >= 0)
+			cache[writeIndex] = tex;
 
 		return tex;
 	}
 
+	private void FinalizePrewarmGodotResources(
+		LevelViewerPopulatePrewarm.Result result,
+		LevelViewerPopulatePrewarm.Plan plan)
+	{
+		if (result == null || plan == null || _content?.Level == null)
+			return;
+
+		Models models = _content.Level.Models;
+		int meshCount = 0;
+		int textureCount = 0;
+
+		foreach (KeyValuePair<int, ParsedMeshSurface> entry in result.Meshes)
+		{
+			int writeIndex = entry.Key;
+			if (_modelMeshesByWriteIndex.ContainsKey(writeIndex))
+				continue;
+
+			Models.CS2.Component.LOD.Submesh submesh = models?.GetAtWriteIndex(writeIndex);
+			if (submesh == null || !entry.Value.IsValid)
+				continue;
+
+			ArrayMesh arrayMesh = entry.Value.ToArrayMesh();
+			if (arrayMesh == null || arrayMesh.GetSurfaceCount() == 0)
+			{
+				arrayMesh?.Dispose();
+				continue;
+			}
+
+			Models.CS2.Component.LOD lod = models.FindModelLOD(submesh);
+			Models.CS2 mesh = models.FindModel(submesh);
+			arrayMesh.ResourceName = ((mesh == null) ? "?" : mesh.Name) + ": " + ((lod == null) ? "?" : lod.Name);
+			arrayMesh.ResourceLocalToScene = false;
+			submesh.Data = null;
+
+			_modelMeshesByWriteIndex[writeIndex] = new MeshHolder
+			{
+				MainMesh = arrayMesh,
+				DefaultMaterial = submesh.Material,
+			};
+			meshCount++;
+		}
+
+		foreach (KeyValuePair<Textures.TEX4, BakedTextureCpu> entry in result.Textures)
+		{
+			Textures.TEX4 tex4 = entry.Key;
+			if (tex4 == null)
+				continue;
+
+			TexturePtr.Source location = plan.TextureLocations.TryGetValue(tex4, out TexturePtr.Source stored)
+				? stored
+				: TexturePtr.Source.LEVEL;
+
+			int writeIndex = GetTextureWriteIndex(tex4, location);
+			if (writeIndex >= 0 && TryGetCachedTexture(location, writeIndex, out _))
+				continue;
+
+			Texture2D texture = AlienSceneTextures.CreateTextureFromBaked(entry.Value, tex4.Name);
+			if (texture == null)
+				continue;
+
+			StoreCachedTexture(location, writeIndex, new TexOrCube { Texture = texture });
+			ReleaseTex4SourceContent(tex4);
+			textureCount++;
+		}
+
+		int missingTextureCount = ConvertMissingPlanTextures(plan);
+		textureCount += missingTextureCount;
+		ViewerLog.Print(
+			"Converted "
+			+ meshCount + "/" + result.Meshes.Count + " meshes and "
+			+ textureCount + "/" + plan.Textures.Count + " textures.");
+	}
+
+	private int ConvertMissingPlanTextures(LevelViewerPopulatePrewarm.Plan plan)
+	{
+		if (plan?.Textures == null)
+			return 0;
+
+		int converted = 0;
+		foreach (Textures.TEX4 tex4 in plan.Textures)
+		{
+			if (tex4 == null)
+				continue;
+
+			TexturePtr.Source location = plan.TextureLocations.TryGetValue(tex4, out TexturePtr.Source stored)
+				? stored
+				: TexturePtr.Source.LEVEL;
+
+			int writeIndex = GetTextureWriteIndex(tex4, location);
+			if (writeIndex >= 0 && TryGetCachedTexture(location, writeIndex, out _))
+				continue;
+
+			TexOrCube tex = GetTexOrCube(new TexturePtr
+			{
+				Texture = tex4,
+				Location = location,
+			});
+
+			if (tex?.Texture != null)
+				converted++;
+		}
+
+		return converted;
+	}
+
+	private static Textures.TEX4.Texture SelectTexPartForConversion(Textures.TEX4 tex)
+	{
+		if (tex == null)
+			return null;
+
+		if (HasTextureContent(tex.TextureStreamed))
+			return tex.TextureStreamed;
+		if (HasTextureContent(tex.TexturePersistent))
+			return tex.TexturePersistent;
+
+		return null;
+	}
+
+	private static bool HasTextureContent(Textures.TEX4.Texture part) =>
+		part?.Content != null && part.Content.Length > 0;
+
+	private static void ReleaseTex4SourceContent(Textures.TEX4 tex)
+	{
+		if (tex == null)
+			return;
+
+		if (tex.TextureStreamed != null)
+			tex.TextureStreamed.Content = null;
+		if (tex.TexturePersistent != null)
+			tex.TexturePersistent.Content = null;
+	}
+
+	private void ReleaseCathodeBinarySourceData()
+	{
+		Models models = _content?.Level?.Models;
+		if (models?.Entries != null)
+		{
+			foreach (Models.CS2 model in models.Entries)
+			{
+				if (model?.Components == null)
+					continue;
+
+				foreach (Models.CS2.Component component in model.Components)
+				{
+					if (component?.LODs == null)
+						continue;
+
+					foreach (Models.CS2.Component.LOD lod in component.LODs)
+					{
+						if (lod?.Submeshes == null)
+							continue;
+
+						foreach (Models.CS2.Component.LOD.Submesh submesh in lod.Submeshes)
+							submesh.Data = null;
+					}
+				}
+			}
+		}
+
+		ReleaseTextureSourceContent(_content?.Level?.Textures);
+		ReleaseTextureSourceContent(LevelContent.Global?.Textures);
+	}
+
+	private static void ReleaseTextureSourceContent(Textures textures)
+	{
+		if (textures?.Entries == null)
+			return;
+
+		foreach (Textures.TEX4 entry in textures.Entries)
+			ReleaseTex4SourceContent(entry);
+	}
+
+}
+
+public readonly struct BulkMeshSpawnJob
+{
+	public BulkMeshSpawnJob(
+		Node3D renderTarget,
+		int modelWriteIndex,
+		int materialWriteIndex,
+		int sourceMaterialWriteIndex,
+		uint modelReferenceEntityId,
+		uint overrideParameterEntityId = 0)
+	{
+		RenderTarget = renderTarget;
+		ModelWriteIndex = modelWriteIndex;
+		MaterialWriteIndex = materialWriteIndex;
+		SourceMaterialWriteIndex = sourceMaterialWriteIndex;
+		ModelReferenceEntityId = modelReferenceEntityId;
+		OverrideParameterEntityId = overrideParameterEntityId != 0
+			? overrideParameterEntityId
+			: modelReferenceEntityId;
+	}
+
+	public Node3D RenderTarget { get; }
+	public int ModelWriteIndex { get; }
+	public int MaterialWriteIndex { get; }
+	public int SourceMaterialWriteIndex { get; }
+	public uint ModelReferenceEntityId { get; }
+	public uint OverrideParameterEntityId { get; }
 }
 
 public class MeshHolder
@@ -2014,16 +4151,6 @@ public class LevelContent
 		if (Global == null)
 			Global = new Global(aiPath + "\\DATA\\ENV\\GLOBAL", new PAK2(aiPath + "\\DATA\\GLOBAL\\ANIMATION.PAK"));
 		Level = new Level(aiPath + "\\DATA\\ENV\\" + levelName, Global);
-
-		foreach (Shaders.Shader shader in Level.Shaders.Entries)
-		{
-			shader.VertexShader = null;
-			shader.PixelShader = null;
-			shader.HullShader = null;
-			shader.DomainShader = null;
-			shader.GeometryShader = null;
-			shader.ComputeShader = null;
-		}
 	}
 
 	public void Reset()

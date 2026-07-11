@@ -1,12 +1,40 @@
 using Godot;
 using System;
+using System.Collections.Generic;
 using CATHODE;
 
+/// <summary>CPU-baked texture upload payload; Godot Image/Texture2D created on the main thread.</summary>
+public sealed class BakedTextureCpu
+{
+	public byte[] Upload;
+	public int Width;
+	public int Height;
+	public Image.Format Format;
+	public Textures.TextureFormat SourceFormat;
+	public bool HasTransparency;
+	public bool GenerateMipmaps;
+	public bool SwizzleBgra;
+	public bool DecompressBlockCompressed;
+}
+
 /// <summary>
-/// Loads Cathode TEX4 data into Godot Image/Texture2D (decompress + channel fixes).
+/// Loads Cathode TEX4 data into Godot Image/Texture2D (GPU-compressed where possible).
 /// </summary>
 public static class AlienSceneTextures
 {
+	private static readonly Dictionary<Texture2D, bool> _transparencyCache = new Dictionary<Texture2D, bool>();
+
+	public static void ClearTransparencyCache()
+	{
+		_transparencyCache.Clear();
+	}
+
+	public static void RegisterTransparency(Texture2D texture, bool hasTransparency)
+	{
+		if (texture != null)
+			_transparencyCache[texture] = hasTransparency;
+	}
+
 	public static Image.Format MapImageFormat(Textures.TextureFormat format)
 	{
 		switch (format)
@@ -108,52 +136,141 @@ public static class AlienSceneTextures
 		if (content == null || baseSize <= 0 || content.Length < baseSize)
 			return null;
 
-		if (content.Length == baseSize)
-			return content;
-
 		byte[] baseOnly = new byte[baseSize];
 		Array.Copy(content, 0, baseOnly, 0, baseSize);
 		return baseOnly;
 	}
 
-	/// <summary>
-	/// Picks streamed mips when loaded, otherwise persistent (matches OpenCAGE CathodeLibExtensions.ToDDS).
-	/// </summary>
-	public static Textures.TEX4.Texture GetTextureDataPart(Textures.TEX4 texture)
-	{
-		if (texture == null)
-			return null;
-
-		if (texture.TextureStreamed?.Content != null && texture.TextureStreamed.Content.Length > 0)
-			return texture.TextureStreamed;
-
-		if (texture.TexturePersistent?.Content != null && texture.TexturePersistent.Content.Length > 0)
-			return texture.TexturePersistent;
-
-		return null;
-	}
-
 	public static Texture2D CreateTextureFromTexPart(Textures.TEX4.Texture texPart, Textures.TextureFormat sourceFormat, string name)
 	{
-		if (texPart?.Content == null || texPart.Content.Length == 0)
+		if (!TryBakeCpu(texPart, sourceFormat, out BakedTextureCpu baked))
 			return null;
+
+		return CreateTextureFromBaked(baked, name);
+	}
+
+	public static bool TryBakeCpu(Textures.TEX4 tex, out BakedTextureCpu baked)
+	{
+		baked = null;
+		if (tex == null)
+			return false;
+
+		Textures.TEX4.Texture texPart = SelectTexPart(tex);
+		if (texPart == null)
+			return false;
+
+		return TryBakeCpu(texPart, tex.Format, out baked);
+	}
+
+	public static bool TryBakeCpu(Textures.TEX4.Texture texPart, Textures.TextureFormat sourceFormat, out BakedTextureCpu baked)
+	{
+		baked = null;
+		if (texPart?.Content == null || texPart.Content.Length == 0)
+			return false;
 
 		Image.Format format = MapImageFormat(sourceFormat);
 		if (format == Image.Format.Max && !AstcTextureDecode.IsAstcFormat(sourceFormat))
-			return null;
+			return false;
 
 		int width = (int)texPart.Width;
 		int height = (int)texPart.Height;
 		if (width <= 0 || height <= 0)
+			return false;
+
+		if (AstcTextureDecode.IsAstcFormat(sourceFormat))
+			return TryBakeAstcCpu(texPart.Content, width, height, sourceFormat, out baked);
+
+		byte[] upload = ExtractBaseMipData(texPart.Content, width, height, format, sourceFormat);
+		if (upload == null)
+			return false;
+
+		bool blockCompressed = IsBlockCompressed(format);
+		baked = new BakedTextureCpu
+		{
+			Upload = upload,
+			Width = width,
+			Height = height,
+			Format = format,
+			SourceFormat = sourceFormat,
+			HasTransparency = DetectTransparencyFromContent(texPart.Content, width, height, sourceFormat),
+			GenerateMipmaps = !blockCompressed,
+			SwizzleBgra = sourceFormat == Textures.TextureFormat.A8R8G8B8,
+			DecompressBlockCompressed = blockCompressed && sourceFormat == Textures.TextureFormat.A4R4G4B4,
+		};
+		return true;
+	}
+
+	public static Texture2D CreateTextureFromBaked(BakedTextureCpu baked, string name)
+	{
+		if (baked?.Upload == null || baked.Upload.Length == 0)
 			return null;
 
-		Image image = CreateImageFromRaw(texPart.Content, width, height, format, sourceFormat, name);
-		if (image == null)
+		Image image = Image.CreateFromData(baked.Width, baked.Height, false, baked.Format, baked.Upload);
+		if (image == null || image.IsEmpty())
 			return null;
+
+		if (baked.DecompressBlockCompressed)
+			image.Decompress();
+		else if (baked.SwizzleBgra)
+			SwizzleBgraToRgba(image);
+
+		if (baked.GenerateMipmaps)
+			image.GenerateMipmaps();
 
 		Texture2D texture = ImageTexture.CreateFromImage(image);
 		texture.ResourceName = name;
+		texture.ResourceLocalToScene = false;
+		_transparencyCache[texture] = baked.HasTransparency;
 		return texture;
+	}
+
+	private static Textures.TEX4.Texture SelectTexPart(Textures.TEX4 tex)
+	{
+		if (tex?.TextureStreamed?.Content != null && tex.TextureStreamed.Content.Length > 0)
+			return tex.TextureStreamed;
+		if (tex?.TexturePersistent?.Content != null && tex.TexturePersistent.Content.Length > 0)
+			return tex.TexturePersistent;
+		return null;
+	}
+
+	private static bool TryBakeAstcCpu(
+		byte[] content,
+		int width,
+		int height,
+		Textures.TextureFormat sourceFormat,
+		out BakedTextureCpu baked)
+	{
+		baked = null;
+		byte[] baseMip = ExtractBaseMipData(content, width, height, Image.Format.Max, sourceFormat);
+		if (baseMip == null)
+			return false;
+
+		byte[] upload = baseMip;
+		Image.Format format = MapImageFormat(sourceFormat);
+		bool generateMipmaps = false;
+
+		if (sourceFormat == Textures.TextureFormat.ASTC12X12)
+		{
+			byte[] rgba = AstcTextureDecode.DecodeToRgba8(baseMip, width, height, sourceFormat);
+			if (rgba == null)
+				return false;
+
+			upload = rgba;
+			format = Image.Format.Rgba8;
+			generateMipmaps = true;
+		}
+
+		baked = new BakedTextureCpu
+		{
+			Upload = upload,
+			Width = width,
+			Height = height,
+			Format = format,
+			SourceFormat = sourceFormat,
+			HasTransparency = DetectTransparencyFromContent(content, width, height, sourceFormat),
+			GenerateMipmaps = generateMipmaps,
+		};
+		return true;
 	}
 
 	public static Image CreateImageFromRaw(byte[] content, int width, int height, Image.Format format, Textures.TextureFormat sourceFormat, string name)
@@ -165,24 +282,31 @@ public static class AlienSceneTextures
 		int expectedBase = GetBaseMipByteSize(width, height, format, sourceFormat);
 		if (upload == null)
 		{
-			GD.PrintErr($"Texture data too small for '{name}' ({sourceFormat}, {width}x{height}, bytes={content?.Length ?? 0}, expected base mip {expectedBase})");
+			ViewerLog.PrintErr($"Texture data too small for '{name}' ({sourceFormat}, {width}x{height}, bytes={content?.Length ?? 0}, expected base mip {expectedBase})");
 			return null;
 		}
 
 		Image image = Image.CreateFromData(width, height, false, format, upload);
 		if (image == null || image.IsEmpty())
 		{
-			GD.PrintErr($"Image.CreateFromData failed for '{name}' ({sourceFormat}, {width}x{height}, upload={upload.Length}, total={content.Length})");
+			ViewerLog.PrintErr($"Image.CreateFromData failed for '{name}' ({sourceFormat}, {width}x{height}, upload={upload.Length}, total={content.Length})");
 			return null;
 		}
 
+		// Keep block-compressed data on the GPU; decompressing every environment map to RGBA8+mips dominates RAM.
 		if (IsBlockCompressed(format))
-			image.Decompress();
+		{
+			if (sourceFormat == Textures.TextureFormat.A4R4G4B4)
+				image.Decompress();
+		}
+		else
+		{
+			if (sourceFormat == Textures.TextureFormat.A8R8G8B8)
+				SwizzleBgraToRgba(image);
 
-		if (sourceFormat == Textures.TextureFormat.A8R8G8B8)
-			SwizzleBgraToRgba(image);
+			image.GenerateMipmaps();
+		}
 
-		image.GenerateMipmaps();
 		return image;
 	}
 
@@ -192,7 +316,7 @@ public static class AlienSceneTextures
 		int expectedBase = AstcTextureDecode.GetCompressedByteSize(width, height, sourceFormat);
 		if (baseMip == null)
 		{
-			GD.PrintErr($"ASTC data too small for '{name}' ({sourceFormat}, {width}x{height}, bytes={content?.Length ?? 0}, expected {expectedBase})");
+			ViewerLog.PrintErr($"ASTC data too small for '{name}' ({sourceFormat}, {width}x{height}, bytes={content?.Length ?? 0}, expected {expectedBase})");
 			return null;
 		}
 
@@ -201,14 +325,10 @@ public static class AlienSceneTextures
 
 		Image.Format godotAstc = MapImageFormat(sourceFormat);
 		Image image = Image.CreateFromData(width, height, false, godotAstc, baseMip);
-		if (image != null && !image.IsEmpty())
+		if (image != null && !image.IsEmpty() && image.Decompress() == Error.Ok && image.GetFormat() == Image.Format.Rgba8)
 		{
-			image.Decompress();
-			if (image.GetFormat() == Image.Format.Rgba8)
-			{
-				image.GenerateMipmaps();
-				return image;
-			}
+			image.GenerateMipmaps();
+			return image;
 		}
 
 		return CreateImageFromAstcCpuDecode(baseMip, width, height, sourceFormat, name);
@@ -219,14 +339,14 @@ public static class AlienSceneTextures
 		byte[] rgba = AstcTextureDecode.DecodeToRgba8(baseMip, width, height, sourceFormat);
 		if (rgba == null)
 		{
-			GD.PrintErr($"ASTC CPU decode failed for '{name}' ({sourceFormat}, {width}x{height})");
+			ViewerLog.PrintErr($"ASTC CPU decode failed for '{name}' ({sourceFormat}, {width}x{height})");
 			return null;
 		}
 
 		Image image = Image.CreateFromData(width, height, false, Image.Format.Rgba8, rgba);
 		if (image == null || image.IsEmpty())
 		{
-			GD.PrintErr($"Image.CreateFromData failed after ASTC decode for '{name}' ({sourceFormat}, {width}x{height})");
+			ViewerLog.PrintErr($"Image.CreateFromData failed after ASTC decode for '{name}' ({sourceFormat}, {width}x{height})");
 			return null;
 		}
 
@@ -243,13 +363,83 @@ public static class AlienSceneTextures
 
 	/// <summary>
 	/// Sparse scan for non-opaque pixels (matches OpenCAGE MaterialApplier.ImageSourceHasTransparency).
+	/// Uses the one-time cache from conversion; avoids GetImage() decompressing GPU textures again.
 	/// </summary>
 	public static bool HasTransparency(Texture2D texture)
 	{
 		if (texture == null)
 			return false;
 
+		if (_transparencyCache.TryGetValue(texture, out bool cached))
+			return cached;
+
 		Image image = texture.GetImage();
+		if (image == null || image.IsEmpty())
+			return false;
+
+		return ScanImageForTransparency(image);
+	}
+
+	/// <summary>One-time alpha scan from Cathode source bytes before Content is released.</summary>
+	public static bool DetectTransparencyFromContent(byte[] content, int width, int height, Textures.TextureFormat sourceFormat)
+	{
+		if (content == null || content.Length == 0 || width <= 0 || height <= 0)
+			return false;
+
+		Image.Format format = MapImageFormat(sourceFormat);
+		if (format == Image.Format.Max && !AstcTextureDecode.IsAstcFormat(sourceFormat))
+			return false;
+
+		if (format == Image.Format.Rgb8 || format == Image.Format.L8 || format == Image.Format.Rf)
+			return false;
+
+		if (sourceFormat == Textures.TextureFormat.DXT1 || sourceFormat == Textures.TextureFormat.X8R8G8B8)
+			return false;
+
+		Image probe = CreateProbeImage(content, width, height, format, sourceFormat);
+		if (probe == null)
+			return false;
+
+		return ScanImageForTransparency(probe);
+	}
+
+	private static Image CreateProbeImage(byte[] content, int width, int height, Image.Format format, Textures.TextureFormat sourceFormat)
+	{
+		if (AstcTextureDecode.IsAstcFormat(sourceFormat))
+		{
+			byte[] baseMip = ExtractBaseMipData(content, width, height, Image.Format.Max, sourceFormat);
+			if (baseMip == null)
+				return null;
+
+			byte[] rgba = AstcTextureDecode.DecodeToRgba8(baseMip, width, height, sourceFormat);
+			if (rgba == null)
+				return null;
+
+			return Image.CreateFromData(width, height, false, Image.Format.Rgba8, rgba);
+		}
+
+		byte[] upload = ExtractBaseMipData(content, width, height, format, sourceFormat);
+		if (upload == null)
+			return null;
+
+		Image image = Image.CreateFromData(width, height, false, format, upload);
+		if (image == null || image.IsEmpty())
+			return null;
+
+		if (IsBlockCompressed(format))
+			image.Decompress();
+
+		if (sourceFormat == Textures.TextureFormat.A8R8G8B8)
+			SwizzleBgraToRgba(image);
+
+		if (image.GetFormat() != Image.Format.Rgba8)
+			image.Convert(Image.Format.Rgba8);
+
+		return image;
+	}
+
+	private static bool ScanImageForTransparency(Image image)
+	{
 		if (image == null || image.IsEmpty())
 			return false;
 
@@ -263,11 +453,6 @@ public static class AlienSceneTextures
 		if (image.GetFormat() != Image.Format.Rgba8)
 			image.Convert(Image.Format.Rgba8);
 
-		return ImageDataHasTransparency(image);
-	}
-
-	private static bool ImageDataHasTransparency(Image image)
-	{
 		byte[] pixels = image.GetData();
 		if (pixels == null || pixels.Length < 4)
 			return false;

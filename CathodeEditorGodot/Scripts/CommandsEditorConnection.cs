@@ -15,9 +15,12 @@ using System.Threading.Tasks;
 
 public partial class CommandsEditorConnection : Node3D
 {
+    private const int DefaultWebSocketPort = 1702;
+
     private ClientWebSocket _client;
     private AlienScene _scene;
     private CancellationTokenSource _connectionCts;
+    private readonly int _webSocketPort = ResolveWebSocketPort();
 
     private readonly object _lock = new object();
     private readonly SemaphoreSlim _sendLock = new SemaphoreSlim(1, 1);
@@ -85,12 +88,7 @@ public partial class CommandsEditorConnection : Node3D
     private Tuple<ShortGuid, ShortGuid> _removedEntity = null;
     private ShortGuid _removedComposite = ShortGuid.Invalid;
 
-	public bool FocusSelected => _focusSelected;
 	public bool ShowCameraPosition => _showCameraPosition;
-	public bool HasEntitySelection => _entitySelected;
-	/// <summary>True when the editor path includes a nested composite (not just the loaded root).</summary>
-	public bool HasChildCompositeInPath => _pathComposites != null && _pathComposites.Count > 1;
-	private bool _focusSelected = false;
 	private bool _showCameraPosition = true;
     private bool _hideNestedScriptEntities = false;
     private bool _renderFiltersDirty = false;
@@ -99,7 +97,6 @@ public partial class CommandsEditorConnection : Node3D
     private int _renderFiltersGeneration = 0;
     private HashSet<uint> _renderFiltersChangedFunctionTypes = null;
 
-    private LevelViewerConnectionHud _connectionHud;
     /// <summary>Composite path depth last seen from OpenCAGE packets (detect editor navigating back).</summary>
     private int _syncedCompositePathDepth;
 
@@ -123,14 +120,21 @@ public partial class CommandsEditorConnection : Node3D
     private uint _pendingEphemeralDeepSelectDeleteCompositeId;
     private uint _pendingEphemeralDeepSelectDeleteEntityId;
 
+    public bool IsWebSocketConnected => _client != null && _client.State == WebSocketState.Open;
+
     public override void _Ready()
     {
+        ViewerLog.InstallGlobalExceptionHandlers();
+        LevelViewerEmbeddedFocus.ConfigureEmbeddedStartup();
+        ViewerLog.Print("Level Viewer starting. Viewer log: " + (ViewerLog.LogFilePath ?? "<unavailable>"));
         _scene = GetNode<AlienScene>("../AlienScene");
         _connectionCts = new CancellationTokenSource();
+        ViewerLogBridge.RegisterConnection(this);
+        ViewerPopulateBridge.RegisterConnection(this);
         if (_scene != null)
             _scene.OnSelectionChanged += OnSceneSelectionChanged;
-        Callable.From(EnsureConnectionHud).CallDeferred();
         Callable.From(EnsureTransformGizmo).CallDeferred();
+        SetPhysicsProcess(false);
         _ = ReconnectLoopAsync(_connectionCts.Token);
     }
 
@@ -181,13 +185,11 @@ public partial class CommandsEditorConnection : Node3D
 
     public override void _ExitTree()
     {
+        ViewerLogBridge.ClearConnection();
+        ViewerPopulateBridge.ClearConnection();
         _connectionCts?.Cancel();
         _connectionCts?.Dispose();
         _connectionCts = null;
-
-        if (_connectionHud != null && GodotObject.IsInstanceValid(_connectionHud))
-            _connectionHud.QueueFree();
-        _connectionHud = null;
 
         if (_scene != null)
             _scene.OnSelectionChanged -= OnSceneSelectionChanged;
@@ -205,8 +207,32 @@ public partial class CommandsEditorConnection : Node3D
 
     public override void _Process(double delta)
     {
-        FlushPendingParameterSyncs();
-        _connectionHud?.UpdateFade((float)delta);
+        if (LevelViewerRenderIdleThrottle.IsSuspended)
+        {
+            Callable.From(() => SetProcess(false)).CallDeferred();
+            return;
+        }
+
+        // Never let a per-frame exception (e.g. a stale/disposed node reference surfacing as
+        // ObjectDisposedException) escape the engine callback and tear down the process.
+        try
+        {
+            FlushPendingParameterSyncs();
+        }
+        catch (Exception ex)
+        {
+            ViewerLog.PrintErr("[Viewer] _Process failed: " + ex);
+        }
+    }
+
+    public override void _UnhandledInput(InputEvent @event)
+    {
+        if (@event is InputEventMouseButton or InputEventMouseMotion or InputEventKey)
+        {
+            if (!IsProcessing())
+                SetProcess(true);
+            LevelViewerRenderIdleThrottle.NotifyUserActivity();
+        }
     }
 
     public override void _PhysicsProcess(double delta)
@@ -217,12 +243,52 @@ public partial class CommandsEditorConnection : Node3D
         }
         catch (Exception ex)
         {
-            GD.PrintErr("[Viewer] PhysicsProcess failed: " + ex);
+            ViewerLog.PrintErr("[Viewer] PhysicsProcess failed: " + ex);
         }
+        finally
+        {
+            if (!HasPendingPhysicsWork())
+                SetPhysicsProcess(false);
+        }
+    }
+
+    private void WakePhysicsProcess()
+    {
+        // Called from the WebSocket receive thread as well as the main thread. IsPhysicsProcessing()
+        // and SetPhysicsProcess() touch Node internals and must only run on the main thread, so the
+        // whole check is marshalled there (accessing them off-thread can hard-crash the process).
+        Callable.From(() =>
+        {
+            if (GodotObject.IsInstanceValid(this) && !IsPhysicsProcessing())
+                SetPhysicsProcess(true);
+        }).CallDeferred();
+    }
+
+    private bool HasPendingPhysicsWork()
+    {
+        if (!_incomingMessages.IsEmpty)
+            return true;
+        if (_levelName != "" && _didLoadLevel)
+            return true;
+        if (_addedEntity != null || _removedEntity != null || _removedComposite != ShortGuid.Invalid)
+            return true;
+        if (_forceSelectionApply || _currentEntityGOID != _currentEntity)
+            return true;
+
+        lock (_lock)
+        {
+            if (_renderFiltersDirty || _compositeFocusDirty)
+                return true;
+        }
+
+        return false;
     }
 
     private void PhysicsProcessInternal()
     {
+        if (LevelViewerRenderIdleThrottle.IsSuspended && _incomingMessages.IsEmpty)
+            return;
+
         while (_incomingMessages.TryDequeue(out string message))
             HandleMessage(message);
 
@@ -236,33 +302,24 @@ public partial class CommandsEditorConnection : Node3D
                 Callable.From(() => _scene.QueueLoadLevel(level, pathToAi)).CallDeferred();
         }
 
-        if (_compositeLoaded && _scene.Content.Loaded && _pathComposites != null && _pathComposites.Count > 0)
-        {
-            if (_scene.CompositeID != _pathComposites[0])
-            {
-                uint compositeId = _pathComposites[0];
-                Callable.From(() => _scene.QueuePopulateComposite(new ShortGuid(compositeId))).CallDeferred();
-            }
-        }
-
         if (_addedEntity != null)
         {
-            GD.Print("Adding entity: " + _addedEntity.Item2.AsUInt32);
+            ViewerLog.Print("Adding entity: " + _addedEntity.Item2.AsUInt32);
             _scene.AddEntity(_addedEntity.Item1, _addedEntity.Item2);
             _addedEntity = null;
-            _scene.RefreshAliasHighlights();
+            _scene.RefreshEntityHighlights();
         }
 
         if (_removedEntity != null)
         {
-            GD.Print("Removing entity: " + _removedEntity.Item2.AsUInt32);
+            ViewerLog.Print("Removing entity: " + _removedEntity.Item2.AsUInt32);
             _scene.RemoveEntity(_removedEntity.Item1, _removedEntity.Item2);
             _removedEntity = null;
         }
 
         if (_removedComposite != ShortGuid.Invalid)
         {
-            GD.Print("Removing composite: " + _removedComposite.AsUInt32);
+            ViewerLog.Print("Removing composite: " + _removedComposite.AsUInt32);
             _scene.RemoveComposite(_removedComposite);
             _removedComposite = ShortGuid.Invalid;
         }
@@ -321,15 +378,22 @@ public partial class CommandsEditorConnection : Node3D
         if (compositeFocusDirty && _scene != null && _scene.Content.Loaded && !_compositeFocusRefreshScheduled)
         {
             _compositeFocusRefreshScheduled = true;
+            int contentGeneration = _scene.ContentGeneration;
             Callable.From(() =>
             {
                 try
                 {
-                    _scene.RefreshCompositeFocus();
+                    if (_scene != null
+                        && GodotObject.IsInstanceValid(_scene)
+                        && _scene.Content.Loaded
+                        && _scene.ContentGeneration == contentGeneration)
+                    {
+                        _scene.RefreshCompositeFocus();
+                    }
                 }
                 catch (Exception ex)
                 {
-                    GD.PrintErr("[Viewer] Composite focus refresh failed: " + ex);
+                    ViewerLog.PrintErr("[Viewer] Composite focus refresh failed: " + ex);
                 }
                 finally
                 {
@@ -365,7 +429,7 @@ public partial class CommandsEditorConnection : Node3D
         }
         catch (Exception ex)
         {
-            GD.PrintErr("[Viewer] HandleMessage deserialize failed: " + ex.Message
+            ViewerLog.PrintErr("[Viewer] HandleMessage deserialize failed: " + ex.Message
                 + " | payloadLen=" + (data?.Length ?? 0));
             WebSocketPacketLog.LogReceiveFailed(data?.Length ?? 0, ex.Message);
             return;
@@ -373,16 +437,22 @@ public partial class CommandsEditorConnection : Node3D
 
         if (packet == null)
         {
-            GD.PrintErr("[Viewer] HandleMessage received null packet | payloadLen=" + (data?.Length ?? 0));
+            ViewerLog.PrintErr("[Viewer] HandleMessage received null packet | payloadLen=" + (data?.Length ?? 0));
             WebSocketPacketLog.LogReceiveFailed(data?.Length ?? 0, "null packet");
             return;
         }
 
         WebSocketPacketLog.LogReceived(packet, data?.Length ?? 0);
 
+        // Diagnostic breadcrumb (skip the high-frequency drag/param spam) so viewer.log shows the
+        // exact packet sequence leading up to a crash.
+        if (packet.packet_event != PacketEvent.ENTITY_MOVED
+            && packet.packet_event != PacketEvent.ENTITY_PARAMETER_MODIFIED)
+            ViewerLog.Print("Packet: " + packet.packet_event);
+
         if (packet.version != new Packet().version)
         {
-            GD.PrintErr("Your Commands Editor is utilising a different API version than this Godot client!!\nPlease ensure both are up to date.");
+            ViewerLog.PrintErr("Your Commands Editor is utilising a different API version than this Godot client!!\nPlease ensure both are up to date.");
             return;
         }
 
@@ -406,11 +476,37 @@ public partial class CommandsEditorConnection : Node3D
             return;
         }
 
+        if (packet.packet_event == PacketEvent.MATERIAL_MAPPING_MODIFIED)
+        {
+            SyncedMaterialMappingSet mappingSync = packet.material_mapping;
+            int contentGeneration = _scene?.ContentGeneration ?? 0;
+            Callable.From(() =>
+            {
+                try
+                {
+                    if (_scene != null
+                        && GodotObject.IsInstanceValid(_scene)
+                        && _scene.Content.Loaded
+                        && _scene.ContentGeneration == contentGeneration
+                        && mappingSync != null)
+                    {
+                        ViewerLog.Print("MaterialMapping apply start (id=" + mappingSync.mapping_id + ")");
+                        _scene.ApplySyncedMaterialMapping(mappingSync);
+                        ViewerLog.Print("MaterialMapping apply complete");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    ViewerLog.PrintErr("[Viewer] Material mapping sync failed: " + ex);
+                }
+            }).CallDeferred();
+            return;
+        }
+
         if (packet.packet_event == PacketEvent.SETTINGS_CHANGED)
         {
             lock (_lock)
             {
-                _focusSelected = packet.focus_object;
                 _showCameraPosition = packet.show_camera_position;
                 ApplyViewerSettings(packet);
                 ApplyActiveComposite(packet);
@@ -432,6 +528,7 @@ public partial class CommandsEditorConnection : Node3D
             return;
         }
 
+        bool refreshCompositeFocusNow = false;
         lock (_lock)
         {
             _levelName = packet.level_name;
@@ -456,7 +553,6 @@ public partial class CommandsEditorConnection : Node3D
             _currentComposite = _compositeLoaded ? _pathComposites[_pathComposites.Count - 1] : 0;
             _currentEntity = _entitySelected ? _pathEntities[_pathEntities.Count - 1] : 0;
 
-            _focusSelected = packet.focus_object;
             _showCameraPosition = packet.show_camera_position;
             bool hideNestedChanged = ApplyViewerSettings(packet);
             ApplyActiveComposite(packet);
@@ -475,7 +571,7 @@ public partial class CommandsEditorConnection : Node3D
             if (navigationChanged)
             {
                 ResetProgressiveDeepSelectState();
-                MarkCompositeFocusDirty();
+                refreshCompositeFocusNow = true;
                 _scene?.ResetCompositeScopedHides();
             }
 
@@ -504,6 +600,9 @@ public partial class CommandsEditorConnection : Node3D
             else if (nestedVisibilityOnly)
                 MarkNestedVisibilityDirty(previousActiveCompositeId);
         }
+
+        if (refreshCompositeFocusNow)
+            ApplyCompositeFocusNow();
 
         switch (packet.packet_event)
         {
@@ -618,6 +717,16 @@ public partial class CommandsEditorConnection : Node3D
                 }).CallDeferred();
                 break;
             }
+            case PacketEvent.COMPOSITE_SELECTED:
+                if (ShouldQueueScenePopulate(packet))
+                {
+                    uint compositeId = packet.composite;
+                    Callable.From(() => _scene?.QueuePopulateComposite(new ShortGuid(compositeId))).CallDeferred();
+                }
+                break;
+            case PacketEvent.COMPOSITE_RELOADED:
+                // Legacy: hierarchy navigation now uses GENERIC_DATA_SYNC from OpenCAGE.
+                break;
         }
     }
 
@@ -756,17 +865,17 @@ public partial class CommandsEditorConnection : Node3D
             }
             catch (Exception ex)
             {
-                GD.PrintErr("[Viewer] Parameter sync failed: " + ex);
+                ViewerLog.PrintErr("[Viewer] Parameter sync failed: " + ex);
             }
         }
 
         try
         {
-            _scene.RefreshAliasHighlights();
+            _scene.RefreshEntityHighlights();
         }
         catch (Exception ex)
         {
-            GD.PrintErr("[Viewer] Alias refresh after sync failed: " + ex);
+            ViewerLog.PrintErr("[Viewer] Alias refresh after sync failed: " + ex);
         }
     }
 
@@ -845,19 +954,59 @@ public partial class CommandsEditorConnection : Node3D
         _hideNestedScriptEntities = packet.hide_nested_script_entities;
         PreviewVisibilitySettings.HideNestedScriptEntities = _hideNestedScriptEntities;
 
-        bool highlightChanged = PreviewVisibilitySettings.HighlightAliases != packet.highlight_aliases;
+        bool highlightChanged = PreviewVisibilitySettings.HighlightAliases != packet.highlight_aliases
+            || PreviewVisibilitySettings.HighlightProxies != packet.highlight_proxies;
         PreviewVisibilitySettings.HighlightAliases = packet.highlight_aliases;
+        PreviewVisibilitySettings.HighlightProxies = packet.highlight_proxies;
 
         LevelViewerTransformSnap.GridSize = packet.transform_grid_snap > 0f ? packet.transform_grid_snap : 0f;
         LevelViewerTransformSnap.RotationDegrees = packet.rotation_snap_degrees > 0f ? packet.rotation_snap_degrees : 0f;
+
+        ApplyDeepSelectModeFromPacket(packet.deep_select_mode);
+        ApplyGizmoModeFromPacket(packet.gizmo_mode);
 
         if (packet.model_reference_wireframe != ModelReferenceRenderSettings.WireframeEnabled)
             _scene.SetModelReferenceWireframe(packet.model_reference_wireframe);
 
         if (highlightChanged && _scene != null)
-            _scene.RefreshAliasHighlights();
+            _scene.RefreshEntityHighlights();
 
         return hideNestedChanged;
+    }
+
+    private void ApplyDeepSelectModeFromPacket(int mode)
+    {
+        PreviewVisibilitySettings.DeepSelectModeKind next = mode switch
+        {
+            1 => PreviewVisibilitySettings.DeepSelectModeKind.DeepSelect,
+            2 => PreviewVisibilitySettings.DeepSelectModeKind.AdvancedDeepSelect,
+            _ => PreviewVisibilitySettings.DeepSelectModeKind.None,
+        };
+
+        if (PreviewVisibilitySettings.DeepSelectMode == next)
+            return;
+
+        ResetProgressiveDeepSelectPickState();
+        PreviewVisibilitySettings.DeepSelectMode = next;
+    }
+
+    private void ApplyGizmoModeFromPacket(int mode)
+    {
+        LevelViewerTransformGizmo.GizmoMode next = mode switch
+        {
+            1 => LevelViewerTransformGizmo.GizmoMode.TranslateWorld,
+            2 => LevelViewerTransformGizmo.GizmoMode.RotateLocal,
+            3 => LevelViewerTransformGizmo.GizmoMode.RotateWorld,
+            4 => LevelViewerTransformGizmo.GizmoMode.TranslateLocal,
+            _ => LevelViewerTransformGizmo.GizmoMode.None,
+        };
+
+        EnsureTransformGizmo();
+        if (_transformGizmo == null || _transformGizmo.Mode == next)
+            return;
+
+        _transformGizmo.SetMode(next);
+        SyncTransformGizmoToSelection();
     }
 
     private bool ApplyActiveComposite(Packet packet)
@@ -870,9 +1019,19 @@ public partial class CommandsEditorConnection : Node3D
 
         bool changed = PreviewVisibilitySettings.ActiveCompositeId != activeCompositeId;
         PreviewVisibilitySettings.ActiveCompositeId = activeCompositeId;
-        if (changed)
-            MarkCompositeFocusDirty();
         return changed;
+    }
+
+    /// <summary>
+    /// Full scene repopulate is only for composite-browser root switches (COMPOSITE_SELECTED with a
+    /// single composite in the path). Hierarchy drill sends GENERIC_DATA_SYNC with instance steps.
+    /// </summary>
+    private static bool ShouldQueueScenePopulate(Packet packet)
+    {
+        if (packet.packet_event != PacketEvent.COMPOSITE_SELECTED || packet.composite == 0)
+            return false;
+
+        return packet.path_composites == null || packet.path_composites.Count <= 1;
     }
 
     private void MarkCompositeFocusDirty()
@@ -880,6 +1039,21 @@ public partial class CommandsEditorConnection : Node3D
         lock (_lock)
         {
             _compositeFocusDirty = true;
+        }
+
+        WakePhysicsProcess();
+    }
+
+    private void ApplyCompositeFocusNow()
+    {
+        if (_scene == null || !_scene.Content.Loaded)
+            return;
+
+        _scene.RefreshCompositeFocus();
+        lock (_lock)
+        {
+            _compositeFocusDirty = false;
+            _compositeFocusRefreshScheduled = false;
         }
     }
 
@@ -906,51 +1080,42 @@ public partial class CommandsEditorConnection : Node3D
         _renderFiltersGeneration++;
     }
 
-    private void EnsureConnectionHud()
-    {
-        if (_connectionHud != null && GodotObject.IsInstanceValid(_connectionHud))
-            return;
-
-        Node host = GetTree().CurrentScene ?? this;
-        if (host == null || !GodotObject.IsInstanceValid(host))
-            return;
-
-        _connectionHud = new LevelViewerConnectionHud();
-        _connectionHud.AttachTo(host);
-        _connectionHud.ShowWaiting();
-    }
-
-    private void NotifyConnectionWaiting()
-    {
-        Callable.From(() => _connectionHud?.ShowWaiting()).CallDeferred();
-    }
-
-    private void NotifyConnectionConnected()
-    {
-        Callable.From(() => _connectionHud?.ShowConnected()).CallDeferred();
-    }
-
-    private void NotifyConnectionDisconnected()
-    {
-        Callable.From(() => _connectionHud?.ShowDisconnected()).CallDeferred();
-    }
-
     private async Task ReconnectLoopAsync(CancellationToken cancellationToken)
     {
         await Task.Yield();
 
+        // Fire-and-forget task: an escaping exception would be unobserved. The inner try handles
+        // per-attempt reconnects; this outer guard ensures nothing (even prologue failures) can
+        // surface as an unobserved task exception.
+        try
+        {
+            await ReconnectLoopBodyAsync(cancellationToken);
+        }
+        catch (OperationCanceledException)
+        {
+        }
+        catch (Exception ex)
+        {
+            ViewerLog.PrintErr("[Viewer] Reconnect loop terminated unexpectedly: " + ex);
+        }
+    }
+
+    private async Task ReconnectLoopBodyAsync(CancellationToken cancellationToken)
+    {
         while (!cancellationToken.IsCancellationRequested)
         {
             _client?.Dispose();
             _client = new ClientWebSocket();
 
-            GD.Print("Trying to connect to Commands Editor...");
+            ViewerLog.Print("Trying to connect to Commands Editor...");
 
             try
             {
-                await _client.ConnectAsync(new Uri("ws://localhost:1702/commands_editor"), cancellationToken);
-                GD.Print("Connected to Commands Editor!");
-                NotifyConnectionConnected();
+                await _client.ConnectAsync(
+                    new Uri($"ws://localhost:{_webSocketPort}/commands_editor"),
+                    cancellationToken);
+                ViewerLog.Print("Connected to Commands Editor!");
+                ViewerLogBridge.NotifyConnected();
 
                 await ReceiveLoopAsync(_client, cancellationToken);
             }
@@ -960,14 +1125,13 @@ public partial class CommandsEditorConnection : Node3D
             }
             catch (Exception ex)
             {
-                GD.PrintErr("WebSocket connection error: " + ex.Message);
+                ViewerLog.PrintErr("WebSocket connection error: " + ex.Message);
             }
 
             if (cancellationToken.IsCancellationRequested)
                 break;
 
-            GD.Print("Disconnected from Commands Editor!");
-            NotifyConnectionDisconnected();
+            ViewerLog.Print("Disconnected from Commands Editor!");
 
             try
             {
@@ -977,8 +1141,6 @@ public partial class CommandsEditorConnection : Node3D
             {
                 break;
             }
-
-            NotifyConnectionWaiting();
         }
     }
 
@@ -999,22 +1161,90 @@ public partial class CommandsEditorConnection : Node3D
             if (result.EndOfMessage)
             {
                 _incomingMessages.Enqueue(messageBuilder.ToString());
+                WakePhysicsProcess();
+                LevelViewerRenderIdleThrottle.NotifyUserActivity();
                 messageBuilder.Clear();
             }
         }
     }
 
+    public void SendViewerLog(string message, bool isError)
+    {
+        if (string.IsNullOrWhiteSpace(message))
+            return;
+
+        SendMessage(new Packet(PacketEvent.VIEWER_LOG)
+        {
+            log_message = message,
+            log_is_error = isError,
+        });
+    }
+
+    public void NotifyViewerPopulateStarted(string levelName, uint populateToken)
+    {
+        SendMessageBlocking(new Packet(PacketEvent.VIEWER_POPULATE_STARTED)
+        {
+            level_name = levelName ?? string.Empty,
+            populate_token = populateToken,
+        });
+    }
+
+    public void NotifyViewerPopulateFinished(uint populateToken)
+    {
+        SendMessageBlocking(new Packet(PacketEvent.VIEWER_POPULATE_FINISHED)
+        {
+            populate_token = populateToken,
+        });
+    }
+
+    private void SendMessageBlocking(Packet content)
+    {
+        try
+        {
+            SendMessageAsync(content).GetAwaiter().GetResult();
+        }
+        catch (Exception ex)
+        {
+            ViewerLog.PrintErr("Failed to send websocket message: " + ex.Message);
+        }
+    }
+
     public async void SendMessage(Packet content)
     {
-        await SendMessageAsync(content);
+        // async void: any escaping exception would become an unobserved exception and can
+        // terminate the process, so everything must be caught here.
+        try
+        {
+            await SendMessageAsync(content);
+        }
+        catch (Exception ex)
+        {
+            ViewerLog.PrintErr("Failed to send websocket message: " + ex.Message);
+        }
+    }
+
+    public void SendViewportModeToEditor()
+    {
+        int gizmoMode = _transformGizmo != null
+            ? (int)_transformGizmo.Mode
+            : (int)LevelViewerTransformGizmo.GizmoMode.None;
+
+        SendMessage(new Packet(PacketEvent.VIEWPORT_MODE_CHANGED)
+        {
+            deep_select_mode = (int)PreviewVisibilitySettings.DeepSelectMode,
+            gizmo_mode = gizmoMode,
+        });
     }
 
     private async Task SendMessageAsync(Packet content)
     {
-        if (_client == null || _client.State != WebSocketState.Open)
+        // Capture locally: _connectionCts is nulled/disposed on _ExitTree, possibly from another thread.
+        CancellationTokenSource cts = _connectionCts;
+        if (cts == null || _client == null || _client.State != WebSocketState.Open)
             return;
 
-        await _sendLock.WaitAsync(_connectionCts.Token);
+        CancellationToken token = cts.Token;
+        await _sendLock.WaitAsync(token);
         try
         {
             if (_client == null || _client.State != WebSocketState.Open)
@@ -1025,11 +1255,11 @@ public partial class CommandsEditorConnection : Node3D
             WebSocketPacketLog.LogSent(content, json.Length);
             try
             {
-                await _client.SendAsync(new ArraySegment<byte>(bytes), WebSocketMessageType.Text, true, _connectionCts.Token);
+                await _client.SendAsync(new ArraySegment<byte>(bytes), WebSocketMessageType.Text, true, token);
             }
             catch (Exception ex)
             {
-                GD.PrintErr("Failed to send websocket message: " + ex.Message);
+                ViewerLog.PrintErr("Failed to send websocket message: " + ex.Message);
             }
         }
         finally
@@ -1088,24 +1318,39 @@ public partial class CommandsEditorConnection : Node3D
         List<uint> pathComposites = null;
         bool entitySelected;
         bool createdNewAlias = false;
+        int deepSelectDepth = 0;
 
         switch (PreviewVisibilitySettings.DeepSelectMode)
         {
             case PreviewVisibilitySettings.DeepSelectModeKind.AdvancedDeepSelect:
                 ResetProgressiveDeepSelectState();
-                built = TryPickDeepSelectViaAlias(
-                    target,
-                    activeCompositeId,
-                    commands,
-                    deepSelectDepth: 0,
-                    out pathEntities,
-                    out pathComposites,
-                    out createdNewAlias);
+                {
+                    uint[] instancePath = PreviewVisibilitySettings.ActiveInstanceEntityPath ?? Array.Empty<uint>();
+                    if (LevelViewerPick.GetDeepSelectMaxDepth(target, activeCompositeId, instancePath, commands) > 0)
+                    {
+                        built = TryPickDeepSelectViaAlias(
+                            target,
+                            activeCompositeId,
+                            commands,
+                            deepSelectDepth: 0,
+                            out pathEntities,
+                            out pathComposites,
+                            out createdNewAlias);
+                    }
+                    else
+                    {
+                        built = LevelViewerPick.TryBuildActiveCompositeSelectionPath(
+                            target,
+                            activeCompositeId,
+                            out pathEntities,
+                            out pathComposites);
+                    }
+                }
                 entitySelected = built;
                 break;
             case PreviewVisibilitySettings.DeepSelectModeKind.DeepSelect:
             {
-                int deepSelectDepth = ResolveProgressiveDeepSelectDepth(target, activeCompositeId);
+                deepSelectDepth = ResolveProgressiveDeepSelectDepth(target, activeCompositeId);
                 if (deepSelectDepth > 0)
                 {
                     built = TryPickDeepSelectViaAlias(
@@ -1120,7 +1365,9 @@ public partial class CommandsEditorConnection : Node3D
 
                 if (!built)
                 {
-                    ResetProgressiveDeepSelectState();
+                    if (deepSelectDepth > 0)
+                        ResetProgressiveDeepSelectState();
+
                     built = LevelViewerPick.TryBuildActiveCompositeSelectionPath(
                         target,
                         activeCompositeId,
@@ -1144,16 +1391,18 @@ public partial class CommandsEditorConnection : Node3D
         if (!built)
             return;
 
-        uint nextSelectedEntity = entitySelected && pathEntities != null && pathEntities.Count > 0
-            ? pathEntities[pathEntities.Count - 1]
-            : 0;
-        uint nextSelectedComposite = pathComposites != null && pathComposites.Count > 0
-            ? pathComposites[pathComposites.Count - 1]
-            : 0;
-        TryRemoveEphemeralDeepSelectAliasIfAbandoned(nextSelectedEntity, nextSelectedComposite);
+        if (PreviewVisibilitySettings.DeepSelectMode != PreviewVisibilitySettings.DeepSelectModeKind.None
+            && !PreviewVisibilitySettings.InstancePathsEqual(
+                PreviewVisibilitySettings.CompositeFocusInstancePath,
+                PreviewVisibilitySettings.ActiveInstanceEntityPath))
+        {
+            // LMB only selects aliases; grey-out follows OpenCAGE drill scope (Ctrl+MMB / hierarchy).
+            PreviewVisibilitySettings.ResetCompositeFocusToActiveInstancePath();
+            MarkCompositeFocusDirty();
+        }
 
         ApplyLocalSelection(pathEntities, pathComposites, entitySelected);
-        ApplySelectionNow();
+        ApplySelectionNowAndCleanupEphemeralAlias(pathEntities, pathComposites, entitySelected);
         UpdateEphemeralDeepSelectAliasTracking(pathEntities, pathComposites, entitySelected);
 
         // New alias: selection path is bundled into ENTITY_ADDED so OpenCAGE can add+select atomically.
@@ -1281,9 +1530,11 @@ public partial class CommandsEditorConnection : Node3D
         if (PreviewVisibilitySettings.DeepSelectMode == PreviewVisibilitySettings.DeepSelectModeKind.DeepSelect)
             ResetProgressiveDeepSelectState();
 
+        UpdateCompositeFocusForDrillPath(pathEntities, pathComposites, entitySelected);
         ApplyLocalSelection(pathEntities, pathComposites, entitySelected);
         SendSelectionToEditorWithPendingEphemeralDelete(pathEntities, pathComposites, entitySelected);
-        ApplySelectionNow();
+        ApplySelectionNowAndCleanupEphemeralAlias(pathEntities, pathComposites, entitySelected);
+        ApplyCompositeFocusNow();
     }
 
     private bool TryMergePreservedSelectionIntoDrillPath(
@@ -1414,7 +1665,7 @@ public partial class CommandsEditorConnection : Node3D
 
         ApplyLocalSelection(pathEntities, pathComposites, entitySelected);
         SendSelectionToEditorWithPendingEphemeralDelete(pathEntities, pathComposites, entitySelected);
-        ApplySelectionNow();
+        ApplySelectionNowAndCleanupEphemeralAlias(pathEntities, pathComposites, entitySelected);
     }
 
     /// <summary>Steps back one level: deselects the current entity, or pops out of a nested composite instance.</summary>
@@ -1440,11 +1691,10 @@ public partial class CommandsEditorConnection : Node3D
                 pathEntities.RemoveAt(pathEntities.Count - 1);
                 entitySelected = false;
             }
-            else if (pathEntities.Count > 0 && pathComposites.Count > pathEntities.Count)
+            else if (pathComposites.Count > 1)
             {
-                pathEntities.RemoveAt(pathEntities.Count - 1);
                 pathComposites.RemoveAt(pathComposites.Count - 1);
-                entitySelected = false;
+                entitySelected = pathEntities.Count > 0;
             }
             else
                 return;
@@ -1452,19 +1702,11 @@ public partial class CommandsEditorConnection : Node3D
 
         ApplyLocalSelection(pathEntities, pathComposites, entitySelected);
         SendSelectionToEditorWithPendingEphemeralDelete(pathEntities, pathComposites, entitySelected);
-        ApplySelectionNow();
+        ApplySelectionNowAndCleanupEphemeralAlias(pathEntities, pathComposites, entitySelected);
     }
 
     private void ApplyLocalSelection(List<uint> pathEntities, List<uint> pathComposites, bool entitySelected)
     {
-        uint newSelectedEntity = entitySelected && pathEntities != null && pathEntities.Count > 0
-            ? pathEntities[pathEntities.Count - 1]
-            : 0;
-        uint newSelectedComposite = pathComposites != null && pathComposites.Count > 0
-            ? pathComposites[pathComposites.Count - 1]
-            : 0;
-        TryRemoveEphemeralDeepSelectAliasIfAbandoned(newSelectedEntity, newSelectedComposite);
-
         lock (_lock)
         {
             uint previousActiveComposite = PreviewVisibilitySettings.ActiveCompositeId;
@@ -1505,6 +1747,29 @@ public partial class CommandsEditorConnection : Node3D
         }
     }
 
+    private void UpdateCompositeFocusForDrillPath(
+        List<uint> pathEntities,
+        List<uint> pathComposites,
+        bool entitySelected)
+    {
+        if (pathEntities == null || pathComposites == null || pathEntities.Count == 0)
+            return;
+
+        uint[] focusPath = PreviewVisibilitySettings.BuildInstanceEntityPath(
+            pathEntities,
+            pathComposites,
+            entitySelected);
+        if (PreviewVisibilitySettings.InstancePathsEqual(
+                focusPath,
+                PreviewVisibilitySettings.CompositeFocusInstancePath))
+        {
+            return;
+        }
+
+        PreviewVisibilitySettings.SetCompositeFocusInstancePath(focusPath);
+        MarkCompositeFocusDirty();
+    }
+
     /// <summary>
     /// Progressive deep-select alias picks change selection without drilling into nested composites.
     /// Keep alias highlights and composite focus tied to OpenCAGE navigation, not local alias paths.
@@ -1533,12 +1798,26 @@ public partial class CommandsEditorConnection : Node3D
         return PreviewVisibilitySettings.InstancePathsEqual(selectionInstancePath, previousInstancePath);
     }
 
+    private void ApplySelectionNowAndCleanupEphemeralAlias(
+        List<uint> pathEntities,
+        List<uint> pathComposites,
+        bool entitySelected)
+    {
+        ApplySelectionNow();
+        TryRemoveEphemeralDeepSelectAliasIfAbandoned(
+            entitySelected && pathEntities != null && pathEntities.Count > 0
+                ? pathEntities[pathEntities.Count - 1]
+                : 0,
+            pathComposites != null && pathComposites.Count > 0
+                ? pathComposites[pathComposites.Count - 1]
+                : 0);
+    }
+
     private void ApplySelectionNow()
     {
         if (_scene == null || !_scene.Content.Loaded)
             return;
 
-        bool focusSelected;
         bool entitySelected;
         List<uint> pathEntities;
         List<uint> pathComposites;
@@ -1548,7 +1827,6 @@ public partial class CommandsEditorConnection : Node3D
             if (!_forceSelectionApply && _currentEntityGOID == _currentEntity)
                 return;
 
-            focusSelected = _focusSelected;
             entitySelected = _entitySelected;
             pathEntities = _pathEntities;
             pathComposites = _pathComposites;
@@ -1556,7 +1834,7 @@ public partial class CommandsEditorConnection : Node3D
             _forceSelectionApply = false;
         }
 
-        _scene.SelectEntity(pathEntities, pathComposites, entitySelected, focusSelected);
+        _scene.SelectEntity(pathEntities, pathComposites, entitySelected);
     }
 
     private static bool PathsEqual(IReadOnlyList<uint> left, IReadOnlyList<uint> right)
@@ -1589,6 +1867,7 @@ public partial class CommandsEditorConnection : Node3D
             TryFillEntityMetadata(packet);
 
         SendMessage(packet);
+        ScheduleEmbeddedInputFocusRestore();
     }
 
     private void SendSelectionToEditorWithPendingEphemeralDelete(
@@ -1690,7 +1969,7 @@ public partial class CommandsEditorConnection : Node3D
         if (target != null && GodotObject.IsInstanceValid(target))
             LevelViewerPick.InvalidatePickBounds(target);
 
-        GD.Print("[DragDiag] commit | entity=" + (target?.Name ?? "?")
+        ViewerLog.Print("[DragDiag] commit | entity=" + (target?.Name ?? "?")
             + " | pos=" + (target?.Position.ToString() ?? "?"));
     }
 
@@ -1736,7 +2015,7 @@ public partial class CommandsEditorConnection : Node3D
                 if (positionAdded)
                 {
                     CommitEphemeralDeepSelectAlias(compositeId.AsUInt32, entityId.AsUInt32);
-                    _scene.RefreshAliasHighlights();
+                    _scene.RefreshEntityHighlights();
                 }
             }
             else
@@ -1841,6 +2120,7 @@ public partial class CommandsEditorConnection : Node3D
     {
         drillDepth = 1;
         uint[] instancePath = PreviewVisibilitySettings.ActiveInstanceEntityPath ?? Array.Empty<uint>();
+        Commands commands = _scene?.Content?.Level?.Commands;
 
         if (_progressiveDeepSelectDepth <= 0
             || activeCompositeId != _progressiveDeepSelectActiveComposite
@@ -1871,7 +2151,7 @@ public partial class CommandsEditorConnection : Node3D
             return pickedTarget;
         }
 
-        int pickedMaxDepth = LevelViewerPick.GetDeepSelectMaxDepth(pickedTarget, activeCompositeId, instancePath);
+        int pickedMaxDepth = LevelViewerPick.GetDeepSelectMaxDepth(pickedTarget, activeCompositeId, instancePath, commands);
         if (pickedMaxDepth >= drillDepth)
             return pickedTarget;
 
@@ -1884,8 +2164,9 @@ public partial class CommandsEditorConnection : Node3D
     private int ResolveProgressiveDeepSelectDepth(LevelViewerPick.SelectionTarget target, uint activeCompositeId)
     {
         uint[] instancePath = PreviewVisibilitySettings.ActiveInstanceEntityPath ?? Array.Empty<uint>();
+        Commands commands = _scene?.Content?.Level?.Commands;
         uint leafId = target.LeafEntityId;
-        int maxDepth = LevelViewerPick.GetDeepSelectMaxDepth(target, activeCompositeId, instancePath);
+        int maxDepth = LevelViewerPick.GetDeepSelectMaxDepth(target, activeCompositeId, instancePath, commands);
         if (maxDepth <= 0)
         {
             ResetProgressiveDeepSelectState();
@@ -1894,7 +2175,7 @@ public partial class CommandsEditorConnection : Node3D
 
         bool samePick = ProgressiveDeepSelectTargetsMatch(target, activeCompositeId, instancePath);
 
-        int depth = samePick ? _progressiveDeepSelectDepth + 1 : 1;
+        int depth = samePick ? _progressiveDeepSelectDepth + 1 : 0;
         depth = Math.Min(depth, maxDepth);
 
         _progressiveDeepSelectLeafId = leafId;
@@ -1942,14 +2223,18 @@ public partial class CommandsEditorConnection : Node3D
             return false;
 
         uint[] instancePath = PreviewVisibilitySettings.ActiveInstanceEntityPath ?? Array.Empty<uint>();
+        if (LevelViewerPick.GetDeepSelectMaxDepth(target, ownerCompositeId, instancePath, commands) <= 0)
+            return false;
+
         bool builtHierarchy = deepSelectDepth > 0
             ? LevelViewerPick.TryBuildDeepSelectAliasHierarchyPath(
                 target,
                 ownerCompositeId,
                 instancePath,
                 deepSelectDepth,
-                out ShortGuid[] hierarchy)
-            : LevelViewerPick.TryBuildAliasHierarchyPath(target, ownerCompositeId, instancePath, out hierarchy);
+                out ShortGuid[] hierarchy,
+                commands)
+            : LevelViewerPick.TryBuildAliasHierarchyPath(target, ownerCompositeId, instancePath, out hierarchy, commands);
         if (!builtHierarchy)
             return false;
 
@@ -2097,10 +2382,19 @@ public partial class CommandsEditorConnection : Node3D
         }
 
         composite.RemoveAlias(alias);
-        _scene.RemoveEntity(new ShortGuid(compositeId), new ShortGuid(entityId));
+        QueueEntityRemoval(compositeId, entityId);
         _pendingEphemeralDeepSelectDeleteCompositeId = compositeId;
         _pendingEphemeralDeepSelectDeleteEntityId = entityId;
         ClearEphemeralDeepSelectAliasTracking();
+    }
+
+    private void QueueEntityRemoval(uint compositeId, uint entityId)
+    {
+        if (compositeId == 0 || entityId == 0)
+            return;
+
+        _removedEntity = new Tuple<ShortGuid, ShortGuid>(new ShortGuid(compositeId), new ShortGuid(entityId));
+        WakePhysicsProcess();
     }
 
     private static bool EnsureAliasPositionParameter(AliasEntity alias, SyncedParameter sync)
@@ -2164,4 +2458,94 @@ public partial class CommandsEditorConnection : Node3D
         foreach (SyncedParameter sync in packet.parameters)
             ParameterSync.ApplyToEntity(entity, sync, _scene.Content);
     }
+
+    private static bool IsEmbeddedInOpenCage =>
+        OS.GetEnvironment("OPENCAGE_EMBEDDED") == "1";
+
+    private void ScheduleEmbeddedInputFocusRestore()
+    {
+        if (!IsEmbeddedInOpenCage)
+            return;
+
+        SceneTree tree = GetTree();
+        if (tree == null)
+            return;
+
+        Callable.From(RestoreEmbeddedInputFocus).CallDeferred();
+        SceneTreeTimer timer = tree.CreateTimer(0.05);
+        timer.Timeout += () => RestoreEmbeddedInputFocus();
+    }
+
+    private void RestoreEmbeddedInputFocus()
+    {
+        // Deferred/timer callback: the node may have left the tree in the meantime.
+        if (!GodotObject.IsInstanceValid(this) || !IsInsideTree())
+            return;
+
+        Window window = GetViewport()?.GetWindow();
+        if (window == null)
+            return;
+
+        IntPtr hwnd = (IntPtr)DisplayServer.WindowGetNativeHandle(
+            DisplayServer.HandleType.WindowHandle,
+            window.GetWindowId());
+        if (hwnd == IntPtr.Zero)
+            return;
+
+        if (IsAnyMouseButtonPressed() && GetCapture() != hwnd)
+            return;
+
+        if (!LevelViewerEmbeddedFocus.IsMouseOverMainWindow())
+            return;
+
+        if (GetFocus() != hwnd)
+            SetFocus(hwnd);
+    }
+
+    private static bool IsAnyMouseButtonPressed()
+    {
+        const int VK_LBUTTON = 0x01;
+        const int VK_RBUTTON = 0x02;
+        const int VK_MBUTTON = 0x04;
+        return IsKeyDown(VK_LBUTTON) || IsKeyDown(VK_RBUTTON) || IsKeyDown(VK_MBUTTON);
+    }
+
+    private static int ResolveWebSocketPort()
+    {
+        string envPort = OS.GetEnvironment("OPENCAGE_WS_PORT");
+        if (int.TryParse(envPort, out int parsedEnvPort) && parsedEnvPort > 0)
+            return parsedEnvPort;
+
+        string[] args = OS.GetCmdlineArgs();
+        for (int i = 0; i < args.Length; i++)
+        {
+            string arg = args[i];
+            if (arg.StartsWith("--opencage-ws-port=", StringComparison.Ordinal))
+            {
+                if (int.TryParse(arg.Substring("--opencage-ws-port=".Length), out int parsedArgPort) && parsedArgPort > 0)
+                    return parsedArgPort;
+            }
+            else if (arg == "--opencage-ws-port" && i + 1 < args.Length
+                && int.TryParse(args[i + 1], out int nextArgPort) && nextArgPort > 0)
+            {
+                return nextArgPort;
+            }
+        }
+
+        return DefaultWebSocketPort;
+    }
+
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    private static extern short GetAsyncKeyState(int virtualKey);
+
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    private static extern IntPtr GetFocus();
+
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    private static extern IntPtr SetFocus(IntPtr hWnd);
+
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    private static extern IntPtr GetCapture();
+
+    private static bool IsKeyDown(int virtualKey) => (GetAsyncKeyState(virtualKey) & 0x8000) != 0;
 }

@@ -10,6 +10,8 @@ public static class PreviewVisibilitySettings
 
     public static bool HighlightAliases { get; set; } = true;
 
+    public static bool HighlightProxies { get; set; } = true;
+
     public enum DeepSelectModeKind
     {
         None,
@@ -22,18 +24,53 @@ public static class PreviewVisibilitySettings
     public static DeepSelectModeKind DeepSelectMode { get; set; }
 
     /// <summary>
-    /// The composite OpenCAGE is currently viewing (not necessarily the root composite loaded in the scene).
+    /// The composite OpenCAGE is currently viewing (not necessarily the level entry composite loaded in the scene).
     /// </summary>
     public static uint ActiveCompositeId { get; set; }
 
     /// <summary>
-    /// Entity IDs stepped through to reach the active composite instance (empty at the loaded root).
+    /// Commands.EntryPoints[0] for the loaded level — the level root composite, not the hierarchy folder root.
+    /// </summary>
+    public static uint LevelRootCompositeId { get; set; }
+
+    /// <summary>
+    /// Entity IDs stepped through to reach the active composite instance (empty at the level entry composite).
     /// </summary>
     public static uint[] ActiveInstanceEntityPath { get; private set; } = Array.Empty<uint>();
+
+    /// <summary>
+    /// Instance drill path used for composite-focus grey-out. Tracks OpenCAGE navigation
+    /// (Ctrl+MMB / hierarchy), not progressive deep-select alias picks.
+    /// </summary>
+    public static uint[] CompositeFocusInstancePath { get; private set; } = Array.Empty<uint>();
+
+    public static void SetCompositeFocusInstancePath(uint[] path)
+    {
+        CompositeFocusInstancePath = path ?? Array.Empty<uint>();
+    }
+
+    public static void ResetCompositeFocusToActiveInstancePath()
+    {
+        CompositeFocusInstancePath = ActiveInstanceEntityPath ?? Array.Empty<uint>();
+    }
+
+    /// <summary>
+    /// True when viewing a nested composite instance below Commands.EntryPoints[0].
+    /// </summary>
+    public static bool IsSteppedDownFromLevelRoot()
+    {
+        if (LevelRootCompositeId != 0 && ActiveCompositeId != LevelRootCompositeId)
+            return true;
+
+        return ActiveInstanceEntityPath != null && ActiveInstanceEntityPath.Length > 0;
+    }
 
     public static void SyncFromEditorPath(List<uint> pathEntities, List<uint> pathComposites, bool entitySelected)
     {
         ActiveInstanceEntityPath = BuildInstanceEntityPath(pathEntities, pathComposites, entitySelected);
+        CompositeFocusInstancePath = ActiveInstanceEntityPath != null
+            ? (uint[])ActiveInstanceEntityPath.Clone()
+            : Array.Empty<uint>();
     }
 
     public static uint[] BuildInstanceEntityPath(List<uint> pathEntities, List<uint> pathComposites, bool entitySelected)

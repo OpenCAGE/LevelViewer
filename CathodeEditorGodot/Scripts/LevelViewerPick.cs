@@ -28,6 +28,13 @@ public static class LevelViewerPick
 	private static readonly HashSet<Node3D> _suppressedPickOwners = new();
 	private static bool _scopedPickablesDirty = true;
 
+	// Batched bounds invalidation: while a batch is open, moved nodes are collected and the (expensive)
+	// per-node registry scan is deferred to BatchInvalidatePickBounds. Above the threshold we just drop
+	// the whole AABB cache, which is O(1) and rebuilt lazily on the next pick.
+	private static readonly HashSet<Node3D> _batchInvalidateNodes = new();
+	private static bool _batchInvalidateActive;
+	private const int BatchInvalidateClearAllThreshold = 16;
+
 	public readonly struct PickHit
 	{
 		public PickHit(Node hitNode, float distance)
@@ -63,9 +70,60 @@ public static class LevelViewerPick
 		_registeredPickables.Clear();
 		_suppressedPickOwners.Clear();
 		_scopedPickablesDirty = true;
+		_batchInvalidateActive = false;
+		_batchInvalidateNodes.Clear();
 	}
 
 	public static int PickOwnerCount => _pickablesByOwner.Count;
+
+	public static bool OwnerHasPickMeshes(Node3D owner)
+	{
+		return owner != null
+			&& _pickablesByOwner.TryGetValue(owner, out List<MeshInstance3D> meshes)
+			&& meshes != null
+			&& meshes.Count > 0;
+	}
+
+	public static bool TryCopyPickMeshesForOwner(Node3D owner, List<MeshInstance3D> destination)
+	{
+		if (destination == null || owner == null || !GodotObject.IsInstanceValid(owner))
+			return false;
+
+		if (!_pickablesByOwner.TryGetValue(owner, out List<MeshInstance3D> meshes) || meshes == null || meshes.Count == 0)
+			return false;
+
+		for (int i = 0; i < meshes.Count; i++)
+		{
+			MeshInstance3D mesh = meshes[i];
+			if (mesh != null && GodotObject.IsInstanceValid(mesh))
+				destination.Add(mesh);
+		}
+
+		return destination.Count > 0;
+	}
+
+	/// <summary>
+	/// Collects registered pick meshes for <paramref name="root"/> and nested entity nodes under it.
+	/// Walks the entity tree only — not every mesh in the scene subtree.
+	/// </summary>
+	public static void CollectPickMeshesForEntitySubtree(Node3D root, List<MeshInstance3D> destination)
+	{
+		if (root == null || destination == null || !GodotObject.IsInstanceValid(root))
+			return;
+
+		TryCopyPickMeshesForOwner(root, destination);
+
+		foreach (Node child in root.GetChildren())
+		{
+			if (child is not Node3D child3D || !GodotObject.IsInstanceValid(child3D))
+				continue;
+
+			if (!child3D.HasMeta(AlienScene.OwnerCompositeMetaKey))
+				continue;
+
+			CollectPickMeshesForEntitySubtree(child3D, destination);
+		}
+	}
 
 	public static void SetOwnerSuppressed(Node3D owner, bool suppressed)
 	{
@@ -106,7 +164,21 @@ public static class LevelViewerPick
 			if (meshes == null || meshes.Count == 0)
 				continue;
 
+			PruneInvalidPickMeshes(meshes);
+			if (meshes.Count == 0)
+				continue;
+
 			action(owner, meshes);
+		}
+	}
+
+	private static void PruneInvalidPickMeshes(List<MeshInstance3D> meshes)
+	{
+		for (int i = meshes.Count - 1; i >= 0; i--)
+		{
+			MeshInstance3D mesh = meshes[i];
+			if (mesh == null || !GodotObject.IsInstanceValid(mesh))
+				meshes.RemoveAt(i);
 		}
 	}
 
@@ -117,9 +189,59 @@ public static class LevelViewerPick
 	}
 
 	/// <summary>
+	/// Opens a batch so repeated <see cref="InvalidatePickBounds"/> calls (e.g. moving every instance of
+	/// an entity) collapse into a single registry pass on <see cref="EndBatchPickBoundsInvalidation"/>,
+	/// instead of rescanning the whole owner registry once per moved node.
+	/// </summary>
+	public static void BeginBatchPickBoundsInvalidation()
+	{
+		_batchInvalidateActive = true;
+		_batchInvalidateNodes.Clear();
+	}
+
+	/// <summary>Flushes and closes a batch opened by <see cref="BeginBatchPickBoundsInvalidation"/>.</summary>
+	public static void EndBatchPickBoundsInvalidation()
+	{
+		if (!_batchInvalidateActive)
+			return;
+
+		_batchInvalidateActive = false;
+
+		if (_batchInvalidateNodes.Count == 0)
+			return;
+
+		// Many nodes moved: clearing the whole cache is O(1) and cheaper than N owner scans.
+		if (_batchInvalidateNodes.Count >= BatchInvalidateClearAllThreshold)
+		{
+			_ownerGlobalBounds.Clear();
+			_batchInvalidateNodes.Clear();
+			return;
+		}
+
+		foreach (Node3D node in _batchInvalidateNodes)
+			InvalidatePickBoundsImmediate(node);
+
+		_batchInvalidateNodes.Clear();
+	}
+
+	/// <summary>
 	/// Drop cached broad-phase AABBs for pick owners whose meshes moved with <paramref name="node"/>.
 	/// </summary>
 	public static void InvalidatePickBounds(Node3D node)
+	{
+		if (node == null || !GodotObject.IsInstanceValid(node))
+			return;
+
+		if (_batchInvalidateActive)
+		{
+			_batchInvalidateNodes.Add(node);
+			return;
+		}
+
+		InvalidatePickBoundsImmediate(node);
+	}
+
+	private static void InvalidatePickBoundsImmediate(Node3D node)
 	{
 		if (node == null || !GodotObject.IsInstanceValid(node))
 			return;
@@ -164,6 +286,34 @@ public static class LevelViewerPick
 		RegisterPickableRecursive(ownerEntityNode, ownerEntityNode);
 	}
 
+	/// <summary>Registers pickables under a preview subtree without touching sibling meshes on the owner entity.</summary>
+	public static void RegisterPickablePreviewSubtree(FunctionEntityPreview preview, Node3D ownerEntityNode)
+	{
+		if (preview == null || ownerEntityNode == null)
+			return;
+
+		PruneInvalidPickables(ownerEntityNode);
+		RegisterPickableRecursive(preview, ownerEntityNode);
+	}
+
+	/// <summary>Removes pickables registered from a preview subtree only.</summary>
+	public static void UnregisterPickablePreviewSubtree(FunctionEntityPreview preview, Node3D ownerEntityNode)
+	{
+		if (preview == null || ownerEntityNode == null)
+			return;
+
+		UnregisterPickableRecursive(preview, ownerEntityNode);
+
+		if (_pickablesByOwner.TryGetValue(ownerEntityNode, out List<MeshInstance3D> meshes)
+			&& meshes.Count == 0)
+		{
+			_pickablesByOwner.Remove(ownerEntityNode);
+			_ownerGlobalBounds.Remove(ownerEntityNode);
+		}
+
+		_scopedPickablesDirty = true;
+	}
+
 	private static void PruneInvalidPickables(Node3D ownerEntityNode)
 	{
 		if (!_pickablesByOwner.TryGetValue(ownerEntityNode, out List<MeshInstance3D> meshes))
@@ -204,8 +354,11 @@ public static class LevelViewerPick
 		if (!_registeredPickables.Add(meshInstance))
 			return;
 
-		if (!meshInstance.IsInGroup(PickableGroup))
-			meshInstance.AddToGroup(PickableGroup);
+		if (!LevelViewerCompositeFocus.IsMeshVisuallyDimmed(meshInstance))
+		{
+			if (!meshInstance.IsInGroup(PickableGroup))
+				meshInstance.AddToGroup(PickableGroup);
+		}
 		meshInstance.SetMeta(OwnerEntityMetaKey, ownerNode);
 
 		if (!_pickablesByOwner.TryGetValue(ownerNode, out List<MeshInstance3D> meshes))
@@ -227,19 +380,65 @@ public static class LevelViewerPick
 		if (node is MeshInstance3D meshInstance)
 			RegisterPickableMesh(meshInstance, ownerEntityNode);
 		else if (node is VisualInstance3D visual)
-		{
-			Aabb bounds = visual.GetAabb();
-			if (bounds.Size.LengthSquared() > RayEpsilon)
-			{
-				if (!visual.IsInGroup(PickableGroup))
-					visual.AddToGroup(PickableGroup);
-				visual.SetMeta(OwnerEntityMetaKey, ownerEntityNode);
-			}
-		}
+			RegisterPickableVisual(visual, ownerEntityNode);
 
 		children:
 		foreach (Node child in node.GetChildren())
 			RegisterPickableRecursive(child, ownerEntityNode);
+	}
+
+	private static void UnregisterPickableRecursive(Node node, Node3D ownerEntityNode)
+	{
+		if (node is MeshInstance3D meshInstance)
+			UnregisterPickableMesh(meshInstance, ownerEntityNode);
+		else if (node is VisualInstance3D visual)
+			UnregisterPickableVisual(visual);
+
+		foreach (Node child in node.GetChildren())
+			UnregisterPickableRecursive(child, ownerEntityNode);
+	}
+
+	private static void RegisterPickableVisual(VisualInstance3D visual, Node3D ownerEntityNode)
+	{
+		if (visual == null || visual.IsInGroup(WireframeOverlayGroup))
+			return;
+
+		Aabb bounds = visual.GetAabb();
+		if (bounds.Size.LengthSquared() <= RayEpsilon)
+			return;
+
+		if (!visual.IsInGroup(PickableGroup))
+			visual.AddToGroup(PickableGroup);
+		visual.SetMeta(OwnerEntityMetaKey, ownerEntityNode);
+	}
+
+	private static void UnregisterPickableVisual(VisualInstance3D visual)
+	{
+		if (visual == null || !GodotObject.IsInstanceValid(visual))
+			return;
+
+		if (visual.IsInGroup(PickableGroup))
+			visual.RemoveFromGroup(PickableGroup);
+		if (visual.HasMeta(OwnerEntityMetaKey))
+			visual.RemoveMeta(OwnerEntityMetaKey);
+	}
+
+	private static void UnregisterPickableMesh(MeshInstance3D meshInstance, Node3D ownerEntityNode)
+	{
+		if (meshInstance == null || !GodotObject.IsInstanceValid(meshInstance))
+			return;
+
+		if (meshInstance.IsInGroup(PickableGroup))
+			meshInstance.RemoveFromGroup(PickableGroup);
+		if (meshInstance.HasMeta(OwnerEntityMetaKey))
+			meshInstance.RemoveMeta(OwnerEntityMetaKey);
+		_registeredPickables.Remove(meshInstance);
+
+		if (ownerEntityNode != null
+			&& _pickablesByOwner.TryGetValue(ownerEntityNode, out List<MeshInstance3D> meshes))
+		{
+			meshes.Remove(meshInstance);
+		}
 	}
 
 	private static void EnsureScopedPickOwners(Node contentRoot, Commands commands)
@@ -397,6 +596,30 @@ public static class LevelViewerPick
 		}
 
 		return null;
+	}
+
+	/// <summary>
+	/// Uses mesh pick-owner metadata when present so selection paths match registered geometry.
+	/// </summary>
+	public static Node3D ResolvePickOwnerEntityNode(Node hitNode, IReadOnlyDictionary<Node3D, Entity> nodeEntities)
+	{
+		if (hitNode == null || nodeEntities == null)
+			return null;
+
+		if (hitNode is MeshInstance3D mesh && mesh.HasMeta(OwnerEntityMetaKey))
+		{
+			Node owner = mesh.GetMeta(OwnerEntityMetaKey).AsGodotObject() as Node;
+			if (owner is Node3D owner3D && GodotObject.IsInstanceValid(owner3D))
+			{
+				Node3D resolved = ResolveNearestEntityNode(owner3D, nodeEntities);
+				if (resolved != null)
+					return resolved;
+
+				return owner3D;
+			}
+		}
+
+		return ResolveNearestEntityNode(hitNode, nodeEntities);
 	}
 
 	public static SelectionTarget? BuildSelectionTarget(
@@ -588,9 +811,10 @@ public static class LevelViewerPick
 	public static int GetDeepSelectMaxDepth(
 		SelectionTarget target,
 		uint activeCompositeId,
-		uint[] instanceEntityPath)
+		uint[] instanceEntityPath,
+		Commands commands = null)
 	{
-		if (!TryGetAliasHierarchyStartIndex(target, activeCompositeId, instanceEntityPath, out int start))
+		if (!TryGetAliasHierarchyStartIndex(target, activeCompositeId, instanceEntityPath, commands, out int start))
 			return 0;
 
 		return CountChildCompositeSegments(target, activeCompositeId, start);
@@ -604,13 +828,14 @@ public static class LevelViewerPick
 		uint activeCompositeId,
 		uint[] instanceEntityPath,
 		int depthLevel,
-		out ShortGuid[] hierarchy)
+		out ShortGuid[] hierarchy,
+		Commands commands = null)
 	{
 		hierarchy = null;
 		if (depthLevel <= 0)
 			return false;
 
-		if (!TryGetAliasHierarchyStartIndex(target, activeCompositeId, instanceEntityPath, out int start))
+		if (!TryGetAliasHierarchyStartIndex(target, activeCompositeId, instanceEntityPath, commands, out int start))
 			return false;
 
 		if (!TryFindDeepSelectSegmentEndIndex(target, activeCompositeId, start, depthLevel, out int deepestIndex))
@@ -696,10 +921,11 @@ public static class LevelViewerPick
 		SelectionTarget target,
 		uint ownerCompositeId,
 		uint[] instanceEntityPath,
-		out ShortGuid[] hierarchy)
+		out ShortGuid[] hierarchy,
+		Commands commands = null)
 	{
 		hierarchy = null;
-		if (!TryGetAliasHierarchyStartIndex(target, ownerCompositeId, instanceEntityPath, out int start))
+		if (!TryGetAliasHierarchyStartIndex(target, ownerCompositeId, instanceEntityPath, commands, out int start))
 			return false;
 
 		int count = target.EntityIds.Count - start;
@@ -717,41 +943,101 @@ public static class LevelViewerPick
 		SelectionTarget target,
 		uint ownerCompositeId,
 		uint[] instanceEntityPath,
+		Commands commands,
 		out int start)
 	{
 		start = -1;
-		if (ownerCompositeId == 0 || target.EntityIds == null || target.EntityIds.Count == 0)
+		if (ownerCompositeId == 0 || target.EntityIds == null || target.CompositeIds == null || target.EntityIds.Count == 0)
 			return false;
 
-		if (instanceEntityPath != null && instanceEntityPath.Length > 0)
+		if (TryMatchInstancePathPrefix(target, instanceEntityPath, out start)
+			|| TryMatchInstancePathPrefix(
+				target,
+				PreviewVisibilitySettings.CompositeFocusInstancePath ?? System.Array.Empty<uint>(),
+				out start))
 		{
-			if (instanceEntityPath.Length > target.EntityIds.Count)
-				return false;
-
-			for (int i = 0; i < instanceEntityPath.Length; i++)
-			{
-				if (target.EntityIds[i] != instanceEntityPath[i])
-					return false;
-			}
-
-			start = instanceEntityPath.Length;
-		}
-		else
-		{
-			for (int i = 0; i < target.EntityIds.Count; i++)
-			{
-				if (target.CompositeIds[i] == ownerCompositeId)
-				{
-					start = i;
-					break;
-				}
-			}
-
-			if (start < 0)
-				return false;
+			return start >= 0 && start < target.EntityIds.Count;
 		}
 
-		return start >= 0 && start < target.EntityIds.Count;
+		start = FindLastCompositeIndex(target, ownerCompositeId);
+		if (start >= 0)
+			return true;
+
+		if (commands != null
+			&& target.CompositeIds.Count > 0
+			&& IsCompositeDefinitionReachableFromOwner(
+				commands.GetComposite(new ShortGuid(ownerCompositeId)),
+				target.CompositeIds[0],
+				commands,
+				new HashSet<uint>()))
+		{
+			start = 0;
+			return true;
+		}
+
+		return false;
+	}
+
+	private static bool TryMatchInstancePathPrefix(SelectionTarget target, uint[] instanceEntityPath, out int start)
+	{
+		start = -1;
+		if (instanceEntityPath == null || instanceEntityPath.Length == 0)
+			return false;
+
+		if (instanceEntityPath.Length > target.EntityIds.Count)
+			return false;
+
+		for (int i = 0; i < instanceEntityPath.Length; i++)
+		{
+			if (target.EntityIds[i] != instanceEntityPath[i])
+				return false;
+		}
+
+		start = instanceEntityPath.Length;
+		return true;
+	}
+
+	private static int FindLastCompositeIndex(SelectionTarget target, uint compositeId)
+	{
+		int last = -1;
+		for (int i = 0; i < target.CompositeIds.Count; i++)
+		{
+			if (target.CompositeIds[i] == compositeId)
+				last = i;
+		}
+
+		return last;
+	}
+
+	private static bool IsCompositeDefinitionReachableFromOwner(
+		Composite ownerComposite,
+		uint candidateCompositeId,
+		Commands commands,
+		HashSet<uint> visited)
+	{
+		if (ownerComposite == null || commands == null || candidateCompositeId == 0)
+			return false;
+
+		if (!visited.Add(ownerComposite.shortGUID.AsUInt32))
+			return false;
+
+		foreach (Entity entity in ownerComposite.functions)
+		{
+			if (entity is not FunctionEntity function || function.function.IsFunctionType)
+				continue;
+
+			Composite child = commands.GetComposite(function.function);
+			if (child == null)
+				continue;
+
+			if (child.shortGUID.AsUInt32 == candidateCompositeId)
+				return true;
+
+			if (IsCompositeDefinitionReachableFromOwner(child, candidateCompositeId, commands, visited))
+				return true;
+		}
+
+		return false;
 	}
 
 	/// <summary>
@@ -931,7 +1217,7 @@ public static class LevelViewerPick
 		if (depthLevel <= 0 || commands == null)
 			return false;
 
-		if (!TryGetAliasHierarchyStartIndex(target, activeCompositeId, instanceEntityPath, out int start))
+		if (!TryGetAliasHierarchyStartIndex(target, activeCompositeId, instanceEntityPath, commands, out int start))
 			return false;
 
 		int segmentCount = CountChildCompositeSegments(target, activeCompositeId, start);

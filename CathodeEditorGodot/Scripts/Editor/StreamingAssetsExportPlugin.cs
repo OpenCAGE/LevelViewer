@@ -66,7 +66,7 @@ public partial class StreamingAssetsExportPlugin : EditorExportPlugin
 		}
 
 		string sourceLabel = hasCompleteSource ? sourceDirectory : "embedded CathodeLib resources";
-		GD.Print($"Export: streaming_assets written under {exportDirectory} (from {sourceLabel})");
+		ViewerLog.Print($"Export: streaming_assets written under {exportDirectory} (from {sourceLabel})");
 	}
 
 	private static bool HasEmbeddedStreamingAssets()

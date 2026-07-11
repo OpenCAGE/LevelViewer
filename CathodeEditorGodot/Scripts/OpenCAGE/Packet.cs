@@ -21,7 +21,12 @@ namespace OpenCAGE.UnityConnection
         ENTITY_PARAMETER_MODIFIED,
 
         RENDER_FILTERS_CHANGED,
+        MATERIAL_MAPPING_MODIFIED,
         SETTINGS_CHANGED,
+        VIEWER_LOG,
+        VIEWER_POPULATE_STARTED,
+        VIEWER_POPULATE_FINISHED,
+        VIEWPORT_MODE_CHANGED,
         GENERIC_DATA_SYNC,
     }
 
@@ -39,6 +44,9 @@ namespace OpenCAGE.UnityConnection
         //Setup metadata
         public string level_name = "";
         public string system_folder = "";
+
+        // Matched on VIEWER_POPULATE_* packets to ignore reordered websocket messages.
+        public uint populate_token = 0;
 
         //Selection metadata
         public List<uint> path_entities = new List<uint>();
@@ -71,8 +79,17 @@ namespace OpenCAGE.UnityConnection
         public bool hide_nested_script_entities = false;
         public bool model_reference_wireframe = false;
         public bool highlight_aliases = true;
+        public bool highlight_proxies = true;
         public float transform_grid_snap = 0f;
         public float rotation_snap_degrees = 0f;
+        public int deep_select_mode = 0;
+        public int gizmo_mode = 0;
         public Dictionary<uint, bool> box_render_filters = new Dictionary<uint, bool>();
+
+        // Level Viewer log line forwarded to OpenCAGE (VIEWER_LOG).
+        public string log_message = "";
+        public bool log_is_error = false;
+
+        public SyncedMaterialMappingSet material_mapping = null;
     }
 }

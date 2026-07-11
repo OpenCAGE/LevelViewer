@@ -1,7 +1,9 @@
 using Godot;
+using System;
+using System.Runtime.InteropServices;
 
 /// <summary>
-/// Free camera: WASD/QE move; RMB look; MMB pan; LMB select entity; Ctrl+MMB step into composite instance; - step back hierarchy; 0 toggles deep select; H hide selected; Shift+H unhide all; scroll adjusts speed; Z frames selection.
+/// Free camera: WASD/QE move; RMB look; MMB pan; LMB select entity; Ctrl+MMB step into composite instance; - step back hierarchy; 0/8/9 set regular/deep/advanced deep select; 1-4 transform/rotate world/local, 5 none; H hide selected; Shift+H unhide all; scroll adjusts speed; Z frames selection.
 /// MoveSpeed is world units per second (framerate-independent via delta).
 /// </summary>
 public partial class LevelViewerCamera : Camera3D
@@ -58,9 +60,11 @@ public partial class LevelViewerCamera : Camera3D
     private float _pitch;
     private bool _mouseLookActive;
     private bool _panning;
-
-    private LevelViewerSelectionHud _gizmoModeHud;
-    private LevelViewerSelectionHud _deepSelectHud;
+    private static readonly bool EmbeddedInOpenCage = DetectEmbeddedInOpenCage();
+    private Vector2? _embeddedLastScreenMousePos;
+    private Vector2? _embeddedLookAnchorScreen;
+    private bool _embeddedMouseCaptured;
+    private bool _embeddedCursorHiddenForLook;
 
     private CanvasLayer _hudLayer;
     private PanelContainer _speedPanel;
@@ -85,17 +89,23 @@ public partial class LevelViewerCamera : Camera3D
 
         SyncAnglesFromTransform();
         Callable.From(SetupHud).CallDeferred();
-        Callable.From(SetupGizmoModeHud).CallDeferred();
 
         _alienScene = GetNodeOrNull<AlienScene>(AlienScenePath);
         _commandsEditorConnection = GetNodeOrNull<CommandsEditorConnection>(CommandsEditorConnectionPath);
         if (_alienScene != null)
             _alienScene.OnLoaded += OnCompositeLoaded;
+
+        if (EmbeddedInOpenCage)
+        {
+            // Embedded in OpenCAGE: inherit process mode so low_processor_mode can idle.
+            // Input wake is handled via _UnhandledInput below and Win32 polling when not suspended.
+        }
     }
 
     public override void _ExitTree()
     {
-        ReleaseMouse();
+        ReleaseEmbeddedMouseCapture();
+        ReleaseMouse(this);
         if (_alienScene != null)
             _alienScene.OnLoaded -= OnCompositeLoaded;
         if (_hudLayer != null && GodotObject.IsInstanceValid(_hudLayer))
@@ -111,7 +121,25 @@ public partial class LevelViewerCamera : Camera3D
 
     public override void _UnhandledInput(InputEvent @event)
     {
+        try
+        {
+            UnhandledInputInternal(@event);
+        }
+        catch (Exception ex)
+        {
+            ViewerLog.PrintErr("[Viewer] Camera _UnhandledInput failed: " + ex);
+        }
+    }
+
+    private void UnhandledInputInternal(InputEvent @event)
+    {
+        if (!IsProcessing())
+            SetProcess(true);
+
         LevelViewerRenderIdleThrottle.NotifyUserActivity();
+
+        if (@event is InputEventMouseButton or InputEventKey)
+            EnsureWindowFocus();
 
         if (TryHandleScrollWheel(@event))
         {
@@ -129,12 +157,12 @@ public partial class LevelViewerCamera : Camera3D
                 }
                 else if (keyEvent.Keycode == Key.Key1)
                 {
-                    SetGizmoMode(LevelViewerTransformGizmo.GizmoMode.Translate);
+                    SetGizmoMode(LevelViewerTransformGizmo.GizmoMode.TranslateWorld);
                     GetViewport().SetInputAsHandled();
                 }
                 else if (keyEvent.Keycode == Key.Key2)
                 {
-                    SetGizmoMode(LevelViewerTransformGizmo.GizmoMode.RotateLocal);
+                    SetGizmoMode(LevelViewerTransformGizmo.GizmoMode.TranslateLocal);
                     GetViewport().SetInputAsHandled();
                 }
                 else if (keyEvent.Keycode == Key.Key3)
@@ -144,12 +172,27 @@ public partial class LevelViewerCamera : Camera3D
                 }
                 else if (keyEvent.Keycode == Key.Key4)
                 {
+                    SetGizmoMode(LevelViewerTransformGizmo.GizmoMode.RotateLocal);
+                    GetViewport().SetInputAsHandled();
+                }
+                else if (keyEvent.Keycode == Key.Key5)
+                {
                     SetGizmoMode(LevelViewerTransformGizmo.GizmoMode.None);
                     GetViewport().SetInputAsHandled();
                 }
                 else if (keyEvent.Keycode == Key.Key0)
                 {
-                    ToggleDeepSelectMode();
+                    SetDeepSelectMode(PreviewVisibilitySettings.DeepSelectModeKind.None);
+                    GetViewport().SetInputAsHandled();
+                }
+                else if (keyEvent.Keycode == Key.Key8)
+                {
+                    SetDeepSelectMode(PreviewVisibilitySettings.DeepSelectModeKind.DeepSelect);
+                    GetViewport().SetInputAsHandled();
+                }
+                else if (keyEvent.Keycode == Key.Key9)
+                {
+                    SetDeepSelectMode(PreviewVisibilitySettings.DeepSelectModeKind.AdvancedDeepSelect);
                     GetViewport().SetInputAsHandled();
                 }
                 else if (keyEvent.Keycode == Key.Minus)
@@ -207,17 +250,48 @@ public partial class LevelViewerCamera : Camera3D
 
     public override void _Process(double delta)
     {
+        try
+        {
+            ProcessInternal(delta);
+        }
+        catch (Exception ex)
+        {
+            // A per-frame exception (e.g. a disposed node surfacing as ObjectDisposedException)
+            // must never escape the engine callback and terminate the process.
+            ViewerLog.PrintErr("[Viewer] Camera _Process failed: " + ex);
+        }
+    }
+
+    private void ProcessInternal(double delta)
+    {
+        LevelViewerRenderIdleThrottle.Update();
+        if (LevelViewerRenderIdleThrottle.IsSuspended)
+        {
+            Callable.From(() => SetProcess(false)).CallDeferred();
+            return;
+        }
+
+        if (LevelViewerRenderIdleThrottle.IsRenderIdle)
+        {
+            ReleaseEmbeddedMouseCapture();
+            return;
+        }
+
         float deltaSeconds = (float)delta;
         Vector3 positionBefore = GlobalPosition;
 
+        if (EmbeddedInOpenCage)
+            ProcessEmbeddedMouseDrag(deltaSeconds);
+
         ApplyKeyboardMovement(deltaSeconds);
-        LevelViewerRenderIdleThrottle.Update(delta);
+
         if (ShouldShowCameraPosition())
             UpdatePositionHud(positionBefore);
         else
             HidePositionHud();
-        UpdateHudFade(deltaSeconds);
-        _gizmoModeHud?.UpdateFade(deltaSeconds);
+
+        if (_speedHudTimer > 0f || _positionHudTimer > 0f)
+            UpdateHudFade(deltaSeconds);
     }
 
     /// <summary>Sync internal yaw/pitch after external framing (LookAt, etc.).</summary>
@@ -265,18 +339,37 @@ public partial class LevelViewerCamera : Camera3D
 
     private async void FrameLoadedContentWhenReadyAsync()
     {
+        // async void: an escaping exception becomes unobserved and can terminate the process.
+        try
+        {
+            await FrameLoadedContentWhenReadyCoreAsync();
+        }
+        catch (Exception ex)
+        {
+            ViewerLog.PrintErr("[Viewer] FrameLoadedContentWhenReady failed: " + ex);
+        }
+    }
+
+    private async System.Threading.Tasks.Task FrameLoadedContentWhenReadyCoreAsync()
+    {
         if (_alienScene == null)
             return;
+
+        int contentGeneration = _alienScene.ContentGeneration;
 
         const int maxFrames = 60;
         for (int i = 0; i < maxFrames; i++)
         {
-            await ToSignal(GetTree(), SceneTree.SignalName.ProcessFrame);
-
-            if (_alienScene.ParentNode == null || !GodotObject.IsInstanceValid(_alienScene.ParentNode))
+            SceneTree tree = GetTree();
+            if (tree == null)
                 return;
 
-            if (!ShouldAutoFrameLoadedContent())
+            await ToSignal(tree, SceneTree.SignalName.ProcessFrame);
+
+            if (_alienScene == null || _alienScene.ContentGeneration != contentGeneration)
+                return;
+
+            if (_alienScene.ParentNode == null || !GodotObject.IsInstanceValid(_alienScene.ParentNode))
                 return;
 
             _alienScene.TryResolveInitialFocusPoint(out _, out bool focusResolved);
@@ -284,10 +377,10 @@ public partial class LevelViewerCamera : Camera3D
                 break;
         }
 
-        if (_alienScene.ParentNode == null || !GodotObject.IsInstanceValid(_alienScene.ParentNode))
+        if (_alienScene == null || _alienScene.ContentGeneration != contentGeneration)
             return;
 
-        if (!ShouldAutoFrameLoadedContent())
+        if (_alienScene.ParentNode == null || !GodotObject.IsInstanceValid(_alienScene.ParentNode))
             return;
 
         Vector3 positionBefore = GlobalPosition;
@@ -309,34 +402,10 @@ public partial class LevelViewerCamera : Camera3D
 #endif
     }
 
-    /// <summary>
-    /// Frame the full loaded composite when focus-on-selected will not drive the camera
-    /// (no nested composite path, or focus disabled; entity focus is handled separately).
-    /// </summary>
-    private bool ShouldAutoFrameLoadedContent()
-    {
-        if (_commandsEditorConnection == null || !GodotObject.IsInstanceValid(_commandsEditorConnection))
-            _commandsEditorConnection = GetNodeOrNull<CommandsEditorConnection>(CommandsEditorConnectionPath);
-
-        if (_commandsEditorConnection == null)
-            return true;
-
-        if (!_commandsEditorConnection.FocusSelected)
-            return true;
-
-        if (_commandsEditorConnection.HasEntitySelection)
-            return false;
-
-        if (_commandsEditorConnection.HasChildCompositeInPath)
-            return false;
-
-        return true;
-    }
-
     private void ApplyKeyboardMovement(float deltaSeconds)
     {
         float speed = MoveSpeed * deltaSeconds;
-        if (Input.IsKeyPressed(Key.Shift))
+        if (IsMovementKeyDown(Key.Shift))
             speed *= FastMoveMultiplier;
 
         Basis basis = GlobalTransform.Basis;
@@ -344,17 +413,17 @@ public partial class LevelViewerCamera : Camera3D
         Vector3 right = basis.X;
 
         Vector3 move = Vector3.Zero;
-        if (Input.IsKeyPressed(Key.W))
+        if (IsMovementKeyDown(Key.W))
             move += forward;
-        if (Input.IsKeyPressed(Key.S))
+        if (IsMovementKeyDown(Key.S))
             move -= forward;
-        if (Input.IsKeyPressed(Key.D))
+        if (IsMovementKeyDown(Key.D))
             move += right;
-        if (Input.IsKeyPressed(Key.A))
+        if (IsMovementKeyDown(Key.A))
             move -= right;
-        if (Input.IsKeyPressed(Key.E))
+        if (IsMovementKeyDown(Key.E))
             move += Vector3.Up;
-        if (Input.IsKeyPressed(Key.Q))
+        if (IsMovementKeyDown(Key.Q))
             move -= Vector3.Up;
 
         if (move.LengthSquared() > 0f)
@@ -364,8 +433,58 @@ public partial class LevelViewerCamera : Camera3D
         }
     }
 
+    private bool IsMovementKeyDown(Key key)
+    {
+        if (!EmbeddedInOpenCage)
+            return Input.IsKeyPressed(key);
+
+        if (!ShouldAcceptEmbeddedKeyboardInput())
+            return false;
+
+        return key switch
+        {
+            Key.W => Win32Input.IsKeyDown(Win32Input.VK_W),
+            Key.A => Win32Input.IsKeyDown(Win32Input.VK_A),
+            Key.S => Win32Input.IsKeyDown(Win32Input.VK_S),
+            Key.D => Win32Input.IsKeyDown(Win32Input.VK_D),
+            Key.E => Win32Input.IsKeyDown(Win32Input.VK_E),
+            Key.Q => Win32Input.IsKeyDown(Win32Input.VK_Q),
+            Key.Shift => Win32Input.IsKeyDown(Win32Input.VK_SHIFT),
+            _ => Input.IsKeyPressed(key),
+        };
+    }
+
+    private bool ShouldAcceptEmbeddedKeyboardInput()
+    {
+        IntPtr hwnd = GetNativeWindowHandle(this);
+        if (hwnd == IntPtr.Zero)
+            return false;
+
+        if (_embeddedMouseCaptured)
+            return true;
+
+        IntPtr focusHwnd = Win32Input.GetFocus();
+        if (focusHwnd != IntPtr.Zero && Win32Input.IsSameOrDescendant(hwnd, focusHwnd))
+            return true;
+
+        if (Win32Input.IsMouseOverWindow(hwnd))
+        {
+            if (focusHwnd == IntPtr.Zero)
+                return true;
+
+            IntPtr hostHwnd = Win32Input.GetParent(hwnd);
+            if (focusHwnd == hostHwnd)
+                return true;
+        }
+
+        Window window = GetViewport()?.GetWindow();
+        return window != null && window.HasFocus();
+    }
+
     private void HandleMouseButtonPressed(InputEventMouseButton mouseButton)
     {
+        EnsureWindowFocus();
+
         switch (mouseButton.ButtonIndex)
         {
             case MouseButton.Left:
@@ -379,8 +498,13 @@ public partial class LevelViewerCamera : Camera3D
                 GetViewport().SetInputAsHandled();
                 break;
             case MouseButton.Right:
-                _mouseLookActive = true;
-                CaptureMouse();
+                if (EmbeddedInOpenCage)
+                    EnsureWindowFocus();
+                else
+                {
+                    _mouseLookActive = true;
+                    CaptureMouse(this);
+                }
                 GetViewport().SetInputAsHandled();
                 break;
             case MouseButton.Middle:
@@ -389,10 +513,15 @@ public partial class LevelViewerCamera : Camera3D
                     TryPickDrillIntoComposite(mouseButton.Position);
                     GetViewport().SetInputAsHandled();
                 }
+                else if (EmbeddedInOpenCage)
+                {
+                    EnsureWindowFocus();
+                    GetViewport().SetInputAsHandled();
+                }
                 else
                 {
                     _panning = true;
-                    CaptureMouse();
+                    CaptureMouse(this);
                     GetViewport().SetInputAsHandled();
                 }
                 break;
@@ -445,15 +574,21 @@ public partial class LevelViewerCamera : Camera3D
                     GetViewport().SetInputAsHandled();
                 break;
             case MouseButton.Right:
-                _mouseLookActive = false;
-                if (!_panning)
-                    ReleaseMouse();
+                if (!EmbeddedInOpenCage)
+                {
+                    _mouseLookActive = false;
+                    if (!_panning)
+                        ReleaseMouse(this);
+                }
                 GetViewport().SetInputAsHandled();
                 break;
             case MouseButton.Middle:
-                _panning = false;
-                if (!_mouseLookActive)
-                    ReleaseMouse();
+                if (!EmbeddedInOpenCage)
+                {
+                    _panning = false;
+                    if (!_mouseLookActive)
+                        ReleaseMouse(this);
+                }
                 GetViewport().SetInputAsHandled();
                 break;
         }
@@ -461,34 +596,185 @@ public partial class LevelViewerCamera : Camera3D
 
     private void HandleMouseMotion(InputEventMouseMotion motion)
     {
+        if (EmbeddedInOpenCage)
+            return;
+
+        ApplyLookRelative(motion.Relative);
+        ApplyPanRelative(motion.Relative, motion.Velocity, (float)GetProcessDeltaTime());
+    }
+
+    private void ApplyLookRelative(Vector2 relative)
+    {
+        if (!_mouseLookActive || relative.LengthSquared() <= 0f)
+            return;
+
+        LevelViewerRenderIdleThrottle.NotifyUserActivity();
+        _yaw -= relative.X * LookSensitivity;
+        _pitch -= relative.Y * LookSensitivity;
+        _pitch = Mathf.Clamp(_pitch, -1.55f, 1.55f);
+        Rotation = new Vector3(_pitch, _yaw, 0f);
+    }
+
+    private void ApplyPanRelative(Vector2 relative, Vector2 velocity, float deltaSeconds)
+    {
+        if (!_panning)
+            return;
+
+        Vector3 positionBefore = GlobalPosition;
+        if (deltaSeconds <= 0f)
+            deltaSeconds = 1f / 60f;
+
+        Basis basis = GlobalTransform.Basis;
+        Vector3 right = basis.X;
+        Vector3 up = basis.Y;
+        if (velocity.LengthSquared() < 0.01f)
+            velocity = relative / deltaSeconds;
+
+        Vector3 pan = -right * velocity.X + up * velocity.Y;
+        GlobalPosition += pan * MoveSpeed * PanSensitivity * deltaSeconds;
+        SyncAnglesFromTransform();
+        if (ShouldShowCameraPosition())
+            UpdatePositionHud(positionBefore);
+    }
+
+    private void ProcessEmbeddedMouseDrag(float deltaSeconds)
+    {
+        IntPtr hwnd = GetNativeWindowHandle(this);
+        if (hwnd == IntPtr.Zero)
+            return;
+
+        bool rightDown = Win32Input.IsKeyDown(Win32Input.VK_RBUTTON);
+        bool middleDown = Win32Input.IsKeyDown(Win32Input.VK_MBUTTON);
+        bool ctrlDown = Win32Input.IsKeyDown(Win32Input.VK_CONTROL);
+        bool dragActive = rightDown || middleDown;
+
+        if (!rightDown)
+            EndEmbeddedMouseLook();
+
+        if (!dragActive)
+        {
+            ReleaseEmbeddedMouseCapture();
+            _mouseLookActive = false;
+            _panning = false;
+            _embeddedLastScreenMousePos = null;
+            return;
+        }
+
+        _mouseLookActive = rightDown;
+        _panning = middleDown && !ctrlDown;
+
         if (_mouseLookActive)
         {
-            _yaw -= motion.Relative.X * LookSensitivity;
-            _pitch -= motion.Relative.Y * LookSensitivity;
-            _pitch = Mathf.Clamp(_pitch, -1.55f, 1.55f);
-            Rotation = new Vector3(_pitch, _yaw, 0f);
+            ProcessEmbeddedMouseLook(hwnd);
+            return;
         }
 
-        if (_panning)
+        ProcessEmbeddedMousePan(hwnd, deltaSeconds);
+    }
+
+    private void ProcessEmbeddedMouseLook(IntPtr hwnd)
+    {
+        if (!_embeddedMouseCaptured)
         {
-            Vector3 positionBefore = GlobalPosition;
-            float deltaSeconds = (float)GetProcessDeltaTime();
-            if (deltaSeconds <= 0f)
-                deltaSeconds = 1f / 60f;
+            if (!Win32Input.IsMouseOverWindow(hwnd))
+            {
+                _embeddedLastScreenMousePos = null;
+                return;
+            }
 
-            Basis basis = GlobalTransform.Basis;
-            Vector3 right = basis.X;
-            Vector3 up = basis.Y;
-            Vector2 velocity = motion.Velocity;
-            if (velocity.LengthSquared() < 0.01f)
-                velocity = motion.Relative / deltaSeconds;
-
-            Vector3 pan = -right * velocity.X + up * velocity.Y;
-            GlobalPosition += pan * MoveSpeed * PanSensitivity * deltaSeconds;
-            SyncAnglesFromTransform();
-            if (ShouldShowCameraPosition())
-                UpdatePositionHud(positionBefore);
+            BeginEmbeddedMouseLook(hwnd);
+            return;
         }
+
+        if (_embeddedLookAnchorScreen == null)
+        {
+            BeginEmbeddedMouseLook(hwnd);
+            return;
+        }
+
+        if (!Win32Input.TryGetScreenCursorPosition(out Vector2 screenPos))
+            return;
+
+        Vector2 anchor = _embeddedLookAnchorScreen.Value;
+        Vector2 relative = screenPos - anchor;
+        if (relative.LengthSquared() > 0f)
+        {
+            ApplyLookRelative(relative);
+            Win32Input.SetCursorScreenPosition(anchor);
+        }
+
+        _embeddedLastScreenMousePos = anchor;
+    }
+
+    private void ProcessEmbeddedMousePan(IntPtr hwnd, float deltaSeconds)
+    {
+        if (!_embeddedMouseCaptured)
+        {
+            if (!Win32Input.IsMouseOverWindow(hwnd))
+            {
+                _panning = false;
+                _embeddedLastScreenMousePos = null;
+                return;
+            }
+
+            Win32Input.SetCapture(hwnd);
+            _embeddedMouseCaptured = true;
+            Win32Input.SetFocus(hwnd);
+        }
+
+        if (!Win32Input.TryGetScreenCursorPosition(out Vector2 screenPos))
+            return;
+
+        if (_embeddedLastScreenMousePos == null)
+        {
+            _embeddedLastScreenMousePos = screenPos;
+            return;
+        }
+
+        Vector2 relative = screenPos - _embeddedLastScreenMousePos.Value;
+        _embeddedLastScreenMousePos = screenPos;
+
+        ApplyPanRelative(relative, relative / deltaSeconds, deltaSeconds);
+    }
+
+    private void BeginEmbeddedMouseLook(IntPtr hwnd)
+    {
+        if (hwnd == IntPtr.Zero)
+            return;
+
+        if (!Win32Input.TryGetClientCenterScreen(hwnd, out Vector2 anchor))
+            return;
+
+        _embeddedLookAnchorScreen = anchor;
+        _embeddedLastScreenMousePos = anchor;
+        Win32Input.SetCursorScreenPosition(anchor);
+        Win32Input.PushHideCursor();
+        _embeddedCursorHiddenForLook = true;
+
+        Win32Input.SetCapture(hwnd);
+        _embeddedMouseCaptured = true;
+        Win32Input.SetFocus(hwnd);
+    }
+
+    private void EndEmbeddedMouseLook()
+    {
+        if (!_embeddedCursorHiddenForLook)
+            return;
+
+        Win32Input.PopHideCursor();
+        _embeddedCursorHiddenForLook = false;
+        _embeddedLookAnchorScreen = null;
+    }
+
+    private void ReleaseEmbeddedMouseCapture()
+    {
+        EndEmbeddedMouseLook();
+
+        if (!_embeddedMouseCaptured)
+            return;
+
+        Win32Input.ReleaseCapture();
+        _embeddedMouseCaptured = false;
     }
 
     private void AdjustMoveSpeed(bool faster)
@@ -651,15 +937,229 @@ public partial class LevelViewerCamera : Camera3D
         }
     }
 
-    private static void CaptureMouse()
+    private static void CaptureMouse(Node context)
     {
+        if (EmbeddedInOpenCage)
+            return;
+
         Input.MouseMode = Input.MouseModeEnum.Captured;
     }
 
-    private static void ReleaseMouse()
+    private static void ReleaseMouse(Node context)
     {
+        if (EmbeddedInOpenCage)
+            return;
+
         if (Input.MouseMode == Input.MouseModeEnum.Captured)
             Input.MouseMode = Input.MouseModeEnum.Visible;
+    }
+
+    private static bool DetectEmbeddedInOpenCage()
+    {
+        if (OS.GetEnvironment("OPENCAGE_EMBEDDED") == "1")
+            return true;
+
+        foreach (string arg in OS.GetCmdlineArgs())
+        {
+            if (arg == "--opencage-embedded")
+                return true;
+        }
+
+        return false;
+    }
+
+    private void EnsureWindowFocus()
+    {
+        if (EmbeddedInOpenCage)
+        {
+            IntPtr hwnd = GetNativeWindowHandle(this);
+            if (hwnd == IntPtr.Zero)
+                return;
+
+            if (Win32Input.GetFocus() != hwnd
+                && (_embeddedMouseCaptured || Win32Input.IsMouseOverWindow(hwnd)))
+                Win32Input.SetFocus(hwnd);
+            return;
+        }
+
+        Viewport viewport = GetViewport();
+        if (viewport == null)
+            return;
+
+        Window window = viewport.GetWindow();
+        if (window != null && !window.HasFocus())
+            window.GrabFocus();
+    }
+
+    private static IntPtr GetNativeWindowHandle(Node context)
+    {
+        Viewport viewport = context?.GetViewport();
+        if (viewport == null)
+            return IntPtr.Zero;
+
+        Window window = viewport.GetWindow();
+        if (window == null)
+            return IntPtr.Zero;
+
+        return (IntPtr)DisplayServer.WindowGetNativeHandle(
+            DisplayServer.HandleType.WindowHandle,
+            window.GetWindowId());
+    }
+
+    private static class Win32Input
+    {
+        public const int VK_LBUTTON = 0x01;
+        public const int VK_RBUTTON = 0x02;
+        public const int VK_MBUTTON = 0x04;
+        public const int VK_SHIFT = 0x10;
+        public const int VK_CONTROL = 0x11;
+        public const int VK_W = 0x57;
+        public const int VK_A = 0x41;
+        public const int VK_S = 0x53;
+        public const int VK_D = 0x44;
+        public const int VK_E = 0x45;
+        public const int VK_Q = 0x51;
+
+        [StructLayout(LayoutKind.Sequential)]
+        public struct Rect
+        {
+            public int Left;
+            public int Top;
+            public int Right;
+            public int Bottom;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        public struct Point
+        {
+            public int X;
+            public int Y;
+        }
+
+        [DllImport("user32.dll")]
+        public static extern short GetAsyncKeyState(int virtualKey);
+
+        [DllImport("user32.dll")]
+        public static extern bool GetCursorPos(out Point point);
+
+        [DllImport("user32.dll")]
+        public static extern bool SetCursorPos(int x, int y);
+
+        [DllImport("user32.dll")]
+        public static extern bool GetClientRect(IntPtr hwnd, out Rect rect);
+
+        [DllImport("user32.dll")]
+        public static extern bool ClientToScreen(IntPtr hwnd, ref Point point);
+
+        [DllImport("user32.dll")]
+        public static extern int ShowCursor(bool show);
+
+        [DllImport("user32.dll")]
+        public static extern IntPtr SetCapture(IntPtr hwnd);
+
+        [DllImport("user32.dll")]
+        public static extern bool ReleaseCapture();
+
+        [DllImport("user32.dll")]
+        public static extern IntPtr GetFocus();
+
+        [DllImport("user32.dll")]
+        public static extern IntPtr SetFocus(IntPtr hWnd);
+
+        [DllImport("user32.dll")]
+        public static extern IntPtr WindowFromPoint(Point point);
+
+        [DllImport("user32.dll")]
+        public static extern IntPtr GetParent(IntPtr hwnd);
+
+        public static bool IsKeyDown(int virtualKey) => (GetAsyncKeyState(virtualKey) & 0x8000) != 0;
+
+        public static bool HasKeyboardFocus(IntPtr hwnd) => hwnd != IntPtr.Zero && GetFocus() == hwnd;
+
+        public static bool IsSameOrDescendant(IntPtr ancestor, IntPtr window)
+        {
+            while (window != IntPtr.Zero)
+            {
+                if (window == ancestor)
+                    return true;
+                window = GetParent(window);
+            }
+
+            return false;
+        }
+
+        public static bool IsMouseOverWindow(IntPtr hwnd)
+        {
+            if (hwnd == IntPtr.Zero || !GetCursorPos(out Point screen))
+                return false;
+
+            return IsSameOrDescendant(hwnd, WindowFromPoint(screen));
+        }
+
+        public static bool IsAnyMouseButtonDown() =>
+            IsKeyDown(VK_LBUTTON) || IsKeyDown(VK_RBUTTON) || IsKeyDown(VK_MBUTTON);
+
+        public static bool TryGetScreenCursorPosition(out Vector2 position)
+        {
+            position = default;
+            if (!GetCursorPos(out Point screen))
+                return false;
+
+            position = new Vector2(screen.X, screen.Y);
+            return true;
+        }
+
+        public static void SetCursorScreenPosition(Vector2 screen)
+        {
+            SetCursorPos((int)Mathf.Round(screen.X), (int)Mathf.Round(screen.Y));
+        }
+
+        public static bool TryGetClientCenterScreen(IntPtr hwnd, out Vector2 center)
+        {
+            center = default;
+            if (hwnd == IntPtr.Zero || !GetClientRect(hwnd, out Rect rect))
+                return false;
+
+            var clientCenter = new Point
+            {
+                X = (rect.Left + rect.Right) / 2,
+                Y = (rect.Top + rect.Bottom) / 2,
+            };
+
+            if (!ClientToScreen(hwnd, ref clientCenter))
+                return false;
+
+            center = new Vector2(clientCenter.X, clientCenter.Y);
+            return true;
+        }
+
+        private static int _cursorHideDepth;
+
+        public static void PushHideCursor()
+        {
+            if (_cursorHideDepth == 0)
+            {
+                while (ShowCursor(false) >= 0)
+                {
+                }
+            }
+
+            _cursorHideDepth++;
+        }
+
+        public static void PopHideCursor()
+        {
+            if (_cursorHideDepth <= 0)
+                return;
+
+            _cursorHideDepth--;
+            if (_cursorHideDepth != 0)
+                return;
+
+            while (ShowCursor(true) < 0)
+            {
+            }
+        }
     }
 
     // -------------------------------------------------------------------------
@@ -686,17 +1186,7 @@ public partial class LevelViewerCamera : Camera3D
         gizmo.SetMode(mode);
 
         _commandsEditorConnection?.SyncTransformGizmoToSelection(this);
-
-        string label = mode switch
-        {
-            LevelViewerTransformGizmo.GizmoMode.Translate    => "Translate",
-            LevelViewerTransformGizmo.GizmoMode.RotateLocal  => "Rotate (Local)",
-            LevelViewerTransformGizmo.GizmoMode.RotateWorld  => "Rotate (World)",
-            _                                                => "None",
-        };
-
-        EnsureGizmoModeHud();
-        _gizmoModeHud?.ShowEntity("Gizmo: " + label);
+        _commandsEditorConnection?.SendViewportModeToEditor();
     }
 
     private bool TryGizmoMouseDown(Vector2 pos)
@@ -731,85 +1221,21 @@ public partial class LevelViewerCamera : Camera3D
             return;
         }
 
-        // Fall through to camera look / pan
-        if (_mouseLookActive || _panning)
+        // Fall through to camera look / pan (embedded mode polls Win32 input in _Process instead).
+        if (!EmbeddedInOpenCage && (_mouseLookActive || _panning))
         {
             HandleMouseMotion(motion);
             GetViewport().SetInputAsHandled();
         }
     }
 
-    private void SetupGizmoModeHud()
+    private void SetDeepSelectMode(PreviewVisibilitySettings.DeepSelectModeKind mode)
     {
-        if (_gizmoModeHud != null && GodotObject.IsInstanceValid(_gizmoModeHud))
+        if (PreviewVisibilitySettings.DeepSelectMode == mode)
             return;
 
-        Node host = GetTree()?.CurrentScene ?? this;
-        if (host == null || !GodotObject.IsInstanceValid(host))
-            return;
-
-        _gizmoModeHud = new LevelViewerSelectionHud();
-        _gizmoModeHud.Name = "GizmoModeHud";
-        _gizmoModeHud.AttachTo(host);
-        // Position below the entity selection HUD (which sits at OffsetTop=12)
-        _gizmoModeHud.SetPanelTopOffset(58f, 120f);
-    }
-
-    private void EnsureGizmoModeHud()
-    {
-        if (_gizmoModeHud == null || !GodotObject.IsInstanceValid(_gizmoModeHud))
-            SetupGizmoModeHud();
-    }
-
-    private void ToggleDeepSelectMode()
-    {
         _commandsEditorConnection?.ResetProgressiveDeepSelectPickState();
-        PreviewVisibilitySettings.DeepSelectMode = PreviewVisibilitySettings.DeepSelectMode switch
-        {
-            PreviewVisibilitySettings.DeepSelectModeKind.None => PreviewVisibilitySettings.DeepSelectModeKind.DeepSelect,
-            PreviewVisibilitySettings.DeepSelectModeKind.DeepSelect => PreviewVisibilitySettings.DeepSelectModeKind.AdvancedDeepSelect,
-            _ => PreviewVisibilitySettings.DeepSelectModeKind.None,
-        };
-        UpdateDeepSelectHud();
-    }
-
-    private void UpdateDeepSelectHud()
-    {
-        string label = PreviewVisibilitySettings.DeepSelectMode switch
-        {
-            PreviewVisibilitySettings.DeepSelectModeKind.DeepSelect => "DEEP SELECT",
-            PreviewVisibilitySettings.DeepSelectModeKind.AdvancedDeepSelect => "ADVANCED DEEP SELECT",
-            _ => null,
-        };
-
-        if (label == null)
-        {
-            _deepSelectHud?.Hide();
-            return;
-        }
-
-        EnsureDeepSelectHud();
-        _deepSelectHud?.ShowPersistent(label, new Color(0.95f, 0.22f, 0.22f));
-    }
-
-    private void SetupDeepSelectHud()
-    {
-        if (_deepSelectHud != null && GodotObject.IsInstanceValid(_deepSelectHud))
-            return;
-
-        Node host = GetTree()?.CurrentScene ?? this;
-        if (host == null || !GodotObject.IsInstanceValid(host))
-            return;
-
-        _deepSelectHud = new LevelViewerSelectionHud();
-        _deepSelectHud.Name = "DeepSelectHud";
-        _deepSelectHud.AttachTo(host);
-        _deepSelectHud.SetPanelTopRight();
-    }
-
-    private void EnsureDeepSelectHud()
-    {
-        if (_deepSelectHud == null || !GodotObject.IsInstanceValid(_deepSelectHud))
-            SetupDeepSelectHud();
+        PreviewVisibilitySettings.DeepSelectMode = mode;
+        _commandsEditorConnection?.SendViewportModeToEditor();
     }
 }

@@ -6,6 +6,9 @@ using Godot;
 /// </summary>
 public abstract partial class FunctionEntityPreview : Node3D
 {
+    /// <summary>While true, <see cref="Setup"/> skips <see cref="Refresh"/> until bulk population finishes.</summary>
+    internal static bool DeferVisualRefresh { get; set; }
+
     public FunctionEntity Entity { get; private set; }
     public uint OwnerCompositeId { get; private set; }
 
@@ -13,8 +16,11 @@ public abstract partial class FunctionEntityPreview : Node3D
     {
         Entity = entity;
         OwnerCompositeId = ownerCompositeId;
-        Refresh();
-        RegisterPickablesWithOwner();
+        if (!DeferVisualRefresh)
+        {
+            Refresh();
+            RegisterPickablesWithOwner();
+        }
     }
 
     public abstract void Refresh();
@@ -23,13 +29,28 @@ public abstract partial class FunctionEntityPreview : Node3D
     /// Registers any preview mesh instances under the owning entity node for screen picking.
     /// Safe to call repeatedly when visuals are created lazily or rebuilt.
     /// </summary>
-    public void RegisterPickablesWithOwner()
+    public virtual void RegisterPickablesWithOwner()
     {
         Node3D owner = GetParent() as Node3D;
         if (owner == null || !GodotObject.IsInstanceValid(owner))
             return;
 
-        LevelViewerPick.RegisterPickableSubtree(owner);
+        LevelViewerPick.RegisterPickablePreviewSubtree(this, owner);
+    }
+
+    public void SyncPickablesWithVisibility()
+    {
+        if (Entity == null)
+            return;
+
+        Node3D owner = GetParent() as Node3D;
+        if (owner == null || !GodotObject.IsInstanceValid(owner))
+            return;
+
+        if (PreviewVisualUtility.IsPreviewVisible(Entity, OwnerCompositeId))
+            RegisterPickablesWithOwner();
+        else
+            LevelViewerPick.UnregisterPickablePreviewSubtree(this, owner);
     }
 
     /// <summary>
@@ -48,6 +69,10 @@ public abstract partial class FunctionEntityPreview : Node3D
         {
             Refresh();
             RegisterPickablesWithOwner();
+        }
+        else
+        {
+            SyncPickablesWithVisibility();
         }
     }
 

@@ -284,6 +284,39 @@ public static class PreviewVisualUtility
         }
     }
 
+    /// <summary>
+    /// Collects meshes on <paramref name="root"/> without descending into nested entity nodes.
+    /// </summary>
+    public static void CollectMeshInstancesForEntityVisual(Node3D root, List<MeshInstance3D> meshes)
+    {
+        if (root == null || meshes == null)
+            return;
+
+        var pending = new System.Collections.Generic.Stack<Node>();
+        pending.Push(root);
+        while (pending.Count > 0)
+        {
+            Node current = pending.Pop();
+            if (current == null || !GodotObject.IsInstanceValid(current))
+                continue;
+
+            if (current is MeshInstance3D meshInstance)
+                meshes.Add(meshInstance);
+
+            foreach (Node child in current.GetChildren())
+            {
+                if (child is Node3D child3D
+                    && child3D != root
+                    && child3D.HasMeta(AlienScene.OwnerCompositeMetaKey))
+                {
+                    continue;
+                }
+
+                pending.Push(child);
+            }
+        }
+    }
+
     public static void PreparePreviewObject(Node3D node, bool opaque = true)
     {
         MeshInstance3D meshInstance = node as MeshInstance3D;

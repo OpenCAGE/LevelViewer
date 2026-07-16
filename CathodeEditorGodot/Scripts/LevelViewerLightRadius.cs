@@ -15,7 +15,7 @@ public static class LevelViewerLightRadius
 {
 	private const float MinDistance = 0.05f;
 	private const float LineWidth = 0.01f;
-	private static readonly Vector3 LightForward = Vector3.Back;
+	private static readonly Vector3 LightForward = Vector3.Forward;
 	// Strip lights extend sideways (perpendicular to the light's forward direction).
 	private static readonly Vector3 StripAxis = Vector3.Right;
 	private static readonly Color WhiteColor = new Color(1f, 1f, 1f, 1f);

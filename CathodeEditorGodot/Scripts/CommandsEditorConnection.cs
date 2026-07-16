@@ -89,7 +89,11 @@ public partial class CommandsEditorConnection : Node3D
     private ShortGuid _removedComposite = ShortGuid.Invalid;
 
 	public bool ShowCameraPosition => _showCameraPosition;
+	public bool FocusOnSelected => _focusOnSelected;
+	public bool FixCameraToSelected => _fixCameraToSelected;
 	private bool _showCameraPosition = true;
+	private bool _focusOnSelected = false;
+	private bool _fixCameraToSelected = false;
     private bool _hideNestedScriptEntities = false;
     private bool _renderFiltersDirty = false;
     private bool _nestedVisibilityDirty = false;
@@ -159,7 +163,45 @@ public partial class CommandsEditorConnection : Node3D
 
     private void OnSceneSelectionChanged(Node3D selectedNode)
     {
-        Callable.From(() => SyncTransformGizmoToSelection()).CallDeferred();
+        Callable.From(() =>
+        {
+            SyncTransformGizmoToSelection();
+            ApplyCameraSelectionBehavior(selectedNode);
+        }).CallDeferred();
+    }
+
+    private void ApplyCameraSelectionBehavior(Node3D selectedNode)
+    {
+        LevelViewerCamera camera = FindCamera() as LevelViewerCamera;
+        if (camera == null)
+            return;
+
+        if (selectedNode == null || !GodotObject.IsInstanceValid(selectedNode))
+        {
+            camera.ClearSelectionFollow();
+            return;
+        }
+
+        if (_focusOnSelected)
+            camera.HandleSelectionFocus(selectedNode, _fixCameraToSelected);
+        else
+            camera.ClearSelectionFollow();
+    }
+
+    private void ApplyCameraSettingsFollowState()
+    {
+        LevelViewerCamera camera = FindCamera() as LevelViewerCamera;
+        if (camera == null)
+            return;
+
+        if (!_fixCameraToSelected || !_focusOnSelected)
+        {
+            camera.ClearSelectionFollow();
+            return;
+        }
+
+        if (_scene != null && _scene.TryGetSelectedEntity(out Node3D selected))
+            camera.HandleSelectionFocus(selected, fixCamera: true);
     }
 
     public void SyncTransformGizmoToSelection(Camera3D camera = null)
@@ -514,6 +556,7 @@ public partial class CommandsEditorConnection : Node3D
                     RenderFilters.ApplyFromPacket(packet.box_render_filters);
                 MarkRenderFiltersDirty(null);
             }
+            Callable.From(ApplyCameraSettingsFollowState).CallDeferred();
             return;
         }
 
@@ -950,6 +993,11 @@ public partial class CommandsEditorConnection : Node3D
 
     private bool ApplyViewerSettings(Packet packet)
     {
+        _focusOnSelected = packet.focus_object;
+        _fixCameraToSelected = packet.fix_camera_to_selected;
+        if (_fixCameraToSelected && !_focusOnSelected)
+            _focusOnSelected = true;
+
         bool hideNestedChanged = _hideNestedScriptEntities != packet.hide_nested_script_entities;
         _hideNestedScriptEntities = packet.hide_nested_script_entities;
         PreviewVisibilitySettings.HideNestedScriptEntities = _hideNestedScriptEntities;

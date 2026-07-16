@@ -76,6 +76,10 @@ public partial class LevelViewerCamera : Camera3D
     private Vector3 _lastDisplayedPosition;
     private bool _hasDisplayedPosition;
 
+    private Node3D _followTarget;
+    private Vector3 _followLastTargetPosition;
+    private bool _followActive;
+
     public override void _Ready()
     {
         Current = true;
@@ -284,6 +288,7 @@ public partial class LevelViewerCamera : Camera3D
             ProcessEmbeddedMouseDrag(deltaSeconds);
 
         ApplyKeyboardMovement(deltaSeconds);
+        UpdateSelectionFollow();
 
         if (ShouldShowCameraPosition())
             UpdatePositionHud(positionBefore);
@@ -320,12 +325,77 @@ public partial class LevelViewerCamera : Camera3D
         _positionHudTimer = ShouldShowCameraPosition() ? HudFadeSeconds : 0f;
     }
 
+    /// <summary>
+    /// Frame the selection; optionally stick the camera so it tracks entity translation until the user moves it.
+    /// </summary>
+    public void HandleSelectionFocus(Node3D target, bool fixCamera)
+    {
+        if (target == null || !GodotObject.IsInstanceValid(target))
+        {
+            ClearSelectionFollow();
+            return;
+        }
+
+        FocusOnTarget(target);
+        if (fixCamera)
+            BeginSelectionFollow(target);
+        else
+            ClearSelectionFollow();
+    }
+
+    public void ClearSelectionFollow()
+    {
+        _followActive = false;
+        _followTarget = null;
+    }
+
+    private void BeginSelectionFollow(Node3D target)
+    {
+        if (target == null || !GodotObject.IsInstanceValid(target))
+        {
+            ClearSelectionFollow();
+            return;
+        }
+
+        _followTarget = target;
+        _followLastTargetPosition = target.GlobalPosition;
+        _followActive = true;
+    }
+
+    private void UpdateSelectionFollow()
+    {
+        if (!_followActive)
+            return;
+
+        if (_followTarget == null || !GodotObject.IsInstanceValid(_followTarget))
+        {
+            ClearSelectionFollow();
+            return;
+        }
+
+        Vector3 targetPosition = _followTarget.GlobalPosition;
+        Vector3 delta = targetPosition - _followLastTargetPosition;
+        if (delta.LengthSquared() > 0.0000001f)
+            GlobalPosition += delta;
+
+        _followLastTargetPosition = targetPosition;
+    }
+
+    private void ReleaseFollowOnUserCameraMove()
+    {
+        if (_followActive)
+            ClearSelectionFollow();
+    }
+
     private void FocusSelectedEntity()
     {
         if (_alienScene == null || !_alienScene.TryGetSelectedEntity(out Node3D selected))
             return;
 
-        FocusOnTarget(selected);
+        bool fixCamera = _commandsEditorConnection != null
+            && GodotObject.IsInstanceValid(_commandsEditorConnection)
+            && _commandsEditorConnection.FixCameraToSelected;
+        HandleSelectionFocus(selected, fixCamera);
     }
 
     private void OnCompositeLoaded()
@@ -429,6 +499,7 @@ public partial class LevelViewerCamera : Camera3D
         if (move.LengthSquared() > 0f)
         {
             LevelViewerRenderIdleThrottle.NotifyUserActivity();
+            ReleaseFollowOnUserCameraMove();
             GlobalPosition += move.Normalized() * speed;
         }
     }
@@ -609,6 +680,7 @@ public partial class LevelViewerCamera : Camera3D
             return;
 
         LevelViewerRenderIdleThrottle.NotifyUserActivity();
+        ReleaseFollowOnUserCameraMove();
         _yaw -= relative.X * LookSensitivity;
         _pitch -= relative.Y * LookSensitivity;
         _pitch = Mathf.Clamp(_pitch, -1.55f, 1.55f);
@@ -631,6 +703,10 @@ public partial class LevelViewerCamera : Camera3D
             velocity = relative / deltaSeconds;
 
         Vector3 pan = -right * velocity.X + up * velocity.Y;
+        if (pan.LengthSquared() <= 0.0001f)
+            return;
+
+        ReleaseFollowOnUserCameraMove();
         GlobalPosition += pan * MoveSpeed * PanSensitivity * deltaSeconds;
         SyncAnglesFromTransform();
         if (ShouldShowCameraPosition())

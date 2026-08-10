@@ -4149,7 +4149,7 @@ public class LevelContent
 		Reset();
 
 		if (Global == null)
-			Global = new Global(aiPath + "\\DATA\\ENV\\GLOBAL", new PAK2(aiPath + "\\DATA\\GLOBAL\\ANIMATION.PAK"));
+			Global = new Global(aiPath + "\\DATA\\ENV\\GLOBAL");
 		Level = new Level(aiPath + "\\DATA\\ENV\\" + levelName, Global);
 	}
 

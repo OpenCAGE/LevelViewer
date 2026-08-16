@@ -662,11 +662,19 @@ public partial class CommandsEditorConnection : Node3D
                             switch (packet.entity_variant)
                             {
                                 case EntityVariant.FUNCTION:
-                                    composite.AddFunction(new FunctionEntity() { shortGUID = entityId, function = new ShortGuid(packet.entity_function) });
+                                {
+                                    FunctionEntity functionEntity = new FunctionEntity() { shortGUID = entityId, function = new ShortGuid(packet.entity_function) };
+                                    composite.AddFunction(functionEntity);
+                                    ApplyEntityAddedParameters(functionEntity, packet);
                                     break;
+                                }
                                 case EntityVariant.VARIABLE:
-                                    composite.AddVariable(new VariableEntity() { shortGUID = entityId });
+                                {
+                                    VariableEntity variableEntity = new VariableEntity() { shortGUID = entityId };
+                                    composite.AddVariable(variableEntity);
+                                    ApplyEntityAddedParameters(variableEntity, packet);
                                     break;
+                                }
                                 case EntityVariant.ALIAS:
                                 {
                                     EntityPath aliasPath = new EntityPath() { path = new ShortGuid[packet.entity_pointed.Count] };
@@ -682,7 +690,9 @@ public partial class CommandsEditorConnection : Node3D
                                     EntityPath proxy = new EntityPath() { path = new ShortGuid[packet.entity_pointed.Count] };
                                     for (int i = 0; i < packet.entity_pointed.Count; i++)
                                         proxy.path[i] = new ShortGuid(packet.entity_pointed[i]);
-                                    composite.AddProxy(new ProxyEntity() { shortGUID = entityId, proxy = proxy });
+                                    ProxyEntity proxyEntity = new ProxyEntity() { shortGUID = entityId, proxy = proxy };
+                                    composite.AddProxy(proxyEntity);
+                                    ApplyEntityAddedParameters(proxyEntity, packet);
                                     break;
                                 }
                             }

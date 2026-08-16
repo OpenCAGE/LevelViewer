@@ -13,7 +13,10 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <Compile Include="..\..\..\CathodeLib\CathodeLib\Scripts\**\*.cs" Exclude="..\..\..\CathodeLib\CathodeLib\Scripts\Instancing.cs" Link="CathodeLib\%(RecursiveDir)%(Filename)%(Extension)" />
+    <!-- *.Template.cs files hold raw text (HTML/CSS) inside #if-disabled regions; C# still scans skipped
+         lines starting with '#' as preprocessor directives, so they cannot be compiled here at all.
+         SoundNodeNetworkGenerator's body is #if'd out for GODOT but its usings (Radiosity/NanoRT) are not. -->
+    <Compile Include="..\..\..\CathodeLib\CathodeLib\Scripts\**\*.cs" Exclude="..\..\..\CathodeLib\CathodeLib\Scripts\Instancing.cs;..\..\..\CathodeLib\CathodeLib\Scripts\**\*.Template.cs;..\..\..\CathodeLib\CathodeLib\Scripts\CATHODE\Sound Network\SoundNodeNetworkGenerator.cs" Link="CathodeLib\%(RecursiveDir)%(Filename)%(Extension)" />
     <Compile Include="..\..\..\CathodeLib\AlienBML\BML.cs" Link="CathodeLib\Scripts\CATHODE\BML.cs" />
     <Compile Include="..\..\..\CathodeLib\CathodeLib\Properties\Resources.Designer.cs" Link="CathodeLib\Properties\Resources.Designer.cs">
       <DependentUpon>Resources.resx</DependentUpon>

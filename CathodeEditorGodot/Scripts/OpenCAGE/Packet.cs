@@ -28,6 +28,9 @@ namespace OpenCAGE.UnityConnection
         VIEWER_POPULATE_FINISHED,
         VIEWPORT_MODE_CHANGED,
         GENERIC_DATA_SYNC,
+
+        // Level Viewer -> OpenCAGE: create an entity of create_function_type at `position` (creation mode).
+        ENTITY_CREATE_REQUEST,
     }
 
     public class Packet
@@ -39,7 +42,7 @@ namespace OpenCAGE.UnityConnection
 
         //Packet metadata
         public PacketEvent packet_event;
-        public int version = 6;
+        public int version = 7;
 
         //Setup metadata
         public string level_name = "";
@@ -85,6 +88,8 @@ namespace OpenCAGE.UnityConnection
         public float rotation_snap_degrees = 0f;
         public int deep_select_mode = 0;
         public int gizmo_mode = 0;
+        // Entity creation mode: FunctionType (uint) to place on viewport click, 0 = creation mode off.
+        public uint create_function_type = 0;
         public Dictionary<uint, bool> box_render_filters = new Dictionary<uint, bool>();
 
         // Level Viewer log line forwarded to OpenCAGE (VIEWER_LOG).

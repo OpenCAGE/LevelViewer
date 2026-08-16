@@ -107,6 +107,11 @@ public partial class CommandsEditorConnection : Node3D
     private LevelViewerTransformGizmo _transformGizmo;
     public LevelViewerTransformGizmo TransformGizmo => _transformGizmo;
 
+    /// <summary>Entity creation mode: FunctionType (uint) placed on viewport click, 0 = off.</summary>
+    private uint _createFunctionType;
+    private static Texture2D _penCursorTexture;
+    public bool CreateModeActive => _createFunctionType != 0;
+
     /// <summary>Block resync echo from our own outbound transform packets.</summary>
     private bool _suppressParameterResync;
     private bool _compositeFocusDirty;
@@ -211,6 +216,13 @@ public partial class CommandsEditorConnection : Node3D
 
         if (_transformGizmo == null)
             return;
+
+        //Creation mode disables the transform gizmo entirely
+        if (CreateModeActive)
+        {
+            _transformGizmo.ClearTarget();
+            return;
+        }
 
         Camera3D activeCamera = camera ?? FindCamera();
         if (_scene != null
@@ -1022,6 +1034,7 @@ public partial class CommandsEditorConnection : Node3D
 
         ApplyDeepSelectModeFromPacket(packet.deep_select_mode);
         ApplyGizmoModeFromPacket(packet.gizmo_mode);
+        ApplyCreateModeFromPacket(packet.create_function_type);
 
         if (packet.model_reference_wireframe != ModelReferenceRenderSettings.WireframeEnabled)
             _scene.SetModelReferenceWireframe(packet.model_reference_wireframe);
@@ -1065,6 +1078,92 @@ public partial class CommandsEditorConnection : Node3D
 
         _transformGizmo.SetMode(next);
         SyncTransformGizmoToSelection();
+    }
+
+    private void ApplyCreateModeFromPacket(uint createFunctionType)
+    {
+        if (_createFunctionType == createFunctionType)
+            return;
+
+        _createFunctionType = createFunctionType;
+        ApplyCreateModeCursor();
+
+        if (CreateModeActive)
+        {
+            EnsureTransformGizmo();
+            _transformGizmo?.ClearTarget();
+        }
+        else
+        {
+            SyncTransformGizmoToSelection();
+        }
+    }
+
+    private void ApplyCreateModeCursor()
+    {
+        if (CreateModeActive)
+        {
+            if (_penCursorTexture == null && ResourceLoader.Exists("res://textures/cursor_pen.png"))
+                _penCursorTexture = ResourceLoader.Load<Texture2D>("res://textures/cursor_pen.png");
+
+            if (_penCursorTexture != null)
+                Input.SetCustomMouseCursor(_penCursorTexture, Input.CursorShape.Arrow, new Vector2(3f, 29f));
+            else
+                Input.SetDefaultCursorShape(Input.CursorShape.Cross);
+        }
+        else
+        {
+            Input.SetCustomMouseCursor(null);
+            Input.SetDefaultCursorShape(Input.CursorShape.Arrow);
+        }
+    }
+
+    /// <summary>Exit entity creation mode (e.g. gizmo hotkey pressed). Safe to call when inactive.</summary>
+    public void ExitCreateMode()
+    {
+        if (!CreateModeActive)
+            return;
+
+        _createFunctionType = 0;
+        ApplyCreateModeCursor();
+        SyncTransformGizmoToSelection();
+    }
+
+    /// <summary>
+    /// Creation-mode click: raycast the scene for a placement position and ask OpenCAGE to create
+    /// an entity of the active function type there.
+    /// </summary>
+    public bool TryCreateEntityAtScreen(Camera3D camera, Vector2 screenPosition)
+    {
+        if (!CreateModeActive || _scene == null || !_scene.Content.Loaded)
+            return false;
+
+        uint compositeId;
+        bool compositeLoaded;
+        lock (_lock)
+        {
+            compositeId = _currentComposite;
+            compositeLoaded = _compositeLoaded;
+        }
+
+        if (!compositeLoaded || compositeId == 0)
+            return false;
+
+        if (!_scene.TryComputeCreatePlacement(camera, screenPosition, out Vector3 godotLocalPosition))
+            return false;
+
+        Vector3 cathodePosition = CathodeCoordinates.PositionFromGodot(godotLocalPosition);
+
+        Packet packet = new Packet(PacketEvent.ENTITY_CREATE_REQUEST)
+        {
+            composite = compositeId,
+            entity_function = _createFunctionType,
+            has_transform = true,
+            position = new System.Numerics.Vector3(cathodePosition.X, cathodePosition.Y, cathodePosition.Z),
+            rotation = new System.Numerics.Vector3(0f, 0f, 0f),
+        };
+        SendMessage(packet);
+        return true;
     }
 
     private bool ApplyActiveComposite(Packet packet)
@@ -1291,6 +1390,7 @@ public partial class CommandsEditorConnection : Node3D
         {
             deep_select_mode = (int)PreviewVisibilitySettings.DeepSelectMode,
             gizmo_mode = gizmoMode,
+            create_function_type = _createFunctionType,
         });
     }
 

@@ -1007,6 +1007,47 @@ public partial class AlienScene : Node3D
 		return false;
 	}
 
+	/// <summary>
+	/// Raycast placement for entity creation mode: hit scene geometry (or fall back to a point in
+	/// front of the camera) and convert the world position into the active composite's local space
+	/// (the space of a root entity "position" parameter). Godot coordinates.
+	/// </summary>
+	public bool TryComputeCreatePlacement(Camera3D camera, Vector2 screenPosition, out Vector3 localPosition)
+	{
+		localPosition = Vector3.Zero;
+		if (camera == null || _parentNode == null || !GodotObject.IsInstanceValid(_parentNode))
+			return false;
+
+		Vector3 origin = camera.ProjectRayOrigin(screenPosition);
+		Vector3 direction = camera.ProjectRayNormal(screenPosition);
+		if (direction.LengthSquared() < 0.0001f)
+			return false;
+		direction = direction.Normalized();
+
+		const float fallbackDistance = 5f;
+		float distance = fallbackDistance;
+		LevelViewerPick.PickHit? hit = LevelViewerPick.PickClosest(
+			_parentNode, camera, screenPosition, _parentNode, _content.Level?.Commands);
+		if (hit.HasValue)
+			distance = hit.Value.Distance;
+
+		Vector3 worldPosition = origin + direction * distance;
+
+		Node3D parentNode = ResolveActiveCompositeParentNode();
+		if (parentNode == null || !GodotObject.IsInstanceValid(parentNode) || !parentNode.IsInsideTree())
+			return false;
+
+		localPosition = parentNode.GlobalTransform.AffineInverse() * worldPosition;
+
+		float gridSnap = LevelViewerTransformSnap.GridSize;
+		localPosition = new Vector3(
+			LevelViewerTransformSnap.SnapValue(localPosition.X, gridSnap),
+			LevelViewerTransformSnap.SnapValue(localPosition.Y, gridSnap),
+			LevelViewerTransformSnap.SnapValue(localPosition.Z, gridSnap));
+
+		return true;
+	}
+
 	private Node3D ResolveActiveCompositeParentNode()
 	{
 		if (_parentNode == null || !GodotObject.IsInstanceValid(_parentNode))

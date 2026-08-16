@@ -559,6 +559,16 @@ public partial class LevelViewerCamera : Camera3D
         switch (mouseButton.ButtonIndex)
         {
             case MouseButton.Left:
+                if (_commandsEditorConnection == null || !GodotObject.IsInstanceValid(_commandsEditorConnection))
+                    _commandsEditorConnection = GetNodeOrNull<CommandsEditorConnection>(CommandsEditorConnectionPath);
+
+                // Creation mode: clicks place a new entity instead of selecting.
+                if (_commandsEditorConnection != null && _commandsEditorConnection.CreateModeActive)
+                {
+                    _commandsEditorConnection.TryCreateEntityAtScreen(this, mouseButton.Position);
+                    GetViewport().SetInputAsHandled();
+                    break;
+                }
                 // Let the gizmo consume LMB before the pick/select logic.
                 if (TryGizmoMouseDown(mouseButton.Position))
                 {
@@ -1258,6 +1268,9 @@ public partial class LevelViewerCamera : Camera3D
         LevelViewerTransformGizmo gizmo = GetGizmo();
         if (gizmo == null)
             return;
+
+        // Choosing a gizmo mode exits entity creation mode.
+        _commandsEditorConnection?.ExitCreateMode();
 
         gizmo.SetMode(mode);
 

@@ -17,6 +17,9 @@ namespace OpenCAGE
         SoundNetworkNode,
         SoundObject,
         CameraResource,
+        Sphere,
+        Pyramid,
+        UiIcon,
     }
 
     /// <summary>
@@ -87,6 +90,14 @@ namespace OpenCAGE
             new Definition(FunctionType.SurfaceEffectBox, RenderPreviewKind.Box, 0.5f, 0.9f, 0.4f),
             new Definition(FunctionType.UiSelectionBox, RenderPreviewKind.Box, 0.95f, 0.9f, 0.5f),
 
+            // Sphere volumes (all expose a "radius" float)
+            new Definition(FunctionType.FogSphere, RenderPreviewKind.Sphere, 0.6f, 0.6f, 0.6f),
+            new Definition(FunctionType.ImpactSphere, RenderPreviewKind.Sphere, 0.95f, 0.3f, 0.25f),
+            new Definition(FunctionType.Sphere, RenderPreviewKind.Sphere, 1f, 0.9f, 0.3f),
+            new Definition(FunctionType.SurfaceEffectSphere, RenderPreviewKind.Sphere, 0.95f, 0.95f, 0.95f),
+            new Definition(FunctionType.TriggerCameraVolume, RenderPreviewKind.Sphere, 0.3f, 0.6f, 1f),
+            new Definition(FunctionType.UiSelectionSphere, RenderPreviewKind.Sphere, 1f, 1f, 1f),
+
             // Other previews
             new Definition(FunctionType.Sound, RenderPreviewKind.Sound, 0.2f, 0.45f, 1f),
             new Definition(FunctionType.PositionMarker, RenderPreviewKind.PositionMarker, 1f, 0.55f, 0.1f),
@@ -101,6 +112,12 @@ namespace OpenCAGE
             new Definition(FunctionType.EnvironmentMap, RenderPreviewKind.EnvironmentMap, 0.45f, 0.8f, 0.9f),
             new Definition(FunctionType.SoundNetworkNode, RenderPreviewKind.SoundNetworkNode, 0.7f, 0.3f, 0.95f),
             new Definition(FunctionType.SoundObject, RenderPreviewKind.SoundObject, 0.25f, 0.75f, 0.45f),
+            new Definition(FunctionType.ChokePoint, RenderPreviewKind.PositionMarker, 0.9f, 0.2f, 0.2f),
+            new Definition(FunctionType.ProximityTrigger, RenderPreviewKind.PositionMarker, 0.65f, 0.3f, 0.95f),
+            new Definition(FunctionType.EFFECT_EntityGenerator, RenderPreviewKind.Pyramid, 0.3f, 0.55f, 1f),
+            new Definition(FunctionType.EFFECT_ImpactGenerator, RenderPreviewKind.Pyramid, 0.95f, 0.3f, 0.25f),
+            new Definition(FunctionType.Trigger_AudioOccluded, RenderPreviewKind.Pyramid, 1f, 0.5f, 0.8f),
+            new Definition(FunctionType.UI_Icon, RenderPreviewKind.UiIcon, 0.85f, 0.85f, 0.9f),
 
             // Pathfinding / nav / camera
             new Definition(FunctionType.PathfindingAlienBackstageNode, RenderPreviewKind.PositionMarker, 0.2f, 0.45f, 1f),
@@ -133,11 +150,12 @@ namespace OpenCAGE
         }
 
         /// <summary>
-        /// Box volumes use the semi-transparent preview shader; all other mesh gizmos are fully opaque.
+        /// Box/sphere volumes use the semi-transparent preview shader; all other mesh gizmos are fully opaque.
         /// </summary>
         public static bool UsesTransparentPreview(RenderPreviewKind previewKind)
         {
-            return previewKind == RenderPreviewKind.Box;
+            return previewKind == RenderPreviewKind.Box
+                || previewKind == RenderPreviewKind.Sphere;
         }
 
         public static bool UsesTransparentPreview(FunctionType functionType)

@@ -13,6 +13,7 @@ public partial class IconBillboardPreview : FunctionEntityPreview
         Light,
         Particle,
         Camera,
+        UIIcon,
     }
 
     private IconKind _iconKind;

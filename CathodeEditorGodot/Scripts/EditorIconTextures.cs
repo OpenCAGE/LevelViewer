@@ -13,6 +13,7 @@ internal static class EditorIconTextures
 	private static Texture2D _light;
 	private static Texture2D _particle;
 	private static Texture2D _camera;
+	private static Texture2D _uiIcon;
 	private static bool _loaded;
 
 	private const string SoundResourcePath = "res://textures/preview_icons/sound.png";
@@ -20,6 +21,7 @@ internal static class EditorIconTextures
 	private const string LightResourcePath = "res://textures/preview_icons/light.png";
 	private const string ParticleResourcePath = "res://textures/preview_icons/particle.png";
 	private const string CameraResourcePath = "res://textures/preview_icons/camera.png";
+	private const string UIIconResourcePath = "res://textures/preview_icons/button_a.png";
 
 	public static Texture2D Get(IconBillboardPreview.IconKind kind)
 	{
@@ -36,6 +38,8 @@ internal static class EditorIconTextures
 				return _particle;
 			case IconBillboardPreview.IconKind.Camera:
 				return _camera;
+			case IconBillboardPreview.IconKind.UIIcon:
+				return _uiIcon;
 			default:
 				return null;
 		}
@@ -51,6 +55,7 @@ internal static class EditorIconTextures
 		_light = TryLoadResourceIcon(LightResourcePath);
 		_particle = TryLoadResourceIcon(ParticleResourcePath);
 		_camera = TryLoadResourceIcon(CameraResourcePath);
+		_uiIcon = TryLoadResourceIcon(UIIconResourcePath);
 		_loaded = true;
 	}
 

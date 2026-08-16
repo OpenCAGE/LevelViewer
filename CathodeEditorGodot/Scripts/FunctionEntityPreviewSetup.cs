@@ -67,6 +67,12 @@ public static class FunctionEntityPreviewSetup
                 return AddIcon(entityNode, function, IconBillboardPreview.IconKind.SoundObject, ownerCompositeId);
             case RenderPreviewKind.CameraResource:
                 return AddIcon(entityNode, function, IconBillboardPreview.IconKind.Camera, ownerCompositeId);
+            case RenderPreviewKind.Sphere:
+                return AddPreview<SpherePreview>(entityNode, p => p.Setup(function, ownerCompositeId));
+            case RenderPreviewKind.Pyramid:
+                return AddPreview<PyramidPreview>(entityNode, p => p.Setup(function, ownerCompositeId));
+            case RenderPreviewKind.UiIcon:
+                return AddIcon(entityNode, function, IconBillboardPreview.IconKind.UIIcon, ownerCompositeId);
             default:
                 return false;
         }

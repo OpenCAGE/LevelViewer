@@ -152,6 +152,7 @@ public partial class AlienScene : Node3D
 		RegisterParameterVisualHandler(DataType.VECTOR, ApplyVectorVisual);
 		RegisterParameterVisualHandler(DataType.SPLINE, ApplySplineVisual);
 		RegisterParameterVisualHandler(DataType.BOOL, ApplyBoolVisual);
+		RegisterParameterVisualHandler(DataType.FLOAT, ApplyFloatVisual);
 	}
 
 	public override void _ExitTree()
@@ -2909,6 +2910,14 @@ public partial class AlienScene : Node3D
 		RefreshBoxPreviews(context.EntityNode);
 	}
 
+	private void ApplyFloatVisual(ParameterVisualContext context)
+	{
+		if (context.Sync != null && new ShortGuid(context.Sync.name) != ShortGuidUtils.Generate("radius"))
+			return;
+
+		RefreshSpherePreviews(context.EntityNode);
+	}
+
 	private static void RefreshBoxPreviews(Node3D entityNode)
 	{
 		if (entityNode == null)
@@ -2917,6 +2926,16 @@ public partial class AlienScene : Node3D
 		BoxPreview[] boxPreviews = EntityNodeUtil.FindPreviews<BoxPreview>(entityNode);
 		for (int i = 0; i < boxPreviews.Length; i++)
 			boxPreviews[i].RefreshDimensions();
+	}
+
+	private static void RefreshSpherePreviews(Node3D entityNode)
+	{
+		if (entityNode == null)
+			return;
+
+		SpherePreview[] spherePreviews = EntityNodeUtil.FindPreviews<SpherePreview>(entityNode);
+		for (int i = 0; i < spherePreviews.Length; i++)
+			spherePreviews[i].RefreshDimensions();
 	}
 
 	private void ApplySplineVisual(ParameterVisualContext context)

@@ -1129,6 +1129,49 @@ public partial class CommandsEditorConnection : Node3D
         SyncTransformGizmoToSelection();
     }
 
+    /// <summary>Ctrl+C in the viewport: copy the selected entity to OpenCAGE's shared entity clipboard.</summary>
+    public void SendEntityClipboardCopy()
+    {
+        uint compositeId;
+        uint entityId;
+        bool entitySelected;
+        lock (_lock)
+        {
+            compositeId = _currentComposite;
+            entityId = _currentEntity;
+            entitySelected = _entitySelected;
+        }
+
+        if (!entitySelected || compositeId == 0 || entityId == 0)
+            return;
+
+        SendMessage(new Packet(PacketEvent.ENTITY_CLIPBOARD_COPY)
+        {
+            composite = compositeId,
+            entity = entityId,
+        });
+    }
+
+    /// <summary>Ctrl+V in the viewport: ask OpenCAGE to paste its entity clipboard into the current composite.</summary>
+    public void SendEntityClipboardPaste()
+    {
+        uint compositeId;
+        bool compositeLoaded;
+        lock (_lock)
+        {
+            compositeId = _currentComposite;
+            compositeLoaded = _compositeLoaded;
+        }
+
+        if (!compositeLoaded || compositeId == 0)
+            return;
+
+        SendMessage(new Packet(PacketEvent.ENTITY_CLIPBOARD_PASTE)
+        {
+            composite = compositeId,
+        });
+    }
+
     /// <summary>
     /// Creation-mode click: raycast the scene for a placement position and ask OpenCAGE to create
     /// an entity of the active function type there.

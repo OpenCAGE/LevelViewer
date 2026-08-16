@@ -154,7 +154,17 @@ public partial class LevelViewerCamera : Camera3D
         switch (@event)
         {
             case InputEventKey keyEvent when keyEvent.Pressed && !keyEvent.Echo:
-                if (keyEvent.Keycode == Key.Z)
+                if (keyEvent.Keycode == Key.C && keyEvent.CtrlPressed)
+                {
+                    _commandsEditorConnection?.SendEntityClipboardCopy();
+                    GetViewport().SetInputAsHandled();
+                }
+                else if (keyEvent.Keycode == Key.V && keyEvent.CtrlPressed)
+                {
+                    _commandsEditorConnection?.SendEntityClipboardPaste();
+                    GetViewport().SetInputAsHandled();
+                }
+                else if (keyEvent.Keycode == Key.Z)
                 {
                     FocusSelectedEntity();
                     GetViewport().SetInputAsHandled();

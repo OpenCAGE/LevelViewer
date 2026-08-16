@@ -31,6 +31,11 @@ namespace OpenCAGE.UnityConnection
 
         // Level Viewer -> OpenCAGE: create an entity of create_function_type at `position` (creation mode).
         ENTITY_CREATE_REQUEST,
+
+        // Level Viewer -> OpenCAGE: copy the given entity to the shared entity clipboard (Ctrl+C).
+        ENTITY_CLIPBOARD_COPY,
+        // Level Viewer -> OpenCAGE: paste the shared entity clipboard into the given composite (Ctrl+V).
+        ENTITY_CLIPBOARD_PASTE,
     }
 
     public class Packet
@@ -42,7 +47,7 @@ namespace OpenCAGE.UnityConnection
 
         //Packet metadata
         public PacketEvent packet_event;
-        public int version = 7;
+        public int version = 8;
 
         //Setup metadata
         public string level_name = "";

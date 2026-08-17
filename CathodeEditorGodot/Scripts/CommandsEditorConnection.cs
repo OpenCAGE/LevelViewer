@@ -131,6 +131,14 @@ public partial class CommandsEditorConnection : Node3D
 
     public bool IsWebSocketConnected => _client != null && _client.State == WebSocketState.Open;
 
+    //OpenCAGE launches (and owns) this process, so once it's gone there's nothing for us to do. Without this
+    //the reconnect loop would retry forever and leave an orphaned viewer running in the background whenever
+    //OpenCAGE is force-closed. Ports are per-instance, so this only ever reacts to our own editor going away.
+    private const double EditorLostShutdownSeconds = 30.0;
+    private bool _hasConnectedOnce;
+    private DateTime? _editorLostAt;
+    private bool _shutdownRequested;
+
     public override void _Ready()
     {
         ViewerLog.InstallGlobalExceptionHandlers();
@@ -1317,7 +1325,17 @@ public partial class CommandsEditorConnection : Node3D
                 ViewerLog.Print("Connected to Commands Editor!");
                 ViewerLogBridge.NotifyConnected();
 
-                await ReceiveLoopAsync(_client, cancellationToken);
+                _hasConnectedOnce = true;
+                _editorLostAt = null;
+
+                bool closedByEditor = await ReceiveLoopAsync(_client, cancellationToken);
+
+                //A close frame means OpenCAGE shut the session down on purpose - no need to wait around
+                if (closedByEditor)
+                {
+                    RequestEditorLostShutdown("the Commands Editor closed the connection");
+                    break;
+                }
             }
             catch (OperationCanceledException)
             {
@@ -1333,6 +1351,21 @@ public partial class CommandsEditorConnection : Node3D
 
             ViewerLog.Print("Disconnected from Commands Editor!");
 
+            //If we've had a session and can't get it back, OpenCAGE has gone away - shut down rather than
+            //retrying forever. Brief drops are tolerated so a busy editor doesn't kill the viewer.
+            if (_hasConnectedOnce)
+            {
+                if (_editorLostAt == null)
+                {
+                    _editorLostAt = DateTime.UtcNow;
+                }
+                else if ((DateTime.UtcNow - _editorLostAt.Value).TotalSeconds >= EditorLostShutdownSeconds)
+                {
+                    RequestEditorLostShutdown("no Commands Editor for " + EditorLostShutdownSeconds + "s");
+                    break;
+                }
+            }
+
             try
             {
                 await Task.Delay(1500, cancellationToken);
@@ -1344,7 +1377,8 @@ public partial class CommandsEditorConnection : Node3D
         }
     }
 
-    private async Task ReceiveLoopAsync(ClientWebSocket client, CancellationToken cancellationToken)
+    /// <returns>True if the editor closed the session cleanly (rather than the connection just dropping).</returns>
+    private async Task<bool> ReceiveLoopAsync(ClientWebSocket client, CancellationToken cancellationToken)
     {
         byte[] buffer = new byte[8192];
         StringBuilder messageBuilder = new StringBuilder();
@@ -1354,7 +1388,7 @@ public partial class CommandsEditorConnection : Node3D
             WebSocketReceiveResult result = await client.ReceiveAsync(new ArraySegment<byte>(buffer), cancellationToken);
 
             if (result.MessageType == WebSocketMessageType.Close)
-                break;
+                return true;
 
             messageBuilder.Append(Encoding.UTF8.GetString(buffer, 0, result.Count));
 
@@ -1366,6 +1400,30 @@ public partial class CommandsEditorConnection : Node3D
                 messageBuilder.Clear();
             }
         }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Close the viewer because the editor that owns it has gone away.
+    /// </summary>
+    private void RequestEditorLostShutdown(string reason)
+    {
+        if (_shutdownRequested)
+            return;
+        _shutdownRequested = true;
+
+        ViewerLog.Print("[Viewer] Closing: " + reason + ".");
+
+        //Called from the connection task, so hand the actual quit back to the main thread
+        Callable.From(() =>
+        {
+            SceneTree tree = GetTree();
+            if (tree != null)
+                tree.Quit();
+            else
+                OS.Kill(OS.GetProcessId()); //not in the tree (shouldn't happen) - make sure we still exit
+        }).CallDeferred();
     }
 
     public void SendViewerLog(string message, bool isError)

@@ -135,9 +135,18 @@ public partial class CommandsEditorConnection : Node3D
     //the reconnect loop would retry forever and leave an orphaned viewer running in the background whenever
     //OpenCAGE is force-closed. Ports are per-instance, so this only ever reacts to our own editor going away.
     private const double EditorLostShutdownSeconds = 30.0;
-    private bool _hasConnectedOnce;
-    private DateTime? _editorLostAt;
-    private bool _shutdownRequested;
+
+    /// <summary>How long the polite shutdown gets before the process is taken down by force.</summary>
+    private const int HardExitGraceMilliseconds = 5000;
+
+    /// <summary>
+    /// When the editor was last known to be there, as UTC ticks. Starts at process start, so a viewer
+    /// that never manages to connect at all still times out rather than retrying forever.
+    /// </summary>
+    private long _lastConnectedTicks;
+
+    private volatile bool _shutdownRequested;
+    private Thread _watchdogThread;
 
     public override void _Ready()
     {
@@ -152,7 +161,70 @@ public partial class CommandsEditorConnection : Node3D
             _scene.OnSelectionChanged += OnSceneSelectionChanged;
         Callable.From(EnsureTransformGizmo).CallDeferred();
         SetPhysicsProcess(false);
+        Interlocked.Exchange(ref _lastConnectedTicks, DateTime.UtcNow.Ticks);
+        StartEditorWatchdog();
         _ = ReconnectLoopAsync(_connectionCts.Token);
+    }
+
+    /// <summary>
+    /// Watches for the editor going away, on a thread of its own.
+    ///
+    /// Deliberately not part of the reconnect loop. That loop is async, so every await resumes on
+    /// Godot's synchronisation context - the main thread - which means it only makes progress while the
+    /// main loop is turning. The situation this guard exists for is exactly the one where that can't be
+    /// relied on: the viewer's stdout is a pipe owned by OpenCAGE and its window is a child of an
+    /// OpenCAGE window, so an editor that dies badly can leave the main loop wedged and the timeout
+    /// never reached.
+    /// </summary>
+    private void StartEditorWatchdog()
+    {
+        _watchdogThread = new Thread(EditorWatchdogLoop)
+        {
+            Name = "OpenCAGE editor watchdog",
+            IsBackground = true,
+        };
+        _watchdogThread.Start();
+    }
+
+    private void EditorWatchdogLoop()
+    {
+        while (!_shutdownRequested)
+        {
+            Thread.Sleep(1000);
+
+            CancellationTokenSource cts = _connectionCts;
+            if (cts == null || cts.IsCancellationRequested)
+                return;
+
+            //Socket state, not loop progress: a long level load blocks the main thread for a while, and
+            //that must not read as a lost editor while the connection is still up
+            if (IsWebSocketConnectedSafe())
+            {
+                Interlocked.Exchange(ref _lastConnectedTicks, DateTime.UtcNow.Ticks);
+                continue;
+            }
+
+            DateTime lastConnected = new DateTime(Interlocked.Read(ref _lastConnectedTicks), DateTimeKind.Utc);
+            if ((DateTime.UtcNow - lastConnected).TotalSeconds < EditorLostShutdownSeconds)
+                continue;
+
+            RequestEditorLostShutdown("no Commands Editor for " + EditorLostShutdownSeconds + "s");
+            return;
+        }
+    }
+
+    private bool IsWebSocketConnectedSafe()
+    {
+        try
+        {
+            ClientWebSocket client = _client;
+            return client != null && client.State == WebSocketState.Open;
+        }
+        catch
+        {
+            //Raced with the reconnect loop disposing and replacing it
+            return false;
+        }
     }
 
     public void EnsureTransformGizmo()
@@ -1373,8 +1445,7 @@ public partial class CommandsEditorConnection : Node3D
                 ViewerLog.Print("Connected to Commands Editor!");
                 ViewerLogBridge.NotifyConnected();
 
-                _hasConnectedOnce = true;
-                _editorLostAt = null;
+                Interlocked.Exchange(ref _lastConnectedTicks, DateTime.UtcNow.Ticks);
 
                 bool closedByEditor = await ReceiveLoopAsync(_client, cancellationToken);
 
@@ -1399,20 +1470,10 @@ public partial class CommandsEditorConnection : Node3D
 
             ViewerLog.Print("Disconnected from Commands Editor!");
 
-            //If we've had a session and can't get it back, OpenCAGE has gone away - shut down rather than
-            //retrying forever. Brief drops are tolerated so a busy editor doesn't kill the viewer.
-            if (_hasConnectedOnce)
-            {
-                if (_editorLostAt == null)
-                {
-                    _editorLostAt = DateTime.UtcNow;
-                }
-                else if ((DateTime.UtcNow - _editorLostAt.Value).TotalSeconds >= EditorLostShutdownSeconds)
-                {
-                    RequestEditorLostShutdown("no Commands Editor for " + EditorLostShutdownSeconds + "s");
-                    break;
-                }
-            }
+            //Giving up is the watchdog thread's job - see StartEditorWatchdog. Keeping the deadline out
+            //of this loop is the whole point: this loop can stall, and the deadline must not stall with it.
+            if (_shutdownRequested)
+                break;
 
             try
             {
@@ -1463,7 +1524,7 @@ public partial class CommandsEditorConnection : Node3D
 
         ViewerLog.Print("[Viewer] Closing: " + reason + ".");
 
-        //Called from the connection task, so hand the actual quit back to the main thread
+        //Called from the watchdog or the connection task, so hand the actual quit to the main thread
         Callable.From(() =>
         {
             SceneTree tree = GetTree();
@@ -1472,6 +1533,28 @@ public partial class CommandsEditorConnection : Node3D
             else
                 OS.Kill(OS.GetProcessId()); //not in the tree (shouldn't happen) - make sure we still exit
         }).CallDeferred();
+
+        //...and then make sure of it. Both CallDeferred and SceneTree.Quit need the main loop to still be
+        //turning, and an editor that died badly is exactly the case where it might not be. Leaving an
+        //orphaned viewer behind is the one outcome this must not have, so the polite path gets a grace
+        //period and then the process takes itself down from a thread that needs nothing from Godot.
+        Thread forceExit = new Thread(() =>
+        {
+            Thread.Sleep(HardExitGraceMilliseconds);
+            try
+            {
+                ViewerLog.PrintErr("[Viewer] Shutdown did not complete in time - exiting the hard way.");
+                System.Diagnostics.Process.GetCurrentProcess().Kill();
+            }
+            catch
+            {
+            }
+        })
+        {
+            Name = "OpenCAGE viewer force exit",
+            IsBackground = true,
+        };
+        forceExit.Start();
     }
 
     public void SendViewerLog(string message, bool isError)

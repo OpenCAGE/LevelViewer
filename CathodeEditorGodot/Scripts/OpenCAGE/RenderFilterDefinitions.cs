@@ -23,6 +23,37 @@ namespace OpenCAGE
     }
 
     /// <summary>
+    /// Scene geometry categories that aren't tied to a FunctionType. These are normally not drawn at
+    /// all, and are rendered in a flat filter colour when switched on.
+    /// </summary>
+    public enum SceneFilterKind
+    {
+        OcclusionMeshes,
+        CollisionMeshes,
+    }
+
+    public readonly struct SceneFilterDefinition
+    {
+        public readonly SceneFilterKind Kind;
+        public readonly string Label;
+        public readonly float R;
+        public readonly float G;
+        public readonly float B;
+
+        public SceneFilterDefinition(SceneFilterKind kind, string label, float r, float g, float b)
+        {
+            Kind = kind;
+            Label = label;
+            R = r;
+            G = g;
+            B = b;
+        }
+
+        /// <summary>Settings key, and the name this filter travels under in the packet.</summary>
+        public string Key => Kind.ToString();
+    }
+
+    /// <summary>
     /// Hardcoded function types with Level Viewer previews and their filter colours.
     /// Canonical copy for Level Viewer and OpenCAGE (linked in OpenCAGE.csproj).
     /// </summary>
@@ -127,6 +158,27 @@ namespace OpenCAGE
             new Definition(FunctionType.PathfindingTeleportNode, RenderPreviewKind.PositionMarker, 0.25f, 0.85f, 0.35f),
             new Definition(FunctionType.PathfindingWaitNode, RenderPreviewKind.PositionMarker, 0.55f, 0.35f, 0.15f),
         };
+
+        public static readonly SceneFilterDefinition[] SceneFilters = new SceneFilterDefinition[]
+        {
+            new SceneFilterDefinition(SceneFilterKind.OcclusionMeshes, "Occlusion Meshes", 0.9f, 0.12f, 0.12f),
+            new SceneFilterDefinition(SceneFilterKind.CollisionMeshes, "Collision Meshes", 0.15f, 0.85f, 0.95f),
+        };
+
+        public static bool TryGetSceneFilter(SceneFilterKind kind, out SceneFilterDefinition definition)
+        {
+            for (int i = 0; i < SceneFilters.Length; i++)
+            {
+                if (SceneFilters[i].Kind != kind)
+                    continue;
+
+                definition = SceneFilters[i];
+                return true;
+            }
+
+            definition = default(SceneFilterDefinition);
+            return false;
+        }
 
         private static readonly HashSet<FunctionType> SupportedTypes = BuildSupportedTypes();
         private static readonly Dictionary<FunctionType, Definition> DefinitionsByType = BuildDefinitionsByType();

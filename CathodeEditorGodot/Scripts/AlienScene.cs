@@ -22,6 +22,10 @@ public partial class AlienScene : Node3D
 	public string LevelName => _levelName;
 
 	private Node3D _parentNode = null;
+	private CollisionMeshOverlay _collisionOverlay = null;
+	private StateInfoOverlay _stateInfoOverlay = null;
+	private int _pendingNavMeshState = -1;
+	private int _pendingCoverState = -1;
 	public Node3D ParentNode => _parentNode;
 	public IReadOnlyDictionary<Node3D, Entity> NodeEntities => _nodeEntities;
 
@@ -40,6 +44,7 @@ public partial class AlienScene : Node3D
 	private Dictionary<ShaderMaterial, bool> _materialSupport = new Dictionary<ShaderMaterial, bool>();
 	private readonly Dictionary<ulong, ShaderMaterial> _modelReferenceOverrideMaterials = new Dictionary<ulong, ShaderMaterial>();
 	private Dictionary<MeshInstance3D, Materials.Material> _modelReferenceMeshes = new Dictionary<MeshInstance3D, Materials.Material>();
+	private Dictionary<MeshInstance3D, SceneFilterKind> _sceneFilterMeshes = new Dictionary<MeshInstance3D, SceneFilterKind>();
 	// Shared Godot mesh cache: one ArrayMesh per models write index (shared by all instances).
 	private readonly Dictionary<int, MeshHolder> _modelMeshesByWriteIndex = new Dictionary<int, MeshHolder>();
 	private readonly Dictionary<Models.CS2.Component.LOD.Submesh, int> _submeshWriteIndexByReference =
@@ -480,6 +485,9 @@ public partial class AlienScene : Node3D
 
 		ClearPopulateMaterialCaches();
 		_modelReferenceMeshes.Clear();
+		_sceneFilterMeshes.Clear();
+		_collisionOverlay = null;
+		_stateInfoOverlay = null;
 		CancelLargeSceneRenderPolicy();
 		ModelReferenceRenderSettings.ResetForLevelLoad();
 
@@ -683,6 +691,9 @@ public partial class AlienScene : Node3D
 
 		// Filters are often applied from OpenCAGE before the entity tree exists; refresh now that spawn finished.
 		RefreshRenderFilters(null);
+		//Same for the scene geometry categories: a filter left on from the last session arrives
+		//before the meshes exist, so it has to be reapplied once they do.
+		RefreshSceneGeometryFilters();
 		RefreshCompositeFocus();
 
 		OnLoaded?.Invoke();
@@ -732,6 +743,20 @@ public partial class AlienScene : Node3D
 		_parentNode = new Node3D { Name = _levelName };
 		_parentNode.AddToGroup(LevelViewerView.ContentGroup);
 		AddChild(_parentNode);
+
+		//Collision overlay lives beside the level content: its triangles are already in world space
+		if (_collisionOverlay != null && GodotObject.IsInstanceValid(_collisionOverlay))
+			_collisionOverlay.QueueFree();
+		_collisionOverlay = new CollisionMeshOverlay { Name = "CollisionMeshes", Visible = false };
+		_parentNode.AddChild(_collisionOverlay);
+		_collisionOverlay.Setup(this);
+
+		if (_stateInfoOverlay != null && GodotObject.IsInstanceValid(_stateInfoOverlay))
+			_stateInfoOverlay.QueueFree();
+		_stateInfoOverlay = new StateInfoOverlay { Name = "StateInfo", Visible = false };
+		_parentNode.AddChild(_stateInfoOverlay);
+		_stateInfoOverlay.Setup(_content);
+		ApplyStateInfoOverlays(_pendingNavMeshState, _pendingCoverState);
 
 		ViewerLog.Print("Loading composite " + comp?.name + "...");
 		_loadedComposite = comp;
@@ -3247,10 +3272,67 @@ public partial class AlienScene : Node3D
 		if (function != null)
 			_content.RemappedResources[function] = renderables;
 
+		//A changed resource can change the entity's collision mapping too
+		if (_collisionOverlay != null && GodotObject.IsInstanceValid(_collisionOverlay))
+			_collisionOverlay.RefreshEntity(entity);
+
 		if (TryGetCachedEntityNodes(composite, entity, out List<Node3D> entityNodes))
 		{
 			for (int i = 0; i < entityNodes.Count; i++)
 				RefreshFunctionEntityPreviews(entityNodes[i]);
+		}
+	}
+
+	/* Geometry the engine never draws (occlusion volumes, collision hulls). Spawned hidden and flipped
+	   by RefreshSceneGeometryFilters, so toggling the filter doesn't need the level repopulating.
+	   Deliberately not registered as pickable: it sits on top of the real geometry. */
+	private void CreateSceneFilterRenderable(Node3D parent, MeshHolder holder, SceneFilterKind kind, string label)
+	{
+		MeshInstance3D meshInstance = new MeshInstance3D
+		{
+			Mesh = holder.MainMesh,
+			Visible = false,
+			MaterialOverride = AlienSceneMaterials.GetSceneFilterMaterial(kind),
+		};
+		if (!_bulkMeshSpawning)
+		{
+			meshInstance.Name = holder.MainMesh.ResourceName + " (" + label + ")";
+			meshInstance.TreeExited += () => _sceneFilterMeshes.Remove(meshInstance);
+		}
+
+		LevelViewerMeshUtil.ConfigureMeshInstance(meshInstance);
+		_sceneFilterMeshes[meshInstance] = kind;
+		parent.AddChild(meshInstance);
+		meshInstance.Visible = RenderFilters.IsSceneFilterEnabled(kind);
+	}
+
+	/* Show the requested state's generated nav data. Remembered so a level (re)populate can reapply it -
+	   the files are rebuilt by an instanced save, so this re-reads them rather than caching. */
+	public void ApplyStateInfoOverlays(int navMeshState, int coverState)
+	{
+		_pendingNavMeshState = navMeshState;
+		_pendingCoverState = coverState;
+
+		if (_stateInfoOverlay != null && GodotObject.IsInstanceValid(_stateInfoOverlay))
+			_stateInfoOverlay.Apply(navMeshState, coverState);
+	}
+
+	/* Flip the scene geometry categories on/off in place */
+	public void RefreshSceneGeometryFilters()
+	{
+		if (_collisionOverlay != null && GodotObject.IsInstanceValid(_collisionOverlay))
+			_collisionOverlay.ApplyFilter();
+
+		foreach (KeyValuePair<MeshInstance3D, SceneFilterKind> entry in _sceneFilterMeshes.ToArray())
+		{
+			MeshInstance3D mesh = entry.Key;
+			if (mesh == null || !GodotObject.IsInstanceValid(mesh))
+			{
+				_sceneFilterMeshes.Remove(entry.Key);
+				continue;
+			}
+
+			mesh.Visible = RenderFilters.IsSceneFilterEnabled(entry.Value);
 		}
 	}
 
@@ -3271,8 +3353,12 @@ public partial class AlienScene : Node3D
 		}
 
 		if (!IsMaterialSupported(material))
+		{
+			//Occlusion geometry has no diffuse to shade, so it only appears when its filter asks for it
+			if (AlienSceneMaterials.IsOcclusionShader(material))
+				CreateSceneFilterRenderable(parent, holder, SceneFilterKind.OcclusionMeshes, "occlusion");
 			return;
-
+		}
 		if (!_bulkMeshSpawning)
 			ModelReferenceRenderSettings.NotifyMeshSpawned(_modelReferenceMeshes.Count + 1);
 

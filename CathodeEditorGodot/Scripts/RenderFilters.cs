@@ -7,6 +7,43 @@ public static class RenderFilters
 {
     private static readonly object _lock = new object();
     private static Dictionary<uint, bool> _enabledByFunctionType = new Dictionary<uint, bool>();
+    private static Dictionary<string, bool> _enabledSceneFilters = new Dictionary<string, bool>();
+
+    /// <summary>Apply the scene geometry filters (occlusion / collision). True when any changed.</summary>
+    public static bool ApplySceneFiltersFromPacket(Dictionary<string, bool> filters)
+    {
+        if (filters == null)
+            return false;
+
+        lock (_lock)
+        {
+            bool changed = false;
+            foreach (KeyValuePair<string, bool> entry in filters)
+            {
+                if (_enabledSceneFilters.TryGetValue(entry.Key, out bool existing) && existing == entry.Value)
+                    continue;
+
+                changed = true;
+                break;
+            }
+
+            if (!changed)
+                return false;
+
+            _enabledSceneFilters = new Dictionary<string, bool>(filters);
+            return true;
+        }
+    }
+
+    public static bool IsSceneFilterEnabled(SceneFilterKind kind)
+    {
+        lock (_lock)
+        {
+            if (_enabledSceneFilters.TryGetValue(kind.ToString(), out bool enabled))
+                return enabled;
+            return false;
+        }
+    }
 
     public static bool ApplyFromPacket(Dictionary<uint, bool> filters, out HashSet<uint> changedFunctionTypes)
     {

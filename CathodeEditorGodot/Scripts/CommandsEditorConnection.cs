@@ -386,6 +386,30 @@ public partial class CommandsEditorConnection : Node3D
             _removedComposite = ShortGuid.Invalid;
         }
 
+        bool sceneFiltersDirty = false;
+        lock (_lock)
+        {
+            sceneFiltersDirty = _sceneFiltersDirty;
+            _sceneFiltersDirty = false;
+        }
+
+        bool stateInfoDirty = false;
+        int navMeshState = -1;
+        int coverState = -1;
+        lock (_lock)
+        {
+            stateInfoDirty = _stateInfoDirty;
+            _stateInfoDirty = false;
+            navMeshState = _pendingNavMeshState;
+            coverState = _pendingCoverState;
+        }
+
+        if (stateInfoDirty && _scene != null && _scene.Content.Loaded)
+            _scene.ApplyStateInfoOverlays(navMeshState, coverState);
+
+        if (sceneFiltersDirty && _scene != null && _scene.Content.Loaded)
+            _scene.RefreshSceneGeometryFilters();
+
         int renderFiltersGeneration = -1;
         lock (_lock)
         {
@@ -532,8 +556,11 @@ public partial class CommandsEditorConnection : Node3D
         {
             lock (_lock)
             {
+                bool sceneFiltersChanged = RenderFilters.ApplySceneFiltersFromPacket(packet.scene_render_filters);
                 if (packet.box_render_filters != null && RenderFilters.ApplyFromPacket(packet.box_render_filters, out HashSet<uint> changed))
                     MarkRenderFiltersDirty(changed);
+                if (sceneFiltersChanged)
+                    MarkSceneFiltersDirty();
             }
             return;
         }
@@ -572,6 +599,11 @@ public partial class CommandsEditorConnection : Node3D
                 _showCameraPosition = packet.show_camera_position;
                 ApplyViewerSettings(packet);
                 ApplyActiveComposite(packet);
+                _pendingNavMeshState = packet.show_navmesh_state;
+                _pendingCoverState = packet.show_cover_state;
+                _stateInfoDirty = true;
+                if (RenderFilters.ApplySceneFiltersFromPacket(packet.scene_render_filters))
+                    MarkSceneFiltersDirty();
                 if (packet.box_render_filters != null)
                     RenderFilters.ApplyFromPacket(packet.box_render_filters);
                 MarkRenderFiltersDirty(null);
@@ -649,6 +681,11 @@ public partial class CommandsEditorConnection : Node3D
                 && activeCompositeChanged
                 && PreviewVisibilitySettings.HideNestedScriptEntities;
 
+            _pendingNavMeshState = packet.show_navmesh_state;
+            _pendingCoverState = packet.show_cover_state;
+            _stateInfoDirty = true;
+            if (RenderFilters.ApplySceneFiltersFromPacket(packet.scene_render_filters))
+                MarkSceneFiltersDirty();
             if (packet.box_render_filters != null && RenderFilters.ApplyFromPacket(packet.box_render_filters, out HashSet<uint> changed))
             {
                 if (hideNestedChanged)
@@ -1263,6 +1300,17 @@ public partial class CommandsEditorConnection : Node3D
             _compositeFocusDirty = false;
             _compositeFocusRefreshScheduled = false;
         }
+    }
+
+    private bool _sceneFiltersDirty = false;
+    private bool _stateInfoDirty = false;
+    private int _pendingNavMeshState = -1;
+    private int _pendingCoverState = -1;
+
+    /* Occlusion/collision geometry is spawned hidden, so a filter change is only a visibility flip */
+    private void MarkSceneFiltersDirty()
+    {
+        _sceneFiltersDirty = true;
     }
 
     private void MarkRenderFiltersDirty(HashSet<uint> changedFunctionTypes)

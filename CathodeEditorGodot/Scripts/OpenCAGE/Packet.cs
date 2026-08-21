@@ -47,7 +47,7 @@ namespace OpenCAGE.UnityConnection
 
         //Packet metadata
         public PacketEvent packet_event;
-        public int version = 8;
+        public int version = 9;
 
         //Setup metadata
         public string level_name = "";
@@ -96,6 +96,11 @@ namespace OpenCAGE.UnityConnection
         // Entity creation mode: FunctionType (uint) to place on viewport click, 0 = creation mode off.
         public uint create_function_type = 0;
         public Dictionary<uint, bool> box_render_filters = new Dictionary<uint, bool>();
+        // Scene geometry filters that arent tied to a FunctionType, keyed by SceneFilterKind name.
+        public Dictionary<string, bool> scene_render_filters = new Dictionary<string, bool>();
+        // State info overlays: index into Level.StateResources, or -1 for off.
+        public int show_navmesh_state = -1;
+        public int show_cover_state = -1;
 
         // Level Viewer log line forwarded to OpenCAGE (VIEWER_LOG).
         public string log_message = "";

@@ -1,5 +1,7 @@
 using CATHODE;
 using CATHODE.ShaderTypes;
+using OpenCAGE;
+using System.Collections.Generic;
 using Godot;
 
 /// <summary>
@@ -39,6 +41,85 @@ public static class AlienSceneMaterials
 
 		public ShaderMaterial Material { get; }
 		public bool Supported { get; }
+	}
+
+	/// <summary>
+	/// Occlusion geometry: drawn by the engine only to cull other meshes, so it has no diffuse to
+	/// shade and is normally not rendered at all here.
+	/// </summary>
+	public static bool IsOcclusionShader(Materials.Material material)
+	{
+		if (material == null || material.Shader == null)
+			return false;
+
+		return material.Shader.Ubershader == SHADER_LIST.CA_OCCLUSION_CULLING
+			|| material.Shader.Ubershader == SHADER_LIST.CA_OCCLUSION_TEST;
+	}
+
+	private static readonly Dictionary<SceneFilterKind, Material> _sceneFilterMaterials =
+		new Dictionary<SceneFilterKind, Material>();
+	private static Shader _sceneFilterShader;
+	private static Shader _sceneFilterShaderBackfaces;
+
+	/// <summary>
+	/// Flat filter colour with the preview's fake directional shading, shared by every mesh of that
+	/// category. Unlit geometry in one colour reads as a single silhouette from any distance, which is
+	/// useless for judging shape - the N.L term is what makes the surfaces legible.
+	/// </summary>
+	public static Material GetSceneFilterMaterial(SceneFilterKind kind)
+	{
+		if (_sceneFilterMaterials.TryGetValue(kind, out Material existing) && GodotObject.IsInstanceValid(existing))
+			return existing;
+
+		Color colour = new Color(0.9f, 0.12f, 0.12f);
+		if (RenderFilterDefinitions.TryGetSceneFilter(kind, out SceneFilterDefinition definition))
+			colour = new Color(definition.R, definition.G, definition.B);
+
+		bool backfacesOnly = kind == SceneFilterKind.OcclusionMeshes;
+		Shader shader = GetSceneFilterShader(backfacesOnly);
+
+		Material material;
+		if (shader != null)
+		{
+			ShaderMaterial shaded = new ShaderMaterial
+			{
+				ResourceName = kind + " filter",
+				Shader = shader,
+			};
+			shaded.SetShaderParameter("filter_colour", colour);
+			material = shaded;
+		}
+		else
+		{
+			//Shader missing from the export - fall back to flat colour rather than nothing at all
+			ViewerLog.PrintErr("[Filters] scene filter shader missing; " + kind + " will draw unshaded.");
+			material = new StandardMaterial3D
+			{
+				ResourceName = kind + " filter (unshaded fallback)",
+				ShadingMode = BaseMaterial3D.ShadingModeEnum.Unshaded,
+				AlbedoColor = colour,
+				CullMode = backfacesOnly
+					? BaseMaterial3D.CullModeEnum.Front
+					: BaseMaterial3D.CullModeEnum.Disabled,
+			};
+		}
+
+		_sceneFilterMaterials[kind] = material;
+		return material;
+	}
+
+	private static Shader GetSceneFilterShader(bool backfacesOnly)
+	{
+		if (backfacesOnly)
+		{
+			if (_sceneFilterShaderBackfaces == null)
+				_sceneFilterShaderBackfaces = GD.Load<Shader>("res://shaders/scene_filter_shaded_backfaces.gdshader");
+			return _sceneFilterShaderBackfaces;
+		}
+
+		if (_sceneFilterShader == null)
+			_sceneFilterShader = GD.Load<Shader>("res://shaders/scene_filter_shaded.gdshader");
+		return _sceneFilterShader;
 	}
 
 	public static MaterialResult GetMaterial(

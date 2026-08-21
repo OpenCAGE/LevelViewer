@@ -522,6 +522,11 @@ public static class LevelViewerCompositeFocus
 
 	private static void SetMeshDimmed(MeshInstance3D mesh, bool dimmed)
 	{
+		//Scene-filter geometry answers to its own filter, not to focus. Greying out an occlusion hull
+		//would hide the very thing the filter was switched on to show.
+		if (mesh != null && mesh.IsInGroup(LevelViewerPick.SceneFilterGroup))
+			return;
+
 		if (dimmed)
 		{
 			DimMesh(mesh);

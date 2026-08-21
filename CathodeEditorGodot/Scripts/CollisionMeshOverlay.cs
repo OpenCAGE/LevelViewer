@@ -245,9 +245,14 @@ public partial class CollisionMeshOverlay : Node3D
 	}
 
 	/// <summary>
-	/// A holder under the owning entity's node, zeroed to world space. The triangles come out of Havok
-	/// already positioned, so the holder cancels the entity's transform to land them correctly - and
-	/// from then on it inherits the entity's movement for free.
+	/// A holder under the owning entity's node, zeroed to the level root. The triangles come out of
+	/// Havok already positioned in the level's own space, so the holder cancels the entity's transform
+	/// to land them correctly - and from then on it inherits the entity's movement for free.
+	///
+	/// Zeroed to the level root and not to the world origin: the viewer shifts the whole level so the
+	/// initial focus point sits near the origin (RecenterContentOrigin), and pinning the holders to
+	/// world identity left every hull correct relative to its neighbours but the whole set offset by
+	/// that shift.
 	///
 	/// It's a plain Node3D rather than putting the meshes straight on the entity, because a resource
 	/// refresh frees the entity's MeshInstance3D children and would take the collision with it.
@@ -263,14 +268,15 @@ public partial class CollisionMeshOverlay : Node3D
 		if (entityNodes.TryGetValue(entity, out List<Node3D> nodes) && nodes.Count > 0)
 			owner = nodes[0];
 
-		if (owner != null && owner.IsInsideTree())
+		if (owner != null && owner.IsInsideTree() && IsInsideTree())
 		{
 			owner.AddChild(holder);
-			holder.GlobalTransform = Transform3D.Identity;
+			//This overlay sits directly under the level root, so its own transform is level space
+			holder.GlobalTransform = GlobalTransform;
 		}
 		else
 		{
-			//Nothing in the scene for it - leave it parked in world space under the overlay
+			//Nothing in the scene for it - leave it parked in level space under the overlay
 			AddChild(holder);
 		}
 

@@ -108,6 +108,24 @@ public static class AlienSceneMaterials
 		return material;
 	}
 
+	/// <summary>
+	/// True when a material only draws back faces (the occlusion filter). Picking and highlight
+	/// overlays have to honour this, or they act on a near surface that was never drawn.
+	/// </summary>
+	public static bool IsBackFaceOnlyMaterial(Material material)
+	{
+		if (material is StandardMaterial3D standard)
+			return standard.CullMode == BaseMaterial3D.CullModeEnum.Front;
+
+		if (material is ShaderMaterial shaderMaterial && shaderMaterial.Shader != null)
+		{
+			string path = shaderMaterial.Shader.ResourcePath;
+			return !string.IsNullOrEmpty(path) && path.Contains("scene_filter_shaded_backfaces");
+		}
+
+		return false;
+	}
+
 	private static Shader GetSceneFilterShader(bool backfacesOnly)
 	{
 		if (backfacesOnly)

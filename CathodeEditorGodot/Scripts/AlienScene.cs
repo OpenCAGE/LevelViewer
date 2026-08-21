@@ -44,7 +44,20 @@ public partial class AlienScene : Node3D
 	private Dictionary<ShaderMaterial, bool> _materialSupport = new Dictionary<ShaderMaterial, bool>();
 	private readonly Dictionary<ulong, ShaderMaterial> _modelReferenceOverrideMaterials = new Dictionary<ulong, ShaderMaterial>();
 	private Dictionary<MeshInstance3D, Materials.Material> _modelReferenceMeshes = new Dictionary<MeshInstance3D, Materials.Material>();
-	private Dictionary<MeshInstance3D, SceneFilterKind> _sceneFilterMeshes = new Dictionary<MeshInstance3D, SceneFilterKind>();
+	/// <summary>A scene-filter mesh and the pick owner it was spawned under.</summary>
+	private readonly struct SceneFilterMesh
+	{
+		public SceneFilterMesh(SceneFilterKind kind, Node3D owner)
+		{
+			Kind = kind;
+			Owner = owner;
+		}
+
+		public SceneFilterKind Kind { get; }
+		public Node3D Owner { get; }
+	}
+
+	private Dictionary<MeshInstance3D, SceneFilterMesh> _sceneFilterMeshes = new Dictionary<MeshInstance3D, SceneFilterMesh>();
 	// Shared Godot mesh cache: one ArrayMesh per models write index (shared by all instances).
 	private readonly Dictionary<int, MeshHolder> _modelMeshesByWriteIndex = new Dictionary<int, MeshHolder>();
 	private readonly Dictionary<Models.CS2.Component.LOD.Submesh, int> _submeshWriteIndexByReference =
@@ -3284,8 +3297,7 @@ public partial class AlienScene : Node3D
 	}
 
 	/* Geometry the engine never draws (occlusion volumes, collision hulls). Spawned hidden and flipped
-	   by RefreshSceneGeometryFilters, so toggling the filter doesn't need the level repopulating.
-	   Deliberately not registered as pickable: it sits on top of the real geometry. */
+	   by RefreshSceneGeometryFilters, so toggling the filter doesn't need the level repopulating. */
 	private void CreateSceneFilterRenderable(Node3D parent, MeshHolder holder, SceneFilterKind kind, string label)
 	{
 		MeshInstance3D meshInstance = new MeshInstance3D
@@ -3301,9 +3313,29 @@ public partial class AlienScene : Node3D
 		}
 
 		LevelViewerMeshUtil.ConfigureMeshInstance(meshInstance);
-		_sceneFilterMeshes[meshInstance] = kind;
+		//Keeps the subtree walk off it: whether it's pickable follows the filter, not the entity
+		meshInstance.AddToGroup(LevelViewerPick.SceneFilterGroup);
+		_sceneFilterMeshes[meshInstance] = new SceneFilterMesh(kind, parent);
 		parent.AddChild(meshInstance);
-		meshInstance.Visible = RenderFilters.IsSceneFilterEnabled(kind);
+		ApplySceneFilterMeshState(meshInstance, kind, parent);
+	}
+
+	/* Drawn and clickable together. Registering the mesh as pickable only while its filter is on is
+	   what keeps a switched-off hull from swallowing clicks, or from padding out the pick bounds of
+	   the entity it belongs to, while it isn't being drawn. */
+	private void ApplySceneFilterMeshState(MeshInstance3D meshInstance, SceneFilterKind kind, Node3D owner)
+	{
+		bool enabled = RenderFilters.IsSceneFilterEnabled(kind);
+		meshInstance.Visible = enabled;
+
+		//A bulk populate registers its pickables in one pass at the end, once the tree is built
+		if (_bulkMeshSpawning || owner == null || !GodotObject.IsInstanceValid(owner))
+			return;
+
+		if (enabled)
+			LevelViewerPick.RegisterPickableMesh(meshInstance, owner);
+		else
+			LevelViewerPick.UnregisterPickableMesh(meshInstance, owner);
 	}
 
 	/* Show the requested state's generated nav data. Remembered so a level (re)populate can reapply it -
@@ -3323,7 +3355,7 @@ public partial class AlienScene : Node3D
 		if (_collisionOverlay != null && GodotObject.IsInstanceValid(_collisionOverlay))
 			_collisionOverlay.ApplyFilter();
 
-		foreach (KeyValuePair<MeshInstance3D, SceneFilterKind> entry in _sceneFilterMeshes.ToArray())
+		foreach (KeyValuePair<MeshInstance3D, SceneFilterMesh> entry in _sceneFilterMeshes.ToArray())
 		{
 			MeshInstance3D mesh = entry.Key;
 			if (mesh == null || !GodotObject.IsInstanceValid(mesh))
@@ -3332,7 +3364,7 @@ public partial class AlienScene : Node3D
 				continue;
 			}
 
-			mesh.Visible = RenderFilters.IsSceneFilterEnabled(entry.Value);
+			ApplySceneFilterMeshState(mesh, entry.Value.Kind, entry.Value.Owner);
 		}
 	}
 

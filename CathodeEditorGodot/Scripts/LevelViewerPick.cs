@@ -11,8 +11,22 @@ public static class LevelViewerPick
 {
 	public const string PickableGroup = "level_viewer_pickable";
 	public const string OwnerEntityMetaKey = "pick_owner_entity";
+
+	/// <summary>
+	/// Scene-filter geometry (occlusion hulls). Registered and unregistered by the filter that draws
+	/// it rather than by a subtree walk, so a switched-off hull never becomes clickable.
+	/// </summary>
+	public const string SceneFilterGroup = "scene_filter_renderable";
+
 	private const string WireframeOverlayGroup = "model_reference_wireframe_overlay";
 	private const float RayEpsilon = 0.000001f;
+
+	private enum PickFaceMode
+	{
+		FrontOnly,
+		BackOnly,
+		DoubleSided,
+	}
 
 	private sealed class CachedMeshSurface
 	{
@@ -374,7 +388,7 @@ public static class LevelViewerPick
 
 	private static void RegisterPickableRecursive(Node node, Node3D ownerEntityNode)
 	{
-		if (node.IsInGroup(WireframeOverlayGroup))
+		if (node.IsInGroup(WireframeOverlayGroup) || node.IsInGroup(SceneFilterGroup))
 			goto children;
 
 		if (node is MeshInstance3D meshInstance)
@@ -423,7 +437,7 @@ public static class LevelViewerPick
 			visual.RemoveMeta(OwnerEntityMetaKey);
 	}
 
-	private static void UnregisterPickableMesh(MeshInstance3D meshInstance, Node3D ownerEntityNode)
+	public static void UnregisterPickableMesh(MeshInstance3D meshInstance, Node3D ownerEntityNode)
 	{
 		if (meshInstance == null || !GodotObject.IsInstanceValid(meshInstance))
 			return;
@@ -435,9 +449,12 @@ public static class LevelViewerPick
 		_registeredPickables.Remove(meshInstance);
 
 		if (ownerEntityNode != null
-			&& _pickablesByOwner.TryGetValue(ownerEntityNode, out List<MeshInstance3D> meshes))
+			&& _pickablesByOwner.TryGetValue(ownerEntityNode, out List<MeshInstance3D> meshes)
+			&& meshes.Remove(meshInstance))
 		{
-			meshes.Remove(meshInstance);
+			//The owner just got smaller, so its cached bounds would keep claiming space it no longer has
+			_ownerGlobalBounds.Remove(ownerEntityNode);
+			_scopedPickablesDirty = true;
 		}
 	}
 
@@ -1392,7 +1409,7 @@ public static class LevelViewerPick
 
 		float closestLocalT = float.MaxValue;
 		bool anyHit = false;
-		bool doubleSided = IsDoubleSidedMesh(meshInstance);
+		PickFaceMode faceMode = GetMeshFaceMode(meshInstance);
 		CachedMeshSurface[] surfaces = GetCachedMeshSurfaces(mesh);
 
 		for (int surfaceIndex = 0; surfaceIndex < surfaces.Length; surfaceIndex++)
@@ -1410,7 +1427,7 @@ public static class LevelViewerPick
 						vertices[indices[i]],
 						vertices[indices[i + 1]],
 						vertices[indices[i + 2]],
-						doubleSided,
+						faceMode,
 						ref closestLocalT,
 						ref anyHit);
 				}
@@ -1426,7 +1443,7 @@ public static class LevelViewerPick
 						vertices[i],
 						vertices[i + 1],
 						vertices[i + 2],
-						doubleSided,
+						faceMode,
 						ref closestLocalT,
 						ref anyHit);
 				}
@@ -1481,11 +1498,11 @@ public static class LevelViewerPick
 		Vector3 a,
 		Vector3 b,
 		Vector3 c,
-		bool doubleSided,
+		PickFaceMode faceMode,
 		ref float closestLocalT,
 		ref bool anyHit)
 	{
-		if (!TryRayIntersectTriangle(localOrigin, localDirection, a, b, c, doubleSided, out float localT))
+		if (!TryRayIntersectTriangle(localOrigin, localDirection, a, b, c, faceMode, out float localT))
 			return;
 
 		if (localT >= closestLocalT)
@@ -1495,21 +1512,33 @@ public static class LevelViewerPick
 		anyHit = true;
 	}
 
-	private static bool IsDoubleSidedMesh(MeshInstance3D meshInstance)
+	/// <summary>
+	/// Which faces of a mesh the ray is allowed to hit, taken from how its material draws them.
+	/// A face that isn't drawn isn't there to be clicked - an occlusion hull is drawn back-face-only,
+	/// so testing its near half would let an invisible surface swallow clicks meant for the geometry
+	/// on screen inside it.
+	/// </summary>
+	private static PickFaceMode GetMeshFaceMode(MeshInstance3D meshInstance)
 	{
 		Material material = meshInstance.MaterialOverride ?? meshInstance.GetActiveMaterial(0);
+		if (AlienSceneMaterials.IsBackFaceOnlyMaterial(material))
+			return PickFaceMode.BackOnly;
+
 		if (material is not ShaderMaterial shaderMaterial || shaderMaterial.Shader == null)
-			return false;
+			return PickFaceMode.FrontOnly;
 
 		string path = shaderMaterial.Shader.ResourcePath;
 		if (string.IsNullOrEmpty(path))
-			return false;
+			return PickFaceMode.FrontOnly;
 
-		return path.Contains("double_sided")
+		bool doubleSided = path.Contains("double_sided")
+			|| path.Contains("scene_filter_shaded")
 			|| path.Contains("preview_icon_billboard")
 			|| path.Contains("preview_overlay_line")
 			|| path.Contains("preview_opaque")
 			|| path.Contains("preview_transparent");
+
+		return doubleSided ? PickFaceMode.DoubleSided : PickFaceMode.FrontOnly;
 	}
 
 	private static bool TryRayIntersectTriangle(
@@ -1518,7 +1547,7 @@ public static class LevelViewerPick
 		Vector3 v0,
 		Vector3 v1,
 		Vector3 v2,
-		bool doubleSided,
+		PickFaceMode faceMode,
 		out float t)
 	{
 		t = 0f;
@@ -1530,7 +1559,10 @@ public static class LevelViewerPick
 		if (Mathf.Abs(det) < RayEpsilon)
 			return false;
 
-		if (!doubleSided && det > 0f)
+		//Front faces come out negative here, so the sign is what tells the two halves of a hull apart
+		if (faceMode == PickFaceMode.FrontOnly && det > 0f)
+			return false;
+		if (faceMode == PickFaceMode.BackOnly && det < 0f)
 			return false;
 
 		float invDet = 1f / det;

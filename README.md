@@ -1,9 +1,5 @@
-# Alien: Isolation Level Viewer
+# OpenCAGE Viewport
 
-<img src="https://i.imgur.com/nCdoJYj.png" width="100%">
+<img src="https://github.com/user-attachments/assets/80d4ee6e-d98a-4931-a30f-c24d1c5de73a" width="100%">
 
-A 3D companion to OpenCAGE's Commands Editor. The two tools should be used alongside eachother: enable the Level Viewer connection in the script editor to start a websocket between them.
-
-Changes made in the script editor will be reflected in the Unity scene.
-
-This tool is included in [OpenCAGE](https://github.com/MattFiler/OpenCAGE)! Read more about the setup process [here](http://opencage.co.uk/docs/level-viewer).
+This project is included in [OpenCAGE](https://github.com/MattFiler/OpenCAGE) - it forms the 3D viewport used to navigate levels. Read more [here](http://opencage.co.uk/docs/level-viewer).

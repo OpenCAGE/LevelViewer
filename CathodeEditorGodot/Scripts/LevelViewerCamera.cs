@@ -467,11 +467,13 @@ public partial class LevelViewerCamera : Camera3D
         _alienScene.TryResolveInitialFocusPoint(out Vector3 focusPoint, out bool hasExplicitFocus);
         if (hasExplicitFocus)
             _alienScene.RecenterContentOrigin();
+        Vector3 framePoint = hasExplicitFocus ? Vector3.Zero : focusPoint;
+        float framingDistance = ResolveContentFramingDistance(framePoint);
         LevelViewerView.FrameRuntimeCameraOnPoint(
-            hasExplicitFocus ? Vector3.Zero : focusPoint,
+            framePoint,
             this,
-            distance: FocusDistanceScale * 8f,
-            minDistance: FocusMinDistance,
+            distance: framingDistance,
+            minDistance: Mathf.Min(FocusMinDistance, framingDistance),
             maxDistance: FocusMaxDistance);
         if (ShouldShowCameraPosition())
             UpdatePositionHud(positionBefore);
@@ -480,6 +482,27 @@ public partial class LevelViewerCamera : Camera3D
         if (FrameEditorViewport && Engine.IsEditorHint())
             LevelViewerView.TryFrameEditorOn(_alienScene.ParentNode);
 #endif
+    }
+
+    /// <summary>
+    /// Composites whose meshes all sit within a few metres of the focus point (pickups, single
+    /// props) are unreadable at the default framing distance - move in so they fill the view.
+    /// Larger scenes keep the default: the full bounds of a room or level would push the camera
+    /// out, not in.
+    /// </summary>
+    private float ResolveContentFramingDistance(Vector3 framePoint)
+    {
+        float defaultDistance = FocusDistanceScale * 8f;
+        const float compactContentRadius = 3.5f;
+        const float minCompactDistance = 0.5f;
+        if (_alienScene == null
+            || !_alienScene.TryGetModelReferenceBoundsRadius(framePoint, out float contentRadius)
+            || contentRadius >= compactContentRadius)
+        {
+            return defaultDistance;
+        }
+
+        return Mathf.Max(minCompactDistance, contentRadius * 2.5f + 0.4f);
     }
 
     private void ApplyKeyboardMovement(float deltaSeconds)

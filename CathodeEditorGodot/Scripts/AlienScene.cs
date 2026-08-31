@@ -787,6 +787,8 @@ public partial class AlienScene : Node3D
 			+ prewarmPlan.Textures.Count + " textures, "
 			+ prewarmPlan.Materials.Count + " materials.");
 
+		RestoreReleasedSourceData(prewarmPlan);
+
 		LevelViewerPopulatePrewarm.Result prewarmResult = LevelViewerPopulatePrewarm.Execute(prewarmPlan, _content.Level);
 
 		FinalizePrewarmGodotResources(prewarmResult, prewarmPlan);
@@ -924,6 +926,31 @@ public partial class AlienScene : Node3D
 			if (overlay != null)
 				overlay.Visible = ModelReferenceRenderSettings.WireframeEnabled;
 		}
+	}
+
+	/// <summary>
+	/// World-space radius enclosing every model-reference mesh around a focus point. False when
+	/// nothing spawned. Small composites (pickups, single props) report sub-metre radii; the
+	/// default composite framing distance renders those as a few pixels, so the camera uses this
+	/// to move in close instead.
+	/// </summary>
+	public bool TryGetModelReferenceBoundsRadius(Vector3 worldFocusPoint, out float radius)
+	{
+		radius = 0f;
+		bool foundAny = false;
+		foreach (MeshInstance3D mesh in _modelReferenceMeshes.Keys)
+		{
+			if (mesh == null || !GodotObject.IsInstanceValid(mesh) || !mesh.IsInsideTree())
+				continue;
+
+			Aabb bounds = mesh.GlobalTransform * mesh.GetAabb();
+			float reach = worldFocusPoint.DistanceTo(bounds.GetCenter()) + bounds.Size.Length() * 0.5f;
+			if (reach > radius)
+				radius = reach;
+			foundAny = true;
+		}
+
+		return foundAny;
 	}
 
 	/// <summary>Moves level root so the initial focus point sits near the origin for stable rendering.</summary>
@@ -4242,6 +4269,131 @@ public partial class AlienScene : Node3D
 			tex.TextureStreamed.Content = null;
 		if (tex.TexturePersistent != null)
 			tex.TexturePersistent.Content = null;
+	}
+
+	/// <summary>
+	/// Re-reads source binaries that ReleaseCathodeBinarySourceData freed after an earlier
+	/// populate, for just the entries this populate's plan needs. Composites opened after the
+	/// first populate routinely reference models nothing has parsed yet (pickup and archetype
+	/// composites whose models are not placed in the level root); without this their meshes
+	/// silently never spawn.
+	/// </summary>
+	private void RestoreReleasedSourceData(LevelViewerPopulatePrewarm.Plan plan)
+	{
+		if (plan == null)
+			return;
+
+		RestoreReleasedModelData(plan);
+		RestoreReleasedTextureData(plan);
+	}
+
+	private void RestoreReleasedModelData(LevelViewerPopulatePrewarm.Plan plan)
+	{
+		Models models = _content?.Level?.Models;
+		if (models == null)
+			return;
+
+		List<int> missing = null;
+		foreach (int writeIndex in plan.MeshWriteIndices)
+		{
+			if (_modelMeshesByWriteIndex.ContainsKey(writeIndex))
+				continue;
+
+			Models.CS2.Component.LOD.Submesh submesh = models.GetAtWriteIndex(writeIndex);
+			if (submesh != null && (submesh.Data == null || submesh.Data.Length == 0))
+				(missing ??= new List<int>()).Add(writeIndex);
+		}
+
+		if (missing == null)
+			return;
+
+		try
+		{
+			Models fresh = new Models(
+				models.Filepath,
+				_content.Level.Materials,
+				_content.Level.WeightedCollisions,
+				_content.Level.MorphTargetDB);
+			int restored = 0;
+			foreach (int writeIndex in missing)
+			{
+				Models.CS2.Component.LOD.Submesh target = models.GetAtWriteIndex(writeIndex);
+				Models.CS2.Component.LOD.Submesh source = fresh.GetAtWriteIndex(writeIndex);
+				if (target == null || source?.Data == null || source.Data.Length == 0)
+					continue;
+
+				//Write-index order comes from the same file both times; count mismatches catch
+				//an in-memory list that has drifted from what is on disk (imports, deletions).
+				if (source.VertexCount != target.VertexCount || source.IndexCount != target.IndexCount)
+					continue;
+
+				target.Data = source.Data;
+				restored++;
+			}
+
+			ViewerLog.Print("Restored " + restored + "/" + missing.Count + " released model binaries for populate.");
+		}
+		catch (Exception e)
+		{
+			ViewerLog.PrintErr("Failed to restore released model data: " + e.Message);
+		}
+	}
+
+	private void RestoreReleasedTextureData(LevelViewerPopulatePrewarm.Plan plan)
+	{
+		Dictionary<TexturePtr.Source, List<int>> missingBySource = null;
+		foreach (Textures.TEX4 planned in plan.Textures)
+		{
+			if (planned == null || SelectTexPartForConversion(planned) != null)
+				continue;
+
+			if (!plan.TextureLocations.TryGetValue(planned, out TexturePtr.Source source))
+				continue;
+
+			int writeIndex = GetTextureWriteIndex(planned, source);
+			if (writeIndex < 0 || TryGetCachedTexture(source, writeIndex, out _))
+				continue;
+
+			missingBySource ??= new Dictionary<TexturePtr.Source, List<int>>();
+			if (!missingBySource.TryGetValue(source, out List<int> indexes))
+				missingBySource[source] = indexes = new List<int>();
+			indexes.Add(writeIndex);
+		}
+
+		if (missingBySource == null)
+			return;
+
+		foreach (KeyValuePair<TexturePtr.Source, List<int>> entry in missingBySource)
+		{
+			Textures live = GetTexturesForSource(entry.Key);
+			if (live == null)
+				continue;
+
+			try
+			{
+				Textures fresh = new Textures(live.Filepath);
+				int restored = 0;
+				foreach (int writeIndex in entry.Value)
+				{
+					Textures.TEX4 target = live.GetAtWriteIndex(writeIndex);
+					Textures.TEX4 source = fresh.GetAtWriteIndex(writeIndex);
+					if (target == null || source == null || target.Format != source.Format)
+						continue;
+
+					if (target.TextureStreamed != null && source.TextureStreamed?.Content != null)
+						target.TextureStreamed.Content = source.TextureStreamed.Content;
+					if (target.TexturePersistent != null && source.TexturePersistent?.Content != null)
+						target.TexturePersistent.Content = source.TexturePersistent.Content;
+					restored++;
+				}
+
+				ViewerLog.Print("Restored " + restored + "/" + entry.Value.Count + " released " + entry.Key + " texture binaries for populate.");
+			}
+			catch (Exception e)
+			{
+				ViewerLog.PrintErr("Failed to restore released " + entry.Key + " texture data: " + e.Message);
+			}
+		}
 	}
 
 	private void ReleaseCathodeBinarySourceData()

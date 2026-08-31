@@ -599,6 +599,20 @@ public static class ModelReferenceMaterialMapping
 				return entry;
 		}
 
+		string strippedMaterialName = NormalizeMaterialNameForLookup(StripAuthoringSlot(materialName));
+		if (strippedMaterialName != normalizedMaterialName)
+		{
+			for (int i = 0; i < mapping.Mappings.Count; i++)
+			{
+				MaterialMappings.MaterialMapping.Mapping entry = mapping.Mappings[i];
+				if (entry == null || string.IsNullOrEmpty(entry.from))
+					continue;
+
+				if (NormalizeMaterialNameForLookup(entry.from) == strippedMaterialName)
+					return entry;
+			}
+		}
+
 		return null;
 	}
 
@@ -624,6 +638,20 @@ public static class ModelReferenceMaterialMapping
 				return entry;
 		}
 
+		string strippedTargetName = NormalizeMaterialNameForLookup(StripAuthoringSlot(targetMaterialName));
+		if (strippedTargetName != normalizedTargetName)
+		{
+			for (int i = 0; i < mapping.Mappings.Count; i++)
+			{
+				MaterialMappings.MaterialMapping.Mapping entry = mapping.Mappings[i];
+				if (entry == null || string.IsNullOrEmpty(entry.to))
+					continue;
+
+				if (NormalizeMaterialNameForLookup(entry.to) == strippedTargetName)
+					return entry;
+			}
+		}
+
 		return null;
 	}
 
@@ -633,10 +661,52 @@ public static class ModelReferenceMaterialMapping
 			return string.Empty;
 
 		string normalized = StripTrailingVariantSuffix(materialName).ToUpperInvariant();
-		if (!normalized.Contains("->"))
+		//Not trimmed. HAB_Airport ships a 'material' reading
+		//"screenBlueTextScroll -> screen_anim_non_14" and retail's own mover keeps InactiveScreen,
+		//so retail does not tidy the spaces either - the name simply matches nothing. Trimming it
+		//resolves a material retail leaves alone, which is the one structural screen difference
+		//HAB_Airport had left after the slot rule went in.
+		if (normalized.IndexOf("->", StringComparison.Ordinal) < 0)
 			normalized += "->" + normalized;
 
 		return normalized;
+	}
+
+	/// <summary>
+	/// Drops a leading 3ds Max authoring slot, so "MULTIMATERIAL-&gt;X-&gt;Y" becomes "X-&gt;Y".
+	/// Mapping entries are always keyed on the two-part form, so a material still carrying its
+	/// authoring slot can never match one. Measured on HAB_Airport: 658 of 681 MUN_Plastic_Gloss
+	/// movers resolved their mapping and then missed this lookup, keeping Tan where the mapping
+	/// says White. Fixing it took the six-level defect count from 1,164 to 293. Two-part names
+	/// come back unchanged.
+	/// </summary>
+	private static string StripAuthoringSlot(string materialName)
+	{
+		if (string.IsNullOrEmpty(materialName))
+			return materialName;
+
+		int last = materialName.LastIndexOf("->", StringComparison.Ordinal);
+		if (last <= 0)
+			return materialName;
+
+		int previous = materialName.LastIndexOf("->", last - 1, StringComparison.Ordinal);
+		if (previous < 0)
+			return materialName;
+
+		return materialName.Substring(previous + 2);
+	}
+
+	/// <summary>The slot half of a "&lt;slot&gt;-&gt;&lt;assignment&gt;" material name, or null if it has no slot.</summary>
+	public static string SlotOf(string materialName)
+	{
+		if (string.IsNullOrEmpty(materialName))
+			return null;
+
+		int arrow = materialName.IndexOf("->", StringComparison.Ordinal);
+		if (arrow < 0)
+			return null;
+
+		return materialName.Substring(0, arrow).Trim();
 	}
 
 	/// <summary>

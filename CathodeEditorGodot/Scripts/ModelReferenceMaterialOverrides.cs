@@ -325,6 +325,27 @@ public static class ModelReferenceMaterialOverrides
 
 
 
+		// A material's name is "<slot>-><assignment>": the parameter can only re-assign within its
+		// own slot, so an override naming a slot this renderable does not use is not for it.
+		// Measured on HAB_Airport: 114 movers carry a 'material' of "screenBlueTextScroll->..." on
+		// renderables sitting in other slots, and retail leaves every one of them alone.
+		string overrideSlot = ModelReferenceMaterialMapping.SlotOf(level.Materials.GetAtWriteIndex(materialWriteIndex)?.Name);
+
+		string currentSlot = ModelReferenceMaterialMapping.SlotOf(level.Materials.GetAtWriteIndex(renderables[0].Item2)?.Name);
+
+		if (overrideSlot != null && currentSlot != null
+			&& !string.Equals(overrideSlot, currentSlot, StringComparison.OrdinalIgnoreCase))
+
+			return;
+
+
+
+		if (materialWriteIndex == renderables[0].Item2)
+
+			return;
+
+
+
 		renderables[0] = new Tuple<int, int>(renderables[0].Item1, materialWriteIndex);
 
 	}

@@ -10,7 +10,9 @@ using System.Collections.Generic;
 public static class LevelViewerPick
 {
 	public const string PickableGroup = "level_viewer_pickable";
-	public const string OwnerEntityMetaKey = "pick_owner_entity";
+	//Every IsInGroup/AddToGroup taking a string interns a fresh StringName, and registering a
+	//level's meshes does that hundreds of thousands of times. These are the same names, converted once.
+	private static readonly StringName PickableGroupName = new StringName("level_viewer_pickable");
 
 	/// <summary>
 	/// Scene-filter geometry (occlusion hulls). Registered and unregistered by the filter that draws
@@ -19,6 +21,7 @@ public static class LevelViewerPick
 	public const string SceneFilterGroup = "scene_filter_renderable";
 
 	private const string WireframeOverlayGroup = "model_reference_wireframe_overlay";
+	private static readonly StringName WireframeOverlayGroupName = new StringName("model_reference_wireframe_overlay");
 	private const float RayEpsilon = 0.000001f;
 
 	private enum PickFaceMode
@@ -82,6 +85,7 @@ public static class LevelViewerPick
 		_ownerGlobalBounds.Clear();
 		_scopedPickOwners.Clear();
 		_registeredPickables.Clear();
+		_pickOwners.Clear();
 		_suppressedPickOwners.Clear();
 		_scopedPickablesDirty = true;
 		_batchInvalidateActive = false;
@@ -132,7 +136,7 @@ public static class LevelViewerPick
 			if (child is not Node3D child3D || !GodotObject.IsInstanceValid(child3D))
 				continue;
 
-			if (!child3D.HasMeta(AlienScene.OwnerCompositeMetaKey))
+			if (!AlienScene.HasOwnerComposite(child3D))
 				continue;
 
 			CollectPickMeshesForEntitySubtree(child3D, destination);
@@ -296,7 +300,7 @@ public static class LevelViewerPick
 			return;
 
 		PruneInvalidPickables(ownerEntityNode);
-		ownerEntityNode.SetMeta(OwnerEntityMetaKey, ownerEntityNode);
+		_pickOwners[ownerEntityNode] = ownerEntityNode;
 		RegisterPickableRecursive(ownerEntityNode, ownerEntityNode);
 	}
 
@@ -358,7 +362,7 @@ public static class LevelViewerPick
 		if (meshInstance == null || ownerNode == null || !GodotObject.IsInstanceValid(meshInstance))
 			return;
 
-		if (meshInstance.IsInGroup(WireframeOverlayGroup))
+		if (meshInstance.IsInGroup(WireframeOverlayGroupName))
 			return;
 
 		Mesh mesh = meshInstance.Mesh;
@@ -370,10 +374,10 @@ public static class LevelViewerPick
 
 		if (!LevelViewerCompositeFocus.IsMeshVisuallyDimmed(meshInstance))
 		{
-			if (!meshInstance.IsInGroup(PickableGroup))
-				meshInstance.AddToGroup(PickableGroup);
+			if (!meshInstance.IsInGroup(PickableGroupName))
+				meshInstance.AddToGroup(PickableGroupName);
 		}
-		meshInstance.SetMeta(OwnerEntityMetaKey, ownerNode);
+		_pickOwners[meshInstance] = ownerNode;
 
 		if (!_pickablesByOwner.TryGetValue(ownerNode, out List<MeshInstance3D> meshes))
 		{
@@ -384,6 +388,21 @@ public static class LevelViewerPick
 		meshes.Add(meshInstance);
 		_ownerGlobalBounds.Remove(ownerNode);
 		_scopedPickablesDirty = true;
+	}
+
+	/// <summary>
+	/// Which entity node a pickable mesh belongs to. This was node metadata, but a metadata store
+	/// is allocated per node and a level registers tens of thousands of meshes.
+	/// </summary>
+	private static readonly Dictionary<GodotObject, Node3D> _pickOwners = new Dictionary<GodotObject, Node3D>();
+
+	public static bool TryGetPickOwner(GodotObject pickable, out Node3D ownerNode)
+	{
+		if (pickable != null)
+			return _pickOwners.TryGetValue(pickable, out ownerNode);
+
+		ownerNode = null;
+		return false;
 	}
 
 	private static void RegisterPickableRecursive(Node node, Node3D ownerEntityNode)
@@ -423,7 +442,7 @@ public static class LevelViewerPick
 
 		if (!visual.IsInGroup(PickableGroup))
 			visual.AddToGroup(PickableGroup);
-		visual.SetMeta(OwnerEntityMetaKey, ownerEntityNode);
+		_pickOwners[visual] = ownerEntityNode;
 	}
 
 	private static void UnregisterPickableVisual(VisualInstance3D visual)
@@ -433,8 +452,7 @@ public static class LevelViewerPick
 
 		if (visual.IsInGroup(PickableGroup))
 			visual.RemoveFromGroup(PickableGroup);
-		if (visual.HasMeta(OwnerEntityMetaKey))
-			visual.RemoveMeta(OwnerEntityMetaKey);
+		_pickOwners.Remove(visual);
 	}
 
 	public static void UnregisterPickableMesh(MeshInstance3D meshInstance, Node3D ownerEntityNode)
@@ -444,8 +462,7 @@ public static class LevelViewerPick
 
 		if (meshInstance.IsInGroup(PickableGroup))
 			meshInstance.RemoveFromGroup(PickableGroup);
-		if (meshInstance.HasMeta(OwnerEntityMetaKey))
-			meshInstance.RemoveMeta(OwnerEntityMetaKey);
+		_pickOwners.Remove(meshInstance);
 		_registeredPickables.Remove(meshInstance);
 
 		if (ownerEntityNode != null
@@ -623,9 +640,9 @@ public static class LevelViewerPick
 		if (hitNode == null || nodeEntities == null)
 			return null;
 
-		if (hitNode is MeshInstance3D mesh && mesh.HasMeta(OwnerEntityMetaKey))
+		Node3D owner;
+		if (hitNode is MeshInstance3D mesh && TryGetPickOwner(mesh, out owner))
 		{
-			Node owner = mesh.GetMeta(OwnerEntityMetaKey).AsGodotObject() as Node;
 			if (owner is Node3D owner3D && GodotObject.IsInstanceValid(owner3D))
 			{
 				Node3D resolved = ResolveNearestEntityNode(owner3D, nodeEntities);
@@ -669,10 +686,11 @@ public static class LevelViewerPick
 				return null;
 
 			entityIds.Add(entity.shortGUID.AsUInt32);
-			if (!chain[i].HasMeta(AlienScene.OwnerCompositeMetaKey))
+			uint ownerCompositeId;
+			if (!AlienScene.TryGetOwnerCompositeId(chain[i], out ownerCompositeId))
 				return null;
 
-			compositeIds.Add(chain[i].GetMeta(AlienScene.OwnerCompositeMetaKey).AsUInt32());
+			compositeIds.Add(ownerCompositeId);
 		}
 
 		return new SelectionTarget(entityIds, compositeIds, entityIds[entityIds.Count - 1]);

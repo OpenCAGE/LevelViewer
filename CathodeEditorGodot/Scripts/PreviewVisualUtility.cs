@@ -307,7 +307,7 @@ public static class PreviewVisualUtility
             {
                 if (child is Node3D child3D
                     && child3D != root
-                    && child3D.HasMeta(AlienScene.OwnerCompositeMetaKey))
+                    && AlienScene.HasOwnerComposite(child3D))
                 {
                     continue;
                 }

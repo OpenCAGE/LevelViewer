@@ -23,7 +23,6 @@ public static class LevelViewerPopulateTree
 			Vector3 position,
 			Vector3 rotationDegrees,
 			bool hasTransform,
-			string nodeName,
 			uint mappingScopeInstanceEntityId = 0)
 		{
 			ParentIndex = parentIndex;
@@ -32,7 +31,6 @@ public static class LevelViewerPopulateTree
 			Position = position;
 			RotationDegrees = rotationDegrees;
 			HasTransform = hasTransform;
-			NodeName = nodeName;
 			MappingScopeInstanceEntityId = mappingScopeInstanceEntityId;
 		}
 
@@ -43,7 +41,6 @@ public static class LevelViewerPopulateTree
 		public Vector3 Position { get; }
 		public Vector3 RotationDegrees { get; }
 		public bool HasTransform { get; }
-		public string NodeName { get; }
 		/// <summary>Composite instance entity that owns a <c>mapping</c> parameter for this spawn command.</summary>
 		public uint MappingScopeInstanceEntityId { get; }
 	}
@@ -205,8 +202,7 @@ public static class LevelViewerPopulateTree
 		foreach (Entity entity in entities)
 		{
 			int localIndex = commands.Count;
-			TryGetSpawnTransform(entity, out Vector3 position, out Vector3 rotationDegrees);
-			bool hasTransform = TryGetSpawnTransform(entity, out position, out rotationDegrees);
+			bool hasTransform = TryGetSpawnTransform(entity, out Vector3 position, out Vector3 rotationDegrees);
 			commands.Add(new Command(
 				-1,
 				composite.shortGUID,
@@ -214,7 +210,6 @@ public static class LevelViewerPopulateTree
 				position,
 				rotationDegrees,
 				hasTransform,
-				entity.shortGUID.AsUInt32.ToString(),
 				mappingScopeInstanceEntityId));
 
 			if (entity is not FunctionEntity function)
@@ -250,7 +245,6 @@ public static class LevelViewerPopulateTree
 				cmd.Position,
 				cmd.RotationDegrees,
 				cmd.HasTransform,
-				cmd.NodeName,
 				cmd.MappingScopeInstanceEntityId));
 		}
 	}

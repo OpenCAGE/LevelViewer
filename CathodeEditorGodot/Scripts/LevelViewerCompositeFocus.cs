@@ -118,7 +118,7 @@ public static class LevelViewerCompositeFocus
 		if (!HasActiveComposite || node == null || commands == null)
 			return true;
 
-		if (node is Node3D entityNode && entityNode.HasMeta(AlienScene.OwnerCompositeMetaKey))
+		if (node is Node3D entityNode && AlienScene.HasOwnerComposite(entityNode))
 			return IsPickOwnerInScope(entityNode, commands);
 
 		uint ownerCompositeId = ResolveOwnerCompositeId(node, contentRoot);
@@ -141,9 +141,9 @@ public static class LevelViewerCompositeFocus
 		if (!HasActiveComposite || owner == null || commands == null)
 			return true;
 
-		if (owner.HasMeta(AlienScene.OwnerCompositeMetaKey))
+		uint ownerCompositeId;
+		if (AlienScene.TryGetOwnerCompositeId(owner, out ownerCompositeId))
 		{
-			uint ownerCompositeId = owner.GetMeta(AlienScene.OwnerCompositeMetaKey).AsUInt32();
 			if (!IsOwnerCompositeInScope(ownerCompositeId, commands))
 				return false;
 		}
@@ -379,10 +379,10 @@ public static class LevelViewerCompositeFocus
 
 	private static bool IsOwnerCompositeInScopeForOwner(Node3D owner)
 	{
-		if (!owner.HasMeta(AlienScene.OwnerCompositeMetaKey))
+		uint ownerCompositeId;
+		if (!AlienScene.TryGetOwnerCompositeId(owner, out ownerCompositeId))
 			return true;
 
-		uint ownerCompositeId = owner.GetMeta(AlienScene.OwnerCompositeMetaKey).AsUInt32();
 		return _compositesInScope.Contains(ownerCompositeId);
 	}
 
@@ -756,8 +756,9 @@ public static class LevelViewerCompositeFocus
 			if (current is FunctionEntityPreview preview && preview.OwnerCompositeId != 0)
 				return preview.OwnerCompositeId;
 
-			if (current.HasMeta(AlienScene.OwnerCompositeMetaKey))
-				return current.GetMeta(AlienScene.OwnerCompositeMetaKey).AsUInt32();
+			uint ownerCompositeId;
+			if (AlienScene.TryGetOwnerCompositeId(current, out ownerCompositeId))
+				return ownerCompositeId;
 
 			current = current.GetParent();
 		}

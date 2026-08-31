@@ -170,15 +170,15 @@ public static class ModelReferenceMaterialOverrides
 
 				continue;
 
-			if (!entry.Key.HasMeta(AlienScene.OwnerCompositeMetaKey))
+			uint ownerCompositeId;
+
+			if (!AlienScene.TryGetOwnerCompositeId(entry.Key, out ownerCompositeId))
 
 				continue;
 
 
 
-			Composite ownerComposite = commands.GetComposite(
-
-				new ShortGuid(entry.Key.GetMeta(AlienScene.OwnerCompositeMetaKey).AsUInt32()));
+			Composite ownerComposite = commands.GetComposite(new ShortGuid(ownerCompositeId));
 
 			if (ownerComposite == null)
 
@@ -245,11 +245,11 @@ public static class ModelReferenceMaterialOverrides
 			Node3D renderTarget = aliasOverride.PointedEntity;
 			if (renderTarget == null)
 				continue;
-			if (!entry.Key.HasMeta(AlienScene.OwnerCompositeMetaKey))
+			uint ownerCompositeId;
+			if (!AlienScene.TryGetOwnerCompositeId(entry.Key, out ownerCompositeId))
 				continue;
 
-			Composite ownerComposite = commands.GetComposite(
-				new ShortGuid(entry.Key.GetMeta(AlienScene.OwnerCompositeMetaKey).AsUInt32()));
+			Composite ownerComposite = commands.GetComposite(new ShortGuid(ownerCompositeId));
 			if (ownerComposite == null)
 				continue;
 

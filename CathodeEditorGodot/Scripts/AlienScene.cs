@@ -12,7 +12,6 @@ using System.Linq;
 
 public partial class AlienScene : Node3D
 {
-	public const string OwnerCompositeMetaKey = "owner_composite";
 
 	public Action OnLoaded;
 	/// <summary>Fires when the selected entity changes. Argument is the new selected node (null when deselected).</summary>
@@ -44,6 +43,26 @@ public partial class AlienScene : Node3D
 	private Dictionary<ShaderMaterial, bool> _materialSupport = new Dictionary<ShaderMaterial, bool>();
 	private readonly Dictionary<ulong, ShaderMaterial> _modelReferenceOverrideMaterials = new Dictionary<ulong, ShaderMaterial>();
 	private Dictionary<MeshInstance3D, Materials.Material> _modelReferenceMeshes = new Dictionary<MeshInstance3D, Materials.Material>();
+
+	/// <summary>What a spawned mesh was built from, for remapping it later.</summary>
+	private readonly struct MeshBinding
+	{
+		public MeshBinding(int sourceMaterialWriteIndex, uint modelReferenceEntityId, uint overrideParameterEntityId)
+		{
+			SourceMaterialWriteIndex = sourceMaterialWriteIndex;
+			ModelReferenceEntityId = modelReferenceEntityId;
+			OverrideParameterEntityId = overrideParameterEntityId;
+		}
+
+		public int SourceMaterialWriteIndex { get; }
+		public uint ModelReferenceEntityId { get; }
+		public uint OverrideParameterEntityId { get; }
+	}
+
+	//These three were written as Godot metadata on every spawned mesh. Each SetMeta allocates a
+	//metadata store on the node, and a level root spawns tens of thousands of meshes, so they live
+	//beside _modelReferenceMeshes instead and are cleared with it.
+	private readonly Dictionary<MeshInstance3D, MeshBinding> _meshBindings = new Dictionary<MeshInstance3D, MeshBinding>();
 	/// <summary>A scene-filter mesh and the pick owner it was spawned under.</summary>
 	private readonly struct SceneFilterMesh
 	{
@@ -72,6 +91,27 @@ public partial class AlienScene : Node3D
 
 	private Dictionary<ShortGuid, List<Node3D>> _compositeNodes = new Dictionary<ShortGuid, List<Node3D>>();
 	private Dictionary<Node3D, Entity> _nodeEntities = new Dictionary<Node3D, Entity>();
+	//Which composite each entity node came from. This used to be Godot node metadata, but a
+	//metadata store is allocated per node and a level root spawns hundreds of thousands of them -
+	//it cost more to write than creating the nodes did. Kept in step with _nodeEntities.
+	private static readonly Dictionary<Node3D, uint> _nodeOwnerComposites = new Dictionary<Node3D, uint>();
+	//An entity node is named after its entity id, and the same entity is spawned once per instance
+	//of the composite holding it - so a level root asks for a few tens of thousands of distinct
+	//names hundreds of thousands of times. Both halves of that are worth caching: the decimal
+	//string, and the StringName Godot interns it into.
+	private readonly Dictionary<uint, StringName> _nodeNames = new Dictionary<uint, StringName>();
+
+	private StringName GetEntityNodeName(uint entityId)
+	{
+		StringName name;
+		if (!_nodeNames.TryGetValue(entityId, out name))
+		{
+			name = new StringName(entityId.ToString());
+			_nodeNames[entityId] = name;
+		}
+
+		return name;
+	}
 	private readonly Dictionary<ulong, List<Node3D>> _entityNodesByKey = new Dictionary<ulong, List<Node3D>>();
 
 	private FunctionEntityPreview[] _cachedFunctionEntityPreviews = Array.Empty<FunctionEntityPreview>();
@@ -276,9 +316,7 @@ public partial class AlienScene : Node3D
 		if (commands != null && LevelViewerPick.IsCompositeInstanceEntity(entity, commands))
 			return PreviewVisualUtility.HasValidWorldAnchor(entityNode);
 
-		uint ownerCompositeId = entityNode.HasMeta(OwnerCompositeMetaKey)
-			? entityNode.GetMeta(OwnerCompositeMetaKey).AsUInt32()
-			: 0;
+		uint ownerCompositeId = GetOwnerCompositeId(entityNode);
 
 		FunctionEntity functionForGizmo = ResolveFunctionEntityForTransformGizmo(entity, entityNode, ownerCompositeId);
 		if (functionForGizmo == null)
@@ -359,9 +397,7 @@ public partial class AlienScene : Node3D
 			return;
 		}
 
-		uint ownerCompositeId = entityNode.HasMeta(OwnerCompositeMetaKey)
-			? entityNode.GetMeta(OwnerCompositeMetaKey).AsUInt32()
-			: 0;
+		uint ownerCompositeId = GetOwnerCompositeId(entityNode);
 
 		List<Entity> overrideEntities = BuildLightOverrideChain(entityNode);
 		LevelViewerLightRadius.Apply(entityNode, function, ownerCompositeId, overrideEntities);
@@ -386,14 +422,14 @@ public partial class AlienScene : Node3D
 			if (alias.parameters == null || alias.parameters.Count == 0)
 				continue;
 
-			if (!entry.Key.HasMeta(OwnerCompositeMetaKey))
+			uint aliasOwnerCompositeId;
+			if (!TryGetOwnerCompositeId(entry.Key, out aliasOwnerCompositeId))
 				continue;
 
 			Node3D pointedNode = aliasOverride.PointedEntity;
 			if (pointedNode == null || !GodotObject.IsInstanceValid(pointedNode))
 			{
-				Composite ownerComposite = _content.Level.Commands.GetComposite(
-					new ShortGuid(entry.Key.GetMeta(OwnerCompositeMetaKey).AsUInt32()));
+				Composite ownerComposite = _content.Level.Commands.GetComposite(new ShortGuid(aliasOwnerCompositeId));
 				if (ownerComposite == null
 					|| !TryResolveAliasPointedSceneNode(aliasOverride, alias, ownerComposite, out pointedNode))
 				{
@@ -498,6 +534,7 @@ public partial class AlienScene : Node3D
 
 		ClearPopulateMaterialCaches();
 		_modelReferenceMeshes.Clear();
+		_meshBindings.Clear();
 		_sceneFilterMeshes.Clear();
 		_collisionOverlay = null;
 		_stateInfoOverlay = null;
@@ -531,6 +568,7 @@ public partial class AlienScene : Node3D
 
 		_compositeNodes.Clear();
 		_nodeEntities.Clear();
+		_nodeOwnerComposites.Clear();
 		_bulkPopulatePreviews.Clear();
 		_bulkModelReferencePreviews.Clear();
 		_bulkMeshSpawnJobs.Clear();
@@ -731,6 +769,7 @@ public partial class AlienScene : Node3D
 		_contentGeneration++;
 		_compositeNodes.Clear();
 		_nodeEntities.Clear();
+		_nodeOwnerComposites.Clear();
 		_aliasParameterEntityByRenderTarget = null;
 		_deferredPickOwners.Clear();
 		_bulkPopulatePreviews.Clear();
@@ -912,6 +951,10 @@ public partial class AlienScene : Node3D
 		_deferredPickOwners.Clear();
 	}
 
+	//Passing the group name as a string interns a fresh StringName on every call, and activating a
+	//level's meshes asks twice per mesh.
+	private static readonly StringName ModelReferenceRenderableGroup = new StringName("model_reference_renderable");
+
 	private void ActivateDeferredMeshes()
 	{
 		foreach (MeshInstance3D mesh in _modelReferenceMeshes.Keys)
@@ -919,8 +962,8 @@ public partial class AlienScene : Node3D
 			if (mesh == null || !GodotObject.IsInstanceValid(mesh))
 				continue;
 
-			if (!mesh.IsInGroup("model_reference_renderable"))
-				mesh.AddToGroup("model_reference_renderable");
+			if (!mesh.IsInGroup(ModelReferenceRenderableGroup))
+				mesh.AddToGroup(ModelReferenceRenderableGroup);
 			mesh.Visible = true;
 			MeshInstance3D overlay = FindWireframeOverlay(mesh);
 			if (overlay != null)
@@ -1232,6 +1275,33 @@ public partial class AlienScene : Node3D
 			_functionEntityPreviewsCacheDirty = true;
 	}
 
+
+	/// <summary>
+	/// True for an entity whose scene node would be empty and immovable: no position of its own, so
+	/// it sits exactly where its parent already is, nothing to draw, and no render filter that could
+	/// ever ask it to draw something. Two thirds of a level's entities are pure script logic like
+	/// this, and a node each cost several seconds and a few hundred megabytes on the larger levels.
+	/// Give one a position and it stops being skippable - ApplyEntityParameter spawns it then.
+	/// </summary>
+	private static bool ShouldSkipSceneNode(Entity entity, bool hasTransform)
+	{
+		if (hasTransform)
+			return false;
+
+		//Composite instances are the tree itself, and aliases and proxies stand in for entities
+		//elsewhere, so neither is ever skipped. Variables are not spawned in the first place.
+		if (entity is not FunctionEntity function || !function.function.IsFunctionType)
+			return false;
+
+		FunctionType functionType = function.function.AsFunctionType;
+		if (functionType == FunctionType.ModelReference)
+			return false;
+
+		//Anything a render filter can turn into an icon or a shape keeps its node, whether or not
+		//that filter happens to be on right now.
+		return !RenderFilterDefinitions.IsSupported(functionType);
+	}
+
 	private Node3D SpawnEntityFromPopulateCommand(
 		Composite composite,
 		Entity entity,
@@ -1255,19 +1325,28 @@ public partial class AlienScene : Node3D
 			return null;
 		}
 
+		//Command is a wide struct, so read it out once rather than through planCommand.Value.
+		bool hasPlan = planCommand.HasValue;
+		LevelViewerPopulateTree.Command plan = hasPlan ? planCommand.Value : default;
+
 		Vector3 position;
 		Vector3 rotation;
-		if (planCommand.HasValue && planCommand.Value.HasTransform)
+		bool hasTransform;
+		if (hasPlan && plan.HasTransform)
 		{
-			position = planCommand.Value.Position;
-			rotation = planCommand.Value.RotationDegrees;
+			position = plan.Position;
+			rotation = plan.RotationDegrees;
+			hasTransform = true;
 		}
 		else
 		{
-			GetEntityTransform(entity, out position, out rotation);
+			hasTransform = GetEntityTransform(entity, out position, out rotation);
 		}
 
-		string nodeName = planCommand.HasValue ? planCommand.Value.NodeName : entity.shortGUID.AsUInt32.ToString();
+		if (ShouldSkipSceneNode(entity, hasTransform))
+			return null;
+
+		StringName nodeName = GetEntityNodeName(entity.shortGUID.AsUInt32);
 
 		Node3D entityNode;
 		switch (entity.variant)
@@ -1284,7 +1363,7 @@ public partial class AlienScene : Node3D
 		parentNode.AddChild(entityNode);
 		entityNode.Position = position;
 		entityNode.RotationDegrees = rotation;
-		entityNode.SetMeta(OwnerCompositeMetaKey, composite.shortGUID.AsUInt32);
+		_nodeOwnerComposites[entityNode] = composite.shortGUID.AsUInt32;
 		_nodeEntities.Add(entityNode, entity);
 		TrackEntityNode(composite.shortGUID, entity.shortGUID, entityNode);
 
@@ -1306,9 +1385,7 @@ public partial class AlienScene : Node3D
 				else
 				{
 					bool geometryOnly = _isBulkPopulating && !_wiringCompositeLinks;
-					uint mappingScopeInstanceEntityId = planCommand.HasValue
-						? planCommand.Value.MappingScopeInstanceEntityId
-						: 0;
+					uint mappingScopeInstanceEntityId = hasPlan ? plan.MappingScopeInstanceEntityId : 0;
 					if (FunctionEntityPreviewSetup.TryAddPreview(
 						this,
 						function,
@@ -1419,6 +1496,7 @@ public partial class AlienScene : Node3D
 				{
 					compositeInstance.QueueFree();
 					_nodeEntities.Remove(compositeInstance);
+					_nodeOwnerComposites.Remove(compositeInstance);
 				}
 			}
 			_compositeNodes.Remove(composite);
@@ -1440,6 +1518,23 @@ public partial class AlienScene : Node3D
 						AddEntity(c, e, compositeInstance);
 				}
 			}
+		}
+	}
+
+	/// <summary>Spawns an entity under every instance of its composite that is in the scene.</summary>
+	private void SpawnEntityIntoAllCompositeInstances(Composite composite, Entity entity)
+	{
+		List<Node3D> compositeInstances;
+		if (composite == null || entity == null || !_compositeNodes.TryGetValue(composite.shortGUID, out compositeInstances))
+			return;
+
+		// AddEntity can add to _compositeNodes when the entity is itself a composite instance.
+		Node3D[] snapshot = compositeInstances.ToArray();
+		for (int i = 0; i < snapshot.Length; i++)
+		{
+			Node3D compositeInstance = snapshot[i];
+			if (compositeInstance != null && GodotObject.IsInstanceValid(compositeInstance))
+				AddEntity(composite, entity, compositeInstance);
 		}
 	}
 
@@ -1854,11 +1949,11 @@ public partial class AlienScene : Node3D
 
 		if (entity is AliasEntity alias && entityNode is EntityOverride aliasOverride)
 		{
-			if (!entityNode.HasMeta(OwnerCompositeMetaKey))
+			uint aliasOwnerCompositeId;
+			if (!TryGetOwnerCompositeId(entityNode, out aliasOwnerCompositeId))
 				return entityNode;
 
-			Composite composite = _content?.Level?.Commands?.GetComposite(
-				new ShortGuid(entityNode.GetMeta(OwnerCompositeMetaKey).AsUInt32()));
+			Composite composite = _content?.Level?.Commands?.GetComposite(new ShortGuid(aliasOwnerCompositeId));
 			if (composite != null
 				&& TryResolveAliasPointedSceneNode(aliasOverride, alias, composite, out Node3D pointedNode))
 			{
@@ -2131,7 +2226,6 @@ public partial class AlienScene : Node3D
 	{
 		if (sync == null)
 			return;
-
 		Composite dataComposite = _content.Level.Commands.Entries.FirstOrDefault(o => o.shortGUID == dataCompositeID);
 		if (dataComposite == null)
 			return;
@@ -2201,7 +2295,6 @@ public partial class AlienScene : Node3D
 				ViewerLog.Print("ApplyEntityParameter RESOURCE complete (limited path)");
 			return;
 		}
-
 		if (!ShouldSyncVisualForOwnerComposite(visualCompositeID))
 			return;
 
@@ -2211,7 +2304,16 @@ public partial class AlienScene : Node3D
 			return;
 
 		if (!TryGetCachedEntityNodes(visualCompositeID, visualEntityID, out List<Node3D> entityNodes))
-			return;
+		{
+			//An entity with nothing to draw and nowhere to be has no scene node (ShouldSkipSceneNode).
+			//Giving it a position makes it placeable, so it gets one now - in every instance of its
+			//composite, the same as it would have had at populate.
+			if (ShouldSkipSceneNode(visualEntity, LevelViewerPopulateTree.TryGetSpawnTransform(visualEntity, out _, out _)))
+				return;
+			SpawnEntityIntoAllCompositeInstances(visualComposite, visualEntity);
+			if (!TryGetCachedEntityNodes(visualCompositeID, visualEntityID, out entityNodes))
+				return;
+		}
 
 		HashSet<Node3D> touchedEntityNodes = null;
 		if (syncDataType == DataType.TRANSFORM && !fromPointer && visualLimitNode == null)
@@ -2354,7 +2456,8 @@ public partial class AlienScene : Node3D
 			if (mesh == null || !GodotObject.IsInstanceValid(mesh))
 				continue;
 
-			if (!mesh.HasMeta(ModelReferenceMaterialMapping.SourceMaterialWriteIndexMetaKey))
+			MeshBinding binding;
+			if (!_meshBindings.TryGetValue(mesh, out binding) || binding.SourceMaterialWriteIndex < 0)
 				continue;
 
 			Node3D owner = mesh.GetParent() as Node3D;
@@ -2370,8 +2473,7 @@ public partial class AlienScene : Node3D
 			if (mapping == null || mapping.ID != changedId)
 				continue;
 
-			int sourceMaterialWriteIndex = mesh.GetMeta(
-				ModelReferenceMaterialMapping.SourceMaterialWriteIndexMetaKey).AsInt32();
+			int sourceMaterialWriteIndex = binding.SourceMaterialWriteIndex;
 			Materials.Material currentMaterial = entry.Value;
 			int currentWriteIndex = level.Materials.GetWriteIndex(currentMaterial);
 			int remappedWriteIndex = ModelReferenceMaterialMapping.RemapMaterialWriteIndex(
@@ -2416,11 +2518,11 @@ public partial class AlienScene : Node3D
 		{
 			if (entry.Value is not AliasEntity alias || entry.Key is not EntityOverride aliasOverride)
 				continue;
-			if (!entry.Key.HasMeta(OwnerCompositeMetaKey))
+			uint aliasOwnerCompositeId;
+			if (!TryGetOwnerCompositeId(entry.Key, out aliasOwnerCompositeId))
 				continue;
 
-			Composite ownerComposite = commands.GetComposite(
-				new ShortGuid(entry.Key.GetMeta(OwnerCompositeMetaKey).AsUInt32()));
+			Composite ownerComposite = commands.GetComposite(new ShortGuid(aliasOwnerCompositeId));
 			if (ownerComposite == null)
 				continue;
 
@@ -2550,11 +2652,11 @@ public partial class AlienScene : Node3D
 				continue;
 			if (entry.Key is not EntityOverride aliasOverride)
 				continue;
-			if (!entry.Key.HasMeta(OwnerCompositeMetaKey))
+			uint aliasOwnerCompositeId;
+			if (!TryGetOwnerCompositeId(entry.Key, out aliasOwnerCompositeId))
 				continue;
 
-			Composite aliasComposite = commands.GetComposite(
-				new ShortGuid(entry.Key.GetMeta(OwnerCompositeMetaKey).AsUInt32()));
+			Composite aliasComposite = commands.GetComposite(new ShortGuid(aliasOwnerCompositeId));
 			if (aliasComposite != ownerComposite)
 				continue;
 
@@ -2625,10 +2727,11 @@ public partial class AlienScene : Node3D
 		if (EntityNodeUtil.FindAllPreviews(entityNode).Length > 0)
 			return false;
 
-		if (!entityNode.HasMeta(OwnerCompositeMetaKey))
+		uint ownerCompositeIdForPreview;
+		if (!TryGetOwnerCompositeId(entityNode, out ownerCompositeIdForPreview))
 			return false;
 
-		ShortGuid ownerComposite = new ShortGuid(entityNode.GetMeta(OwnerCompositeMetaKey).AsUInt32());
+		ShortGuid ownerComposite = new ShortGuid(ownerCompositeIdForPreview);
 		if (!FunctionEntityPreviewSetup.TryAddPreview(
 			this,
 			function,
@@ -2709,10 +2812,10 @@ public partial class AlienScene : Node3D
 			if (entry.Value is not FunctionEntity function)
 				continue;
 
-			if (!entityNode.HasMeta(OwnerCompositeMetaKey))
+			uint ownerCompositeId;
+			if (!TryGetOwnerCompositeId(entityNode, out ownerCompositeId))
 				continue;
 
-			uint ownerCompositeId = entityNode.GetMeta(OwnerCompositeMetaKey).AsUInt32();
 			if (!ShouldMaterializeFunctionPreview(function, ownerCompositeId, changedFunctionTypes))
 				continue;
 
@@ -2728,10 +2831,11 @@ public partial class AlienScene : Node3D
 			if (entityNode == null || !GodotObject.IsInstanceValid(entityNode))
 				continue;
 
-			if (!entityNode.HasMeta(OwnerCompositeMetaKey))
+			uint nodeOwnerCompositeId;
+			if (!TryGetOwnerCompositeId(entityNode, out nodeOwnerCompositeId))
 				continue;
 
-			if (entityNode.GetMeta(OwnerCompositeMetaKey).AsUInt32() != ownerCompositeId)
+			if (nodeOwnerCompositeId != ownerCompositeId)
 				continue;
 
 			if (entry.Value is not FunctionEntity function)
@@ -3072,6 +3176,29 @@ public partial class AlienScene : Node3D
 		return ((ulong)compositeId.AsUInt32 << 32) | entityId.AsUInt32;
 	}
 
+	/// <summary>The composite an entity node was spawned from. False for anything else in the scene.</summary>
+	public static bool TryGetOwnerCompositeId(Node node, out uint ownerCompositeId)
+	{
+		if (node is Node3D node3D)
+			return _nodeOwnerComposites.TryGetValue(node3D, out ownerCompositeId);
+
+		ownerCompositeId = 0;
+		return false;
+	}
+
+	/// <summary>Was this node spawned for an entity? The old test was HasMeta on the node.</summary>
+	public static bool HasOwnerComposite(Node node)
+	{
+		uint ownerCompositeId;
+		return TryGetOwnerCompositeId(node, out ownerCompositeId);
+	}
+
+	private static uint GetOwnerCompositeId(Node node)
+	{
+		uint ownerCompositeId;
+		return TryGetOwnerCompositeId(node, out ownerCompositeId) ? ownerCompositeId : 0;
+	}
+
 	private void TrackEntityNode(ShortGuid compositeId, ShortGuid entityId, Node3D entityNode)
 	{
 		ulong key = MakeEntityCacheKey(compositeId, entityId);
@@ -3283,6 +3410,7 @@ public partial class AlienScene : Node3D
 						UntrackEntityNode(composite, entity, entityNode);
 						entityNode.QueueFree();
 						_nodeEntities.Remove(entityNode);
+						_nodeOwnerComposites.Remove(entityNode);
 						_functionEntityPreviewsCacheDirty = true;
 						removed = true;
 						instancesProcessed++;
@@ -3395,6 +3523,7 @@ public partial class AlienScene : Node3D
 		}
 	}
 
+
 	private void CreateRenderable(
 		Node3D parent,
 		Models.CS2.Component.LOD.Submesh submesh,
@@ -3429,41 +3558,19 @@ public partial class AlienScene : Node3D
 		if (!_bulkMeshSpawning)
 			meshInstance.Name = holder.MainMesh.ResourceName + " (" + material.Name + ")";
 
-		if (sourceMaterialWriteIndex >= 0)
-		{
-			meshInstance.SetMeta(
-				ModelReferenceMaterialMapping.SourceMaterialWriteIndexMetaKey,
-				sourceMaterialWriteIndex);
-		}
-
-		if (TryResolveSubmeshWriteIndex(submesh, out int modelWriteIndex))
-		{
-			meshInstance.SetMeta(
-				ModelReferenceMaterialMapping.ModelWriteIndexMetaKey,
-				modelWriteIndex);
-		}
-
-		if (modelReferenceEntity != null)
-		{
-			meshInstance.SetMeta(
-				ModelReferenceMaterialOverrides.ModelReferenceEntityMetaKey,
-				modelReferenceEntity.shortGUID.AsUInt32);
-		}
-
 		Entity parameterEntity = overrideParameterEntity ?? modelReferenceEntity;
-		if (parameterEntity != null)
-		{
-			meshInstance.SetMeta(
-				ModelReferenceMaterialOverrides.OverrideParameterEntityMetaKey,
-				parameterEntity.shortGUID.AsUInt32);
-		}
+		//ModelWriteIndexMetaKey used to be written here too; nothing has ever read it back.
+		_meshBindings[meshInstance] = new MeshBinding(
+			sourceMaterialWriteIndex,
+			modelReferenceEntity == null ? 0 : modelReferenceEntity.shortGUID.AsUInt32,
+			parameterEntity == null ? 0 : parameterEntity.shortGUID.AsUInt32);
 
 		Entity fallbackEntity = fallbackParameterEntity ?? modelReferenceEntity;
 		LevelViewerMeshUtil.ConfigureMeshInstance(meshInstance);
 		if (!_bulkMeshSpawning)
-			meshInstance.AddToGroup("model_reference_renderable");
+			meshInstance.AddToGroup(ModelReferenceRenderableGroup);
 		if (!_bulkMeshSpawning)
-			meshInstance.TreeExited += () => _modelReferenceMeshes.Remove(meshInstance);
+			meshInstance.TreeExited += () => { _modelReferenceMeshes.Remove(meshInstance); _meshBindings.Remove(meshInstance); };
 		_modelReferenceMeshes[meshInstance] = material;
 		meshInstance.MaterialOverride = GetSolidMaterialForModelReference(
 			material,
@@ -3538,9 +3645,35 @@ public partial class AlienScene : Node3D
 		return LevelViewerPopulateTree.TryGetSpawnTransform(entity, out position, out rotation);
 	}
 
+	/// <summary>Which model and LOD a submesh belongs to, for naming the Godot mesh after it.</summary>
+	private readonly struct SubmeshOwner
+	{
+		public SubmeshOwner(Models.CS2 model, Models.CS2.Component.LOD lod) { Model = model; Lod = lod; }
+		public Models.CS2 Model { get; }
+		public Models.CS2.Component.LOD Lod { get; }
+	}
+
+	//Models.FindModel/FindModelLOD walk every submesh of every LOD of every component of every
+	//model, and populating a level asks for both once per unique mesh - 4.3 of the 5.4 seconds it
+	//took to build HAB_Airport's Godot meshes went on working out what to call them. The walk that
+	//builds the write-index cache already visits exactly this, so it records the answer too.
+	private readonly Dictionary<Models.CS2.Component.LOD.Submesh, SubmeshOwner> _submeshOwners =
+		new Dictionary<Models.CS2.Component.LOD.Submesh, SubmeshOwner>();
+
+	/// <summary>"model: lod" for a submesh, matching what Models.FindModel would have reported.</summary>
+	private string GetSubmeshDisplayName(Models.CS2.Component.LOD.Submesh submesh)
+	{
+		SubmeshOwner owner;
+		if (submesh == null || !_submeshOwners.TryGetValue(submesh, out owner))
+			return "?: ?";
+
+		return (owner.Model == null ? "?" : owner.Model.Name) + ": " + (owner.Lod == null ? "?" : owner.Lod.Name);
+	}
+
 	private void BuildSubmeshWriteIndexCache()
 	{
 		_submeshWriteIndexByReference.Clear();
+		_submeshOwners.Clear();
 		Models models = _content?.Level?.Models;
 		if (models?.Entries == null)
 			return;
@@ -3573,6 +3706,7 @@ public partial class AlienScene : Node3D
 						lock (gate)
 						{
 							_submeshWriteIndexByReference[submesh] = writeIndex;
+							_submeshOwners[submesh] = new SubmeshOwner(model, lod);
 						}
 					}
 				}
@@ -3629,9 +3763,7 @@ public partial class AlienScene : Node3D
 			return null;
 		}
 
-		Models.CS2.Component.LOD lod = models.FindModelLOD(sourceSubmesh);
-		Models.CS2 mesh = models.FindModel(sourceSubmesh);
-		string modelName = ((mesh == null) ? "?" : mesh.Name) + ": " + ((lod == null) ? "?" : lod.Name);
+		string modelName = GetSubmeshDisplayName(sourceSubmesh);
 		ArrayMesh arrayMesh = sourceSubmesh.ToArrayMesh();
 		if (arrayMesh == null || arrayMesh.GetSurfaceCount() == 0)
 		{
@@ -3785,11 +3917,15 @@ public partial class AlienScene : Node3D
 
 	private Entity ResolveModelReferenceEntityFromMesh(MeshInstance3D meshInstance)
 	{
-		if (meshInstance == null || !meshInstance.HasMeta(ModelReferenceMaterialOverrides.ModelReferenceEntityMetaKey))
+		MeshBinding binding;
+		if (meshInstance == null
+			|| !_meshBindings.TryGetValue(meshInstance, out binding)
+			|| binding.ModelReferenceEntityId == 0)
+		{
 			return null;
+		}
 
-		uint entityId = meshInstance.GetMeta(ModelReferenceMaterialOverrides.ModelReferenceEntityMetaKey).AsUInt32();
-		return ModelReferenceMaterialMapping.TryGetEntityById(entityId);
+		return ModelReferenceMaterialMapping.TryGetEntityById(binding.ModelReferenceEntityId);
 	}
 
 	private void ResolveMaterialOverrideEntitiesFromMesh(
@@ -3801,11 +3937,15 @@ public partial class AlienScene : Node3D
 		modelReferenceEntity = ResolveModelReferenceEntityFromMesh(meshInstance);
 		fallbackParameterEntity = modelReferenceEntity;
 		overrideParameterEntity = modelReferenceEntity;
-		if (meshInstance == null || !meshInstance.HasMeta(ModelReferenceMaterialOverrides.OverrideParameterEntityMetaKey))
+		MeshBinding overrideBinding;
+		if (meshInstance == null
+			|| !_meshBindings.TryGetValue(meshInstance, out overrideBinding)
+			|| overrideBinding.OverrideParameterEntityId == 0)
+		{
 			return;
+		}
 
-		uint overrideEntityId = meshInstance.GetMeta(ModelReferenceMaterialOverrides.OverrideParameterEntityMetaKey).AsUInt32();
-		Entity resolvedOverride = ModelReferenceMaterialMapping.TryGetEntityById(overrideEntityId);
+		Entity resolvedOverride = ModelReferenceMaterialMapping.TryGetEntityById(overrideBinding.OverrideParameterEntityId);
 		if (resolvedOverride != null)
 			overrideParameterEntity = resolvedOverride;
 	}
@@ -4012,6 +4152,7 @@ public partial class AlienScene : Node3D
 			if (entry.Key == null || !GodotObject.IsInstanceValid(entry.Key))
 			{
 				_modelReferenceMeshes.Remove(entry.Key);
+				_meshBindings.Remove(entry.Key);
 				continue;
 			}
 
@@ -4139,6 +4280,7 @@ public partial class AlienScene : Node3D
 		return tex;
 	}
 
+
 	private void FinalizePrewarmGodotResources(
 		LevelViewerPopulatePrewarm.Result result,
 		LevelViewerPopulatePrewarm.Plan plan)
@@ -4167,9 +4309,7 @@ public partial class AlienScene : Node3D
 				continue;
 			}
 
-			Models.CS2.Component.LOD lod = models.FindModelLOD(submesh);
-			Models.CS2 mesh = models.FindModel(submesh);
-			arrayMesh.ResourceName = ((mesh == null) ? "?" : mesh.Name) + ": " + ((lod == null) ? "?" : lod.Name);
+			arrayMesh.ResourceName = GetSubmeshDisplayName(submesh);
 			arrayMesh.ResourceLocalToScene = false;
 			submesh.Data = null;
 

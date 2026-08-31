@@ -177,11 +177,11 @@ public static class ModelReferenceMaterialMapping
 		Node current = modelRefNode;
 		while (current != null && current != stopAtRoot)
 		{
+			uint ownerCompositeId;
 			if (current is Node3D node3D
-				&& node3D.HasMeta(AlienScene.OwnerCompositeMetaKey))
+				&& AlienScene.TryGetOwnerCompositeId(node3D, out ownerCompositeId))
 			{
-				Composite composite = commands.GetComposite(
-					new ShortGuid(node3D.GetMeta(AlienScene.OwnerCompositeMetaKey).AsUInt32()));
+				Composite composite = commands.GetComposite(new ShortGuid(ownerCompositeId));
 				if (composite != null && (composites.Count == 0 || composites[composites.Count - 1] != composite))
 					composites.Add(composite);
 			}

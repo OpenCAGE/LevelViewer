@@ -46,19 +46,19 @@ public partial class CharacterPreview : FunctionEntityPreview
         _root = new Node3D { Name = "CharacterPreview" };
         AddChild(_root);
 
-        CapsuleMesh bodyMesh = new CapsuleMesh
+        PrimitiveMesh bodyMesh = (PrimitiveMesh)PreviewVisualUtility.GetSharedMesh("character:body", () => new CapsuleMesh
         {
             Radius = BodyRadius,
             Height = BodyHeight,
-        };
+        });
         Node3D body = PreviewVisualUtility.CreatePrimitivePreview("Body", _root, bodyMesh, CharacterColor);
         body.Position = new Vector3(0f, BodyHeight * 0.5f, 0f);
 
-        SphereMesh headMesh = new SphereMesh
+        PrimitiveMesh headMesh = (PrimitiveMesh)PreviewVisualUtility.GetSharedMesh("character:head", () => new SphereMesh
         {
             Radius = HeadRadius,
             Height = HeadRadius * 2f,
-        };
+        });
         Node3D head = PreviewVisualUtility.CreatePrimitivePreview("Head", _root, headMesh, CharacterColor);
         head.Position = new Vector3(0f, HeadOffset, 0f);
     }

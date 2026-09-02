@@ -19,7 +19,7 @@ public partial class SoundEnvironmentMarkerPreview : PositionMarkerPreview
         ArrayMesh innerTorus = PreviewVisualUtility.CreateTorusMesh(TorusRadius * 0.55f, TubeRadius * 0.7f);
         PreviewVisualUtility.CreateMeshPreview("InnerTorus", _root, innerTorus, Colors.White);
 
-        SphereMesh coreMesh = new SphereMesh { Radius = 0.06f, Height = 0.12f };
+        PrimitiveMesh coreMesh = (PrimitiveMesh)PreviewVisualUtility.GetSharedMesh("soundenv:core", () => new SphereMesh { Radius = 0.06f, Height = 0.12f });
         PreviewVisualUtility.CreatePrimitivePreview("Core", _root, coreMesh, Colors.White);
     }
 }

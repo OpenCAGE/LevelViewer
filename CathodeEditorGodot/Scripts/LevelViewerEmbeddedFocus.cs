@@ -28,6 +28,10 @@ public static class LevelViewerEmbeddedFocus
 
 		ProjectSettings.SetSetting("application/run/low_processor_mode", false);
 		LevelViewerRenderIdleThrottle.ConfigureEmbeddedMode(true);
+		//Nothing ever switched this on, so every ViewerLog line - populate plans, restores, the unhandled
+		//exception handlers, "[Viewer] Closing: ..." - was dropped. Hosted by OpenCAGE they are the only
+		//account of what the viewer was doing when it died (see LevelViewerPanel's output tail).
+		ViewerLog.Enabled = true;
 	}
 
 	/// <summary>

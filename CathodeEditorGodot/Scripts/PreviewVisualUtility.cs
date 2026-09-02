@@ -26,6 +26,36 @@ public static class PreviewVisualUtility
     private static readonly Dictionary<Color, ShaderMaterial> _overlayLineByColour = new Dictionary<Color, ShaderMaterial>();
     private static readonly Dictionary<(Texture2D icon, Color tint), ShaderMaterial> _iconBillboardByIcon = new Dictionary<(Texture2D icon, Color tint), ShaderMaterial>();
 
+    /* One mesh per shape, shared by every preview that draws it. Each position marker used to build its
+     * own torus ArrayMesh and three CylinderMeshes, every box, sphere, pyramid and character its own
+     * primitive: thousands of identical vertex buffers on a big level, each a RenderingServer mesh with
+     * its own GPU buffers. Shapes whose size varies per instance (axis stubs, line segments, the box and
+     * sphere volumes) draw a unit mesh scaled on the node, which the pick code already handles through
+     * the node's global transform. */
+    private static readonly Dictionary<string, Mesh> _sharedMeshes = new Dictionary<string, Mesh>();
+    private static CylinderMesh _unitCylinderMesh;
+
+    public static Mesh GetSharedMesh(string key, System.Func<Mesh> create)
+    {
+        if (_sharedMeshes.TryGetValue(key, out Mesh mesh) && GodotObject.IsInstanceValid(mesh))
+            return mesh;
+
+        mesh = create();
+        _sharedMeshes[key] = mesh;
+        return mesh;
+    }
+
+    /// <summary>Radius 1, height 1, Y-aligned: scale the node by (width, length, width).</summary>
+    private static CylinderMesh UnitCylinderMesh
+    {
+        get
+        {
+            if (_unitCylinderMesh == null || !GodotObject.IsInstanceValid(_unitCylinderMesh))
+                _unitCylinderMesh = new CylinderMesh { TopRadius = 1f, BottomRadius = 1f, Height = 1f };
+            return _unitCylinderMesh;
+        }
+    }
+
     private static ShaderMaterial GetColourMaterial(Dictionary<Color, ShaderMaterial> cache, Color color, ShaderMaterial shared)
     {
         if (cache.TryGetValue(color, out ShaderMaterial material) && GodotObject.IsInstanceValid(material))
@@ -452,13 +482,8 @@ public static class PreviewVisualUtility
     private static void CreateAxisStub(string name, Node3D parent, Vector3 direction, float length, float width, Color color)
     {
         Vector3 axis = direction.Normalized();
-        CylinderMesh cylinder = new CylinderMesh
-        {
-            TopRadius = width,
-            BottomRadius = width,
-            Height = length,
-        };
-        Node3D axisObject = CreatePrimitivePreview(name, parent, cylinder, color);
+        Node3D axisObject = CreatePrimitivePreview(name, parent, UnitCylinderMesh, color);
+        axisObject.Scale = new Vector3(width, length, width);
         axisObject.Rotation = GetAxisStubEuler(axis);
         axisObject.Position = axis * (length * 0.5f);
     }
@@ -487,14 +512,8 @@ public static class PreviewVisualUtility
         if (length < 0.001f)
             return null;
 
-        CylinderMesh cylinder = new CylinderMesh
-        {
-            TopRadius = width,
-            BottomRadius = width,
-            Height = length,
-        };
-
-        Node3D line = CreatePrimitivePreview(name, parent, cylinder, color);
+        Node3D line = CreatePrimitivePreview(name, parent, UnitCylinderMesh, color);
+        line.Scale = new Vector3(width, length, width);
         line.Position = localStart + delta * 0.5f;
         line.Rotation = GetLookEuler(delta, new Vector3(Mathf.Pi / 2f, 0f, 0f));
         MeshInstance3D meshInstance = line as MeshInstance3D;
@@ -534,6 +553,12 @@ public static class PreviewVisualUtility
     }
 
     public static ArrayMesh CreateTorusMesh(float outerRadius, float tubeRadius, int segments = 24, int tubeSegments = 12)
+    {
+        string key = "torus:" + outerRadius.ToString("R") + ":" + tubeRadius.ToString("R") + ":" + segments + ":" + tubeSegments;
+        return (ArrayMesh)GetSharedMesh(key, () => BuildTorusMesh(outerRadius, tubeRadius, segments, tubeSegments));
+    }
+
+    private static ArrayMesh BuildTorusMesh(float outerRadius, float tubeRadius, int segments, int tubeSegments)
     {
         ArrayMesh mesh = new ArrayMesh();
         int vertexCount = segments * tubeSegments;

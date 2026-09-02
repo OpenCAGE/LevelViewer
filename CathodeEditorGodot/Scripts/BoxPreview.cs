@@ -102,7 +102,7 @@ public partial class BoxPreview : FunctionEntityPreview
         if (_volume != null)
             return;
 
-        BoxMesh box = new BoxMesh { Size = Vector3.One };
+        Mesh box = PreviewVisualUtility.GetSharedMesh("box:unit", () => new BoxMesh { Size = Vector3.One });
         _volume = PreviewVisualUtility.CreateMeshPreview("BoxPreview", this, box, Colors.White, opaque: false);
     }
 }

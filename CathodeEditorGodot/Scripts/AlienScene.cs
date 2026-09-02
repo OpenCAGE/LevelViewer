@@ -882,12 +882,55 @@ public partial class AlienScene : Node3D
 
 		ModelReferenceRenderSettings.FinalizeLevelLoad(_modelReferenceMeshes.Count);
 		ReleaseCathodeBinarySourceData();
+		CollectReleasedSourceData();
 		ViewerLog.Print(
 			"Scene resources: "
 			+ _modelReferenceMeshes.Count + " mesh instances, "
 			+ _modelMeshesByWriteIndex.Count + " unique meshes, "
 			+ CachedTextureCount + " cached textures.");
+		LogMemoryBreakdown("after populate");
 		QueueLargeSceneRenderPolicyApply();
+	}
+
+	/// <summary>
+	/// Give the dead pak buffers back. The CathodeLib loaders read whole files into memory (LEVEL_TEXTURES alone
+	/// is 400 MB on a big level, LEVEL_MODELS 200 MB) and those buffers are garbage the moment parsing ends, but
+	/// they sit on the large object heap until a full collection happens to run - measured on SalvageMode2: two
+	/// 412 MB dead arrays still resident 45 s after populate, 0.8 GB of the process's 5.4 GB. A blocking,
+	/// compacting collection here, once, at the point the scene is built, returns them to the OS.
+	/// </summary>
+	private static void CollectReleasedSourceData()
+	{
+		System.Runtime.GCSettings.LargeObjectHeapCompactionMode = System.Runtime.GCLargeObjectHeapCompactionMode.CompactOnce;
+		GC.Collect();
+		GC.WaitForPendingFinalizers();
+		GC.Collect();
+	}
+
+	/// <summary>Where the process's memory is: managed heap, engine static allocations, and what the renderer holds.</summary>
+	public static void LogMemoryBreakdown(string when)
+	{
+		try
+		{
+			long managed = GC.GetTotalMemory(false);
+			ulong engineStatic = OS.GetStaticMemoryUsage();
+			ulong texture = RenderingServer.GetRenderingInfo(RenderingServer.RenderingInfo.TextureMemUsed);
+			ulong buffer = RenderingServer.GetRenderingInfo(RenderingServer.RenderingInfo.BufferMemUsed);
+			ulong video = RenderingServer.GetRenderingInfo(RenderingServer.RenderingInfo.VideoMemUsed);
+			double objects = Performance.GetMonitor(Performance.Monitor.ObjectCount);
+			double resources = Performance.GetMonitor(Performance.Monitor.ObjectResourceCount);
+			double nodes = Performance.GetMonitor(Performance.Monitor.ObjectNodeCount);
+			long privateBytes = System.Diagnostics.Process.GetCurrentProcess().PrivateMemorySize64;
+			string line = "Memory breakdown " + when + ": process private " + (privateBytes >> 20) + " MB; managed heap " + (managed >> 20)
+				+ " MB; engine static " + (engineStatic >> 20) + " MB; renderer textures " + (texture >> 20) + " MB, buffers " + (buffer >> 20)
+				+ " MB, video total " + (video >> 20) + " MB; objects " + (long)objects + " (resources " + (long)resources + ", nodes " + (long)nodes + ").";
+			ViewerLog.Print(line);
+			GD.Print(line); //ViewerLog is off by default in the exported viewer; this one is worth having in the host's relay regardless
+		}
+		catch (Exception e)
+		{
+			ViewerLog.PrintErr("Memory breakdown failed: " + e.Message);
+		}
 	}
 
 	private int CachedTextureCount => _texturesLevelByIndex.Count + _texturesGlobalByIndex.Count;
@@ -1582,6 +1625,7 @@ public partial class AlienScene : Node3D
 		RestoreReleasedSourceData(plan);
 		LevelViewerPopulatePrewarm.Result result = LevelViewerPopulatePrewarm.Execute(plan, _content.Level);
 		FinalizePrewarmGodotResources(result, plan);
+		CollectReleasedSourceData(); //the restore re-read a whole pak to get at a few entries
 		ViewerLog.Print("Prewarmed " + plan.MeshWriteIndices.Count + " mesh(es) and " + plan.Textures.Count
 			+ " texture(s) for entity " + entity.shortGUID.AsUInt32 + " spawned after populate.");
 	}

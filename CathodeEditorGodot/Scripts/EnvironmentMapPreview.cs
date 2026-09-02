@@ -46,11 +46,11 @@ public partial class EnvironmentMapPreview : FunctionEntityPreview
         _root = new Node3D { Name = "EnvironmentMapPreview" };
         AddChild(_root);
 
-        SphereMesh sphereMesh = new SphereMesh
+        PrimitiveMesh sphereMesh = (PrimitiveMesh)PreviewVisualUtility.GetSharedMesh("envmap:sphere:" + SphereRadius, () => new SphereMesh
         {
             Radius = SphereRadius,
             Height = SphereRadius * 2f,
-        };
+        });
         PreviewVisualUtility.CreatePrimitivePreview("Sphere", _root, sphereMesh, Colors.White);
     }
 }

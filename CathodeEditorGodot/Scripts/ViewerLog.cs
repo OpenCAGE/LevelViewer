@@ -34,13 +34,16 @@ public static class ViewerLog
 		};
 	}
 
+	/* stdout/stderr are the pipe OpenCAGE reads when it hosts us, and since issue #628 it keeps the tail of
+	 * that pipe and submits it with the exit code when the process dies. So these lines go to the console
+	 * in embedded mode too: the engine's own errors already do, and "[Viewer] Closing: ..." or a FATAL
+	 * handler line next to them is what turns an exit code into a diagnosis. */
 	public static void Print(string message)
 	{
 		if (!Enabled)
 			return;
 
-		if (!_embedded)
-			GD.Print(message);
+		GD.Print(message);
 		WriteToFile(message, false);
 		ViewerLogBridge.TryForward(message, false);
 	}
@@ -50,8 +53,7 @@ public static class ViewerLog
 		if (!Enabled)
 			return;
 
-		if (!_embedded)
-			GD.PrintErr(message);
+		GD.PrintErr(message);
 		WriteToFile(message, true);
 		ViewerLogBridge.TryForward(message, true);
 	}

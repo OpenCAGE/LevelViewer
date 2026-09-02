@@ -52,13 +52,13 @@ public partial class PyramidPreview : FunctionEntityPreview
         AddChild(_root);
 
         //4-segment cone = square-based pyramid, apex up, base resting on the entity position.
-        CylinderMesh pyramid = new CylinderMesh
+        PrimitiveMesh pyramid = (PrimitiveMesh)PreviewVisualUtility.GetSharedMesh("pyramid:" + BaseHalfWidth + ":" + Height, () => new CylinderMesh
         {
             TopRadius = 0f,
             BottomRadius = BaseHalfWidth,
             Height = Height,
             RadialSegments = 4,
-        };
+        });
         Node3D mesh = PreviewVisualUtility.CreatePrimitivePreview("Pyramid", _root, pyramid, Colors.White);
         mesh.Position = new Vector3(0f, Height * 0.5f, 0f);
     }

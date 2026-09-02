@@ -89,13 +89,13 @@ public partial class SpherePreview : FunctionEntityPreview
         if (_volume != null)
             return;
 
-        SphereMesh sphere = new SphereMesh
+        Mesh sphere = PreviewVisualUtility.GetSharedMesh("sphere:unit:32:16", () => new SphereMesh
         {
             Radius = 0.5f,
             Height = 1f,
             RadialSegments = 32,
             Rings = 16,
-        };
+        });
         _volume = PreviewVisualUtility.CreateMeshPreview("SpherePreview", this, sphere, Colors.White, opaque: false);
     }
 }

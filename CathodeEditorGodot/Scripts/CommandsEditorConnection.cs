@@ -117,6 +117,8 @@ public partial class CommandsEditorConnection : Node3D
     private bool _compositeFocusDirty;
     private bool _compositeFocusRefreshScheduled;
     private bool _forceSelectionApply;
+    /// <summary>Where the selection waiting in _pathEntities came from; consumed by ApplySelectionNow.</summary>
+    private AlienScene.SelectionOrigin _pendingSelectionOrigin = AlienScene.SelectionOrigin.Remote;
     private readonly HashSet<uint> _viewerOriginatedEntityAdds = new HashSet<uint>();
     private uint _progressiveDeepSelectLeafId;
     private int _progressiveDeepSelectDepth;
@@ -246,31 +248,46 @@ public partial class CommandsEditorConnection : Node3D
             ?? GetTree()?.Root?.FindChild("Camera3D", true, false) as Camera3D;
     }
 
-    private void OnSceneSelectionChanged(Node3D selectedNode)
+    private void OnSceneSelectionChanged(Node3D selectedNode, AlienScene.SelectionOrigin origin)
     {
         Callable.From(() =>
         {
             SyncTransformGizmoToSelection();
-            ApplyCameraSelectionBehavior(selectedNode);
+            ApplyCameraSelectionBehavior(selectedNode, origin);
         }).CallDeferred();
     }
 
-    private void ApplyCameraSelectionBehavior(Node3D selectedNode)
+    /// <summary>
+    /// "Focus on selected" reframes the camera for a selection that arrives from OpenCAGE. A viewport
+    /// pick is left alone - the user is already looking at what they clicked - though "fix camera to
+    /// selected" still starts following it from where the camera is. Either way the thing framed or
+    /// followed is what <see cref="AlienScene.TryResolveFocusTarget"/> says, and nothing wider than the
+    /// camera's focus range is framed at all: the environment instance is the whole level, and framing
+    /// it is the zoom-out in issue 634.
+    /// </summary>
+    private void ApplyCameraSelectionBehavior(Node3D selectedNode, AlienScene.SelectionOrigin origin)
     {
         LevelViewerCamera camera = FindCamera() as LevelViewerCamera;
         if (camera == null)
             return;
 
-        if (selectedNode == null || !GodotObject.IsInstanceValid(selectedNode))
+        if (selectedNode == null || !GodotObject.IsInstanceValid(selectedNode) || !_focusOnSelected || _scene == null
+            || !_scene.TryResolveFocusTarget(selectedNode, camera.FocusMaxDistance, out Node3D target))
         {
             camera.ClearSelectionFollow();
             return;
         }
 
-        if (_focusOnSelected)
-            camera.HandleSelectionFocus(selectedNode, _fixCameraToSelected);
-        else
-            camera.ClearSelectionFollow();
+        if (origin == AlienScene.SelectionOrigin.ViewportPick)
+        {
+            if (_fixCameraToSelected)
+                camera.FollowSelectionWithoutFraming(target);
+            else
+                camera.ClearSelectionFollow();
+            return;
+        }
+
+        camera.HandleSelectionFocus(target, _fixCameraToSelected);
     }
 
     private void ApplyCameraSettingsFollowState()
@@ -285,8 +302,11 @@ public partial class CommandsEditorConnection : Node3D
             return;
         }
 
-        if (_scene != null && _scene.TryGetSelectedEntity(out Node3D selected))
-            camera.HandleSelectionFocus(selected, fixCamera: true);
+        if (_scene != null && _scene.TryGetSelectedEntity(out Node3D selected)
+            && _scene.TryResolveFocusTarget(selected, camera.FocusMaxDistance, out Node3D target))
+            camera.HandleSelectionFocus(target, fixCamera: true);
+        else
+            camera.ClearSelectionFollow();
     }
 
     public void SyncTransformGizmoToSelection(Camera3D camera = null)
@@ -747,6 +767,7 @@ public partial class CommandsEditorConnection : Node3D
                 TryRemoveEphemeralDeepSelectAliasIfAbandoned(_currentEntity, _currentComposite);
                 TrySendPendingEphemeralDeepSelectAliasDelete(null, null, false);
                 _forceSelectionApply = true;
+                _pendingSelectionOrigin = AlienScene.SelectionOrigin.Remote;
             }
 
             bool nestedVisibilityOnly = !hideNestedChanged
@@ -2111,6 +2132,7 @@ public partial class CommandsEditorConnection : Node3D
                 ? _pathEntities[_pathEntities.Count - 1]
                 : 0;
             _forceSelectionApply = true;
+            _pendingSelectionOrigin = AlienScene.SelectionOrigin.ViewportPick;
 
             bool preserveNavigationScope = ShouldPreserveNavigationScopeForSelection(
                 pathEntities,
@@ -2211,6 +2233,7 @@ public partial class CommandsEditorConnection : Node3D
         bool entitySelected;
         List<uint> pathEntities;
         List<uint> pathComposites;
+        AlienScene.SelectionOrigin origin;
 
         lock (_lock)
         {
@@ -2220,11 +2243,13 @@ public partial class CommandsEditorConnection : Node3D
             entitySelected = _entitySelected;
             pathEntities = _pathEntities;
             pathComposites = _pathComposites;
+            origin = _pendingSelectionOrigin;
+            _pendingSelectionOrigin = AlienScene.SelectionOrigin.Remote;
             _currentEntityGOID = _currentEntity;
             _forceSelectionApply = false;
         }
 
-        _scene.SelectEntity(pathEntities, pathComposites, entitySelected);
+        _scene.SelectEntity(pathEntities, pathComposites, entitySelected, origin);
     }
 
     private static bool PathsEqual(IReadOnlyList<uint> left, IReadOnlyList<uint> right)

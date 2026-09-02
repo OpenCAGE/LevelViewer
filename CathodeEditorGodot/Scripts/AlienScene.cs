@@ -14,8 +14,20 @@ public partial class AlienScene : Node3D
 {
 
 	public Action OnLoaded;
-	/// <summary>Fires when the selected entity changes. Argument is the new selected node (null when deselected).</summary>
-	public Action<Node3D> OnSelectionChanged;
+	/// <summary>Fires when the selected entity changes. Arguments are the new selected node (null when deselected)
+	/// and where the selection came from.</summary>
+	public Action<Node3D, SelectionOrigin> OnSelectionChanged;
+
+	/// <summary>
+	/// Where a selection was made. The camera treats them differently: a viewport pick already has the
+	/// thing on screen, so "focus on selected" must not move the view; a selection arriving from
+	/// OpenCAGE is the case that setting exists for.
+	/// </summary>
+	public enum SelectionOrigin
+	{
+		Remote,
+		ViewportPick,
+	}
 
 	private string _levelName = "";
 	public string LevelName => _levelName;
@@ -377,7 +389,7 @@ public partial class AlienScene : Node3D
 		LevelViewerLightRadius.Clear();
 		RefreshAliasHighlights(forceRebuild: false);
 		RefreshProxyHighlights(forceRebuild: false);
-		OnSelectionChanged?.Invoke(null);
+		OnSelectionChanged?.Invoke(null, SelectionOrigin.Remote);
 	}
 
 	private void RefreshSelectedLightRadiusVisual()
@@ -1847,7 +1859,7 @@ public partial class AlienScene : Node3D
 		}
 	}
 
-	public void SelectEntity(List<uint> entityPath, List<uint> compositePath, bool entitySelected)
+	public void SelectEntity(List<uint> entityPath, List<uint> compositePath, bool entitySelected, SelectionOrigin origin = SelectionOrigin.Remote)
 	{
 		if (!entitySelected || entityPath == null || entityPath.Count == 0)
 		{
@@ -1900,12 +1912,73 @@ public partial class AlienScene : Node3D
 			LevelViewerSelection.ReapplyIfSelectionActive();
 			RefreshSelectedLightRadiusVisual();
 
-			Callable.From(() => OnSelectionChanged?.Invoke(entityNode)).CallDeferred();
+			Callable.From(() => OnSelectionChanged?.Invoke(entityNode, origin)).CallDeferred();
 		}
 		catch (System.Exception ex)
 		{
 			ViewerLog.PrintErr("[Viewer] Selection highlight failed: " + ex);
 		}
+	}
+
+	/// <summary>
+	/// What the camera should look at for a selected node, if anything.
+	/// </summary>
+	/// <remarks>
+	/// The selected node is not always the thing worth framing. An alias or proxy sits on its own
+	/// reference point, often under a floor, with the geometry it stands for somewhere else - so a
+	/// pointer frames what it points at. An entity with no visual at all has nowhere to look. And a
+	/// node whose bounds are wider than the camera can back away from is not a target: a composite
+	/// instance's node holds its whole subtree, so the environment instance is the entire level, which
+	/// is how "focus on selected" turned a click on a gate into a view of the whole map (issue 634).
+	/// A prop composite - a door package, a railing - is an instance too and frames fine, so the test
+	/// is size rather than kind: anything wider than <paramref name="maxExtent"/> (0 for no limit,
+	/// which is what the explicit focus key asks for) leaves the camera where it is.
+	/// </remarks>
+	public bool TryResolveFocusTarget(Node3D selectedNode, float maxExtent, out Node3D target)
+	{
+		target = null;
+		if (selectedNode == null || !GodotObject.IsInstanceValid(selectedNode))
+			return false;
+
+		Node3D entityNode = LevelViewerPick.ResolveNearestEntityNode(selectedNode, _nodeEntities) ?? selectedNode;
+		Node3D candidate = entityNode;
+		Commands commands = _content?.Level?.Commands;
+
+		if (commands != null && entityNode is EntityOverride pointer && _nodeEntities.TryGetValue(entityNode, out Entity entity))
+		{
+			Node3D pointed = null;
+			switch (entity)
+			{
+				case AliasEntity alias:
+				{
+					uint ownerId = GetOwnerCompositeId(entityNode);
+					Composite owner = ownerId != 0 ? commands.GetComposite(new ShortGuid(ownerId)) : null;
+					TryResolveAliasPointedSceneNode(pointer, alias, owner, out pointed);
+					break;
+				}
+				case ProxyEntity proxy:
+					TryResolveProxyPointedSceneNode(pointer, proxy, out pointed);
+					break;
+			}
+
+			if (pointed != null && GodotObject.IsInstanceValid(pointed))
+				candidate = pointed;
+		}
+
+		if (!LevelViewerView.TryComputeGlobalAabb(candidate, out Aabb bounds))
+		{
+			return false;
+		}
+
+		if (maxExtent > 0f)
+		{
+			Vector3 size = bounds.Size;
+			if (Mathf.Max(size.X, Mathf.Max(size.Y, size.Z)) > maxExtent)
+				return false;
+		}
+
+		target = candidate;
+		return true;
 	}
 
 	private void RequestFrameView(Node3D target, bool focusEditor)

@@ -353,6 +353,12 @@ public partial class LevelViewerCamera : Camera3D
             ClearSelectionFollow();
     }
 
+    /// <summary>Track the target's translation from wherever the camera is now, without reframing.</summary>
+    public void FollowSelectionWithoutFraming(Node3D target)
+    {
+        BeginSelectionFollow(target);
+    }
+
     public void ClearSelectionFollow()
     {
         _followActive = false;
@@ -397,15 +403,21 @@ public partial class LevelViewerCamera : Camera3D
             ClearSelectionFollow();
     }
 
+    /// <summary>Explicit focus (the Z key). Asked for directly, so there is no size limit - an instance
+    /// frames its whole subtree; an alias or proxy still frames what it points at rather than its
+    /// reference point.</summary>
     private void FocusSelectedEntity()
     {
         if (_alienScene == null || !_alienScene.TryGetSelectedEntity(out Node3D selected))
             return;
 
+        if (!_alienScene.TryResolveFocusTarget(selected, maxExtent: 0f, out Node3D target))
+            return;
+
         bool fixCamera = _commandsEditorConnection != null
             && GodotObject.IsInstanceValid(_commandsEditorConnection)
             && _commandsEditorConnection.FixCameraToSelected;
-        HandleSelectionFocus(selected, fixCamera);
+        HandleSelectionFocus(target, fixCamera);
     }
 
     private void OnCompositeLoaded()

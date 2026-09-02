@@ -1520,17 +1520,70 @@ public partial class AlienScene : Node3D
 	{
 		if (_compositeNodes.ContainsKey(composite))
 		{
+			Composite c = _content.Level.Commands.Entries.FirstOrDefault(o => o.shortGUID == composite);
+			Entity e = c?.GetEntityByID(entity);
+			if (c == null || e == null)
+				return;
+
+			PrewarmForIncrementalSpawn(c, e);
 			foreach (Node3D compositeInstance in _compositeNodes[composite])
 			{
 				if (compositeInstance != null && GodotObject.IsInstanceValid(compositeInstance))
-				{
-					Composite c = _content.Level.Commands.Entries.FirstOrDefault(o => o.shortGUID == composite);
-					Entity e = c?.GetEntityByID(entity);
-					if (c != null && e != null)
-						AddEntity(c, e, compositeInstance);
-				}
+					AddEntity(c, e, compositeInstance);
 			}
 		}
+	}
+
+	/// <summary>
+	/// An entity spawned after the level's populate can reference models and textures nothing has
+	/// parsed yet: ReleaseCathodeBinarySourceData frees every submesh and texture binary once a
+	/// populate has built its Godot resources, and only a composite switch restored them. A
+	/// ModelReference added for a model the level carries but never displayed then reached
+	/// GetModel with no data and no cached mesh, and silently drew nothing until OpenCAGE was
+	/// restarted (issue #636). This runs the restore / convert / cache pass a populate runs, for
+	/// just what this entity (or the composite it instances) needs, and only when something is
+	/// missing from the caches - the common case of a model already on screen costs a lookup.
+	/// </summary>
+	private void PrewarmForIncrementalSpawn(Composite composite, Entity entity)
+	{
+		if (_content?.Level == null || composite == null || !(entity is FunctionEntity function))
+			return;
+
+		LevelViewerPopulatePrewarm.Plan plan;
+		if (function.function.IsFunctionType)
+		{
+			if (function.function.AsFunctionType != FunctionType.ModelReference)
+				return;
+			plan = new LevelViewerPopulatePrewarm.Plan();
+			LevelViewerPopulatePrewarm.CollectModelReference(function, _content, plan);
+		}
+		else
+		{
+			Composite nested = _content.Level.Commands.GetComposite(function.function);
+			if (nested == null)
+				return;
+			LevelViewerPopulateTree.Plan spawnPlan =
+				LevelViewerPopulateTree.Collect(nested, _content, deferAliasProxy: true, includeVariables: false);
+			plan = LevelViewerPopulatePrewarm.BuildModelReferenceCache(spawnPlan.ModelReferences, _content, spawnPlan).PrewarmPlan;
+		}
+
+		bool meshesCached = plan.MeshWriteIndices.All(writeIndex => _modelMeshesByWriteIndex.ContainsKey(writeIndex));
+		bool texturesCached = plan.Textures.All(tex4 =>
+		{
+			TexturePtr.Source location = plan.TextureLocations.TryGetValue(tex4, out TexturePtr.Source stored)
+				? stored
+				: TexturePtr.Source.LEVEL;
+			int writeIndex = GetTextureWriteIndex(tex4, location);
+			return writeIndex >= 0 && TryGetCachedTexture(location, writeIndex, out _);
+		});
+		if (meshesCached && texturesCached)
+			return;
+
+		RestoreReleasedSourceData(plan);
+		LevelViewerPopulatePrewarm.Result result = LevelViewerPopulatePrewarm.Execute(plan, _content.Level);
+		FinalizePrewarmGodotResources(result, plan);
+		ViewerLog.Print("Prewarmed " + plan.MeshWriteIndices.Count + " mesh(es) and " + plan.Textures.Count
+			+ " texture(s) for entity " + entity.shortGUID.AsUInt32 + " spawned after populate.");
 	}
 
 	/// <summary>Spawns an entity under every instance of its composite that is in the scene.</summary>
@@ -1539,6 +1592,8 @@ public partial class AlienScene : Node3D
 		List<Node3D> compositeInstances;
 		if (composite == null || entity == null || !_compositeNodes.TryGetValue(composite.shortGUID, out compositeInstances))
 			return;
+
+		PrewarmForIncrementalSpawn(composite, entity);
 
 		// AddEntity can add to _compositeNodes when the entity is itself a composite instance.
 		Node3D[] snapshot = compositeInstances.ToArray();
@@ -2313,6 +2368,10 @@ public partial class AlienScene : Node3D
 				+ " visual=" + visualEntityID.AsUInt32 + " fromPointer=" + fromPointer + ")");
 
 		ParameterSync.ApplyToEntity(dataEntity, sync, _content);
+
+		//A resource pointed at a model or texture nothing has displayed yet needs the same restore as a new entity.
+		if (diagDataType == DataType.RESOURCE)
+			PrewarmForIncrementalSpawn(dataComposite, dataEntity);
 
 		ShortGuid paramName = new ShortGuid(sync.name);
 		ShortGuid mappingParameterId = ShortGuidUtils.Generate(ModelReferenceMaterialMapping.MappingParameterName);

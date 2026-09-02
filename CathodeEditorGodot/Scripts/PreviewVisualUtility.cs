@@ -11,6 +11,37 @@ public static class PreviewVisualUtility
     private static ShaderMaterial _sharedOverlayLineMaterial;
     private static ArrayMesh _billboardQuadMesh;
 
+    /* One material per colour, shared by every preview mesh that uses it.
+     *
+     * These used to be Duplicate(true)'d per mesh on every Refresh - a new ShaderMaterial AND a new
+     * Shader each time, released only when the .NET wrapper was eventually garbage collected. A
+     * render-filter toggle on a big level therefore minted thousands of shaders and materials, the
+     * RenderingServer's RID pool (262,144 per resource type) ran out after enough refreshes
+     * ("ERROR: Element limit reached" in _allocate_rid), and the next use of the invalid RID took the
+     * process down with an access violation - the viewer just vanishing, with nothing logged, after
+     * a filter toggle, a selection or a long session (issue #628). The preview palette is a handful
+     * of colours, so these caches stay tiny and the shader is compiled once. */
+    private static readonly Dictionary<Color, ShaderMaterial> _opaqueByColour = new Dictionary<Color, ShaderMaterial>();
+    private static readonly Dictionary<Color, ShaderMaterial> _transparentByColour = new Dictionary<Color, ShaderMaterial>();
+    private static readonly Dictionary<Color, ShaderMaterial> _overlayLineByColour = new Dictionary<Color, ShaderMaterial>();
+    private static readonly Dictionary<(Texture2D icon, Color tint), ShaderMaterial> _iconBillboardByIcon = new Dictionary<(Texture2D icon, Color tint), ShaderMaterial>();
+
+    private static ShaderMaterial GetColourMaterial(Dictionary<Color, ShaderMaterial> cache, Color color, ShaderMaterial shared)
+    {
+        if (cache.TryGetValue(color, out ShaderMaterial material) && GodotObject.IsInstanceValid(material))
+            return material;
+
+        //Share the shader; only the colour differs
+        material = new ShaderMaterial
+        {
+            Shader = shared.Shader,
+            RenderPriority = shared.RenderPriority,
+        };
+        material.SetShaderParameter("albedo_color", color);
+        cache[color] = material;
+        return material;
+    }
+
     /// <summary>World-space width/height of icon billboard quads (see preview_icon_billboard.gdshader).</summary>
     public const float IconBillboardWorldSize = 0.25f;
 
@@ -356,9 +387,7 @@ public static class PreviewVisualUtility
         if (meshInstance == null)
             return;
 
-        ShaderMaterial material = (ShaderMaterial)SharedTransparentMaterial.Duplicate(true);
-        material.SetShaderParameter("albedo_color", color);
-        meshInstance.MaterialOverride = material;
+        meshInstance.MaterialOverride = GetColourMaterial(_transparentByColour, color, SharedTransparentMaterial);
     }
 
     public static void ApplyOpaqueColor(MeshInstance3D meshInstance, Color color)
@@ -366,10 +395,8 @@ public static class PreviewVisualUtility
         if (meshInstance == null)
             return;
 
-        ShaderMaterial material = (ShaderMaterial)SharedOpaqueMaterial.Duplicate(true);
         color.A = 1f;
-        material.SetShaderParameter("albedo_color", color);
-        meshInstance.MaterialOverride = material;
+        meshInstance.MaterialOverride = GetColourMaterial(_opaqueByColour, color, SharedOpaqueMaterial);
     }
 
     public static Node3D CreateMeshPreview(string name, Node3D parent, Mesh mesh, Color color, bool opaque = true)
@@ -472,11 +499,7 @@ public static class PreviewVisualUtility
         line.Rotation = GetLookEuler(delta, new Vector3(Mathf.Pi / 2f, 0f, 0f));
         MeshInstance3D meshInstance = line as MeshInstance3D;
         if (meshInstance != null)
-        {
-            ShaderMaterial material = (ShaderMaterial)SharedOverlayLineMaterial.Duplicate(true);
-            material.SetShaderParameter("albedo_color", color);
-            meshInstance.MaterialOverride = material;
-        }
+            meshInstance.MaterialOverride = GetColourMaterial(_overlayLineByColour, color, SharedOverlayLineMaterial);
         return line;
     }
 
@@ -598,9 +621,18 @@ public static class PreviewVisualUtility
         };
         root.AddChild(meshInstance);
 
-        ShaderMaterial material = (ShaderMaterial)SharedIconBillboardMaterial.Duplicate(true);
-        material.SetShaderParameter("albedo_texture", icon);
-        material.SetShaderParameter("albedo_color", tint);
+        (Texture2D icon, Color tint) key = (icon, tint);
+        if (!_iconBillboardByIcon.TryGetValue(key, out ShaderMaterial material) || !GodotObject.IsInstanceValid(material))
+        {
+            material = new ShaderMaterial
+            {
+                Shader = SharedIconBillboardMaterial.Shader,
+                RenderPriority = SharedIconBillboardMaterial.RenderPriority,
+            };
+            material.SetShaderParameter("albedo_texture", icon);
+            material.SetShaderParameter("albedo_color", tint);
+            _iconBillboardByIcon[key] = material;
+        }
         meshInstance.MaterialOverride = material;
 
         return root;

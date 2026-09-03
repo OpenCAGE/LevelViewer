@@ -248,7 +248,7 @@ public partial class StateInfoOverlay : Node3D
 
 	private static ArrayMesh BuildTriangleMesh(List<Vector3> positions, List<int> indices)
 	{
-		Godot.Collections.Array surface = new Godot.Collections.Array();
+		using Godot.Collections.Array surface = new Godot.Collections.Array(); //alive across the native call - see CollisionMeshOverlay.BuildMesh
 		surface.Resize((int)Mesh.ArrayType.Max);
 		surface[(int)Mesh.ArrayType.Vertex] = positions.ToArray();
 		surface[(int)Mesh.ArrayType.Index] = indices.ToArray();
@@ -269,7 +269,7 @@ public partial class StateInfoOverlay : Node3D
 			lines.Add(indices[i + 2]); lines.Add(indices[i]);
 		}
 
-		Godot.Collections.Array surface = new Godot.Collections.Array();
+		using Godot.Collections.Array surface = new Godot.Collections.Array(); //alive across the native call - see CollisionMeshOverlay.BuildMesh
 		surface.Resize((int)Mesh.ArrayType.Max);
 		surface[(int)Mesh.ArrayType.Vertex] = positions.ToArray();
 		surface[(int)Mesh.ArrayType.Index] = lines.ToArray();

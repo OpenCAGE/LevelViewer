@@ -1494,7 +1494,7 @@ public static class LevelViewerPick
 	private static CachedMeshSurface BuildCachedMeshSurface(Mesh mesh, int surfaceIndex)
 	{
 		CachedMeshSurface surface = new CachedMeshSurface { Vertices = System.Array.Empty<Vector3>() };
-		Godot.Collections.Array arrays = mesh.SurfaceGetArrays(surfaceIndex);
+		using Godot.Collections.Array arrays = mesh.SurfaceGetArrays(surfaceIndex); //released here rather than by a finalizer
 		if (arrays == null || arrays.Count == 0)
 			return surface;
 

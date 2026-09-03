@@ -603,7 +603,7 @@ public static class PreviewVisualUtility
             }
         }
 
-        var arrays = new Godot.Collections.Array();
+        using var arrays = new Godot.Collections.Array(); //alive across the native call - see CollisionMeshOverlay.BuildMesh
         arrays.Resize((int)Mesh.ArrayType.Max);
         arrays[(int)Mesh.ArrayType.Vertex] = vertices;
         arrays[(int)Mesh.ArrayType.TexUV] = uvs;
@@ -685,7 +685,7 @@ public static class PreviewVisualUtility
         };
         int[] triangles = { 0, 2, 1, 2, 3, 1 };
 
-        var arrays = new Godot.Collections.Array();
+        using var arrays = new Godot.Collections.Array(); //alive across the native call - see CollisionMeshOverlay.BuildMesh
         arrays.Resize((int)Mesh.ArrayType.Max);
         arrays[(int)Mesh.ArrayType.Vertex] = vertices;
         arrays[(int)Mesh.ArrayType.TexUV] = uvs;

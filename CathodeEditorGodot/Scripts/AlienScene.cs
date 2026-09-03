@@ -176,6 +176,7 @@ public partial class AlienScene : Node3D
 	private readonly List<BulkMeshSpawnJob> _bulkMeshSpawnJobs = new List<BulkMeshSpawnJob>();
 	private Dictionary<ulong, List<Tuple<int, int>>> _modelRefRenderablesByEntityId;
 	private Dictionary<Node3D, Entity> _aliasParameterEntityByRenderTarget;
+	private Dictionary<Node3D, int> _aliasParameterDepthByRenderTarget;
 	private bool _bulkMeshSpawning;
 	private bool _deferBulkPickRegistration;
 	private readonly List<(MeshInstance3D Mesh, Node3D Owner)> _bulkPickableMeshes = new List<(MeshInstance3D, Node3D)>();
@@ -2304,6 +2305,14 @@ public partial class AlienScene : Node3D
 			return true;
 		}
 
+		//The index is kept current as aliases are wired (OnPointedEntityChanged), so a miss on it is final. The scan
+		//of every scene node only remains for when no index could be built. It used to run on every miss, and a
+		//composite-instance add spawning N ModelReferences (each a miss - nothing points at a node that new) scanned
+		//the whole level N times: one 16k-model section into TECH_HUB's 500k nodes froze the viewer for over three
+		//minutes in the 3 Sep 2026 soak.
+		if (_aliasParameterEntityByRenderTarget != null)
+			return false;
+
 		return ModelReferenceMaterialOverrides.TryFindAliasParameterEntity(
 			_nodeEntities,
 			renderTarget,
@@ -2319,11 +2328,45 @@ public partial class AlienScene : Node3D
 		if (commands == null)
 		{
 			_aliasParameterEntityByRenderTarget = null;
+			_aliasParameterDepthByRenderTarget = null;
 			return;
 		}
 
+		EntityOverride.PointedEntityChanged = OnPointedEntityChanged;
 		_aliasParameterEntityByRenderTarget =
-			ModelReferenceMaterialOverrides.BuildAliasParameterEntityIndex(_nodeEntities, commands);
+			ModelReferenceMaterialOverrides.BuildAliasParameterEntityIndex(
+				_nodeEntities,
+				commands,
+				out _aliasParameterDepthByRenderTarget);
+	}
+
+	/// <summary>Extends the alias index for an alias wired after it was built; a re-pointed alias rebuilds it.</summary>
+	private void OnPointedEntityChanged(EntityOverride aliasOverride, Node3D previous)
+	{
+		if (_aliasParameterEntityByRenderTarget == null)
+			return; //no index yet (or invalidated): the next lookup rebuilds it from the whole scene
+
+		if (!_nodeEntities.TryGetValue(aliasOverride, out Entity entity) || entity is not AliasEntity alias)
+			return;
+
+		if (previous != null)
+		{
+			//The old target's entry may still name this alias; rare enough that a lazy rebuild is fine.
+			_aliasParameterEntityByRenderTarget = null;
+			_aliasParameterDepthByRenderTarget = null;
+			return;
+		}
+
+		Commands commands = _content?.Level?.Commands;
+		if (commands == null)
+			return;
+
+		ModelReferenceMaterialOverrides.IndexAliasParameterEntity(
+			_aliasParameterEntityByRenderTarget,
+			_aliasParameterDepthByRenderTarget,
+			aliasOverride,
+			alias,
+			commands);
 	}
 
 	internal bool TryGetModelRefRenderables(
@@ -3571,6 +3614,12 @@ public partial class AlienScene : Node3D
 					{
 						EntityOverride entityOverride = entityNode as EntityOverride;
 						Node3D pointedNode = entityOverride?.PointedEntity;
+						if (entityOverride != null)
+						{
+							//An alias leaving the scene may be the one the render-target index names
+							_aliasParameterEntityByRenderTarget = null;
+							_aliasParameterDepthByRenderTarget = null;
+						}
 						if (pointedNode != null
 							&& GodotObject.IsInstanceValid(pointedNode)
 							&& _nodeEntities.TryGetValue(pointedNode, out Entity pointedEntity))

@@ -231,45 +231,79 @@ public static class ModelReferenceMaterialOverrides
 		IReadOnlyDictionary<Node3D, Entity> nodeEntities,
 		Commands commands)
 	{
+		return BuildAliasParameterEntityIndex(nodeEntities, commands, out _);
+	}
+
+	/// <summary>
+	/// As above, also returning the scene depth of the alias chosen for each render target so the index can be
+	/// extended one alias at a time (see <see cref="IndexAliasParameterEntity"/>) with the same shallowest-wins rule.
+	/// </summary>
+	public static Dictionary<Node3D, Entity> BuildAliasParameterEntityIndex(
+		IReadOnlyDictionary<Node3D, Entity> nodeEntities,
+		Commands commands,
+		out Dictionary<Node3D, int> bestDepthByRenderTarget)
+	{
 		Dictionary<Node3D, Entity> index = new Dictionary<Node3D, Entity>();
+		bestDepthByRenderTarget = new Dictionary<Node3D, int>();
 		if (nodeEntities == null || commands == null)
 			return index;
 
-		Dictionary<Node3D, int> bestDepthByRenderTarget = new Dictionary<Node3D, int>();
 		foreach (KeyValuePair<Node3D, Entity> entry in nodeEntities)
 		{
 			if (entry.Key is not EntityOverride aliasOverride)
 				continue;
 			if (entry.Value is not AliasEntity alias)
 				continue;
-			Node3D renderTarget = aliasOverride.PointedEntity;
-			if (renderTarget == null)
-				continue;
-			uint ownerCompositeId;
-			if (!AlienScene.TryGetOwnerCompositeId(entry.Key, out ownerCompositeId))
-				continue;
-
-			Composite ownerComposite = commands.GetComposite(new ShortGuid(ownerCompositeId));
-			if (ownerComposite == null)
-				continue;
-
-			(_, Entity targetEntity) = commands.Utils.GetResolvedTarget(
-				commands.Utils.ResolveAlias(alias, ownerComposite));
-			if (targetEntity is not FunctionEntity targetFunction
-				|| targetFunction.function.AsFunctionType != FunctionType.ModelReference)
-			{
-				continue;
-			}
-
-			int depth = GetSceneNodeDepth(entry.Key);
-			if (bestDepthByRenderTarget.TryGetValue(renderTarget, out int existingDepth) && depth >= existingDepth)
-				continue;
-
-			bestDepthByRenderTarget[renderTarget] = depth;
-			index[renderTarget] = alias;
+			IndexAliasParameterEntity(index, bestDepthByRenderTarget, aliasOverride, alias, commands);
 		}
 
 		return index;
+	}
+
+	/// <summary>
+	/// Adds one wired alias to the index when it resolves to a ModelReference and is the shallowest alias pointing
+	/// at that node. Called for every alias by the bulk build, and for each alias as it is wired afterwards.
+	/// </summary>
+	public static void IndexAliasParameterEntity(
+		Dictionary<Node3D, Entity> index,
+		Dictionary<Node3D, int> bestDepthByRenderTarget,
+		EntityOverride aliasOverride,
+		AliasEntity alias,
+		Commands commands)
+	{
+		if (index == null || aliasOverride == null || alias == null || commands == null)
+			return;
+
+		Node3D renderTarget = aliasOverride.PointedEntity;
+		if (renderTarget == null)
+			return;
+		uint ownerCompositeId;
+		if (!AlienScene.TryGetOwnerCompositeId(aliasOverride, out ownerCompositeId))
+			return;
+
+		Composite ownerComposite = commands.GetComposite(new ShortGuid(ownerCompositeId));
+		if (ownerComposite == null)
+			return;
+
+		(_, Entity targetEntity) = commands.Utils.GetResolvedTarget(
+			commands.Utils.ResolveAlias(alias, ownerComposite));
+		if (targetEntity is not FunctionEntity targetFunction
+			|| targetFunction.function.AsFunctionType != FunctionType.ModelReference)
+		{
+			return;
+		}
+
+		int depth = GetSceneNodeDepth(aliasOverride);
+		if (bestDepthByRenderTarget != null
+			&& bestDepthByRenderTarget.TryGetValue(renderTarget, out int existingDepth)
+			&& depth >= existingDepth)
+		{
+			return;
+		}
+
+		if (bestDepthByRenderTarget != null)
+			bestDepthByRenderTarget[renderTarget] = depth;
+		index[renderTarget] = alias;
 	}
 
 	public static bool TryGetAliasParameterEntityFromIndex(

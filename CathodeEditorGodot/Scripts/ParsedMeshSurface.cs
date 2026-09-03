@@ -70,7 +70,7 @@ public sealed class ParsedMeshSurface
 		if (!IsValid)
 			return mesh;
 
-		Godot.Collections.Array arrays = new Godot.Collections.Array();
+		using Godot.Collections.Array arrays = new Godot.Collections.Array(); //alive across the native call - see CollisionMeshOverlay.BuildMesh
 		arrays.Resize((int)Mesh.ArrayType.Max);
 		arrays[(int)Mesh.ArrayType.Vertex] = Vertices;
 		arrays[(int)Mesh.ArrayType.Index] = Indices;

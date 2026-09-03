@@ -329,7 +329,12 @@ public partial class CollisionMeshOverlay : Node3D
 			Array.Resize(ref normals, written);
 		}
 
-		Godot.Collections.Array surface = new Godot.Collections.Array();
+		//`using` keeps the managed wrapper alive across AddSurfaceFromArrays. The binding hands the engine the native
+		//array by value with no GC.KeepAlive, so once the wrapper has no further use the collector may finalize it
+		//mid-call, and Array's finalizer destroys the native array while the engine is still reading it: "Condition
+		//!success at Array::_ref" followed by an access violation, which killed the viewer building this overlay for
+		//SCI_Hub in the 3 Sep 2026 soak. Every other AddSurfaceFromArrays site does the same.
+		using Godot.Collections.Array surface = new Godot.Collections.Array();
 		surface.Resize((int)Mesh.ArrayType.Max);
 		surface[(int)Mesh.ArrayType.Vertex] = positions;
 		surface[(int)Mesh.ArrayType.Normal] = normals;

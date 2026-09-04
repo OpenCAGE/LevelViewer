@@ -36,6 +36,10 @@ namespace OpenCAGE.UnityConnection
         ENTITY_CLIPBOARD_COPY,
         // Level Viewer -> OpenCAGE: paste the shared entity clipboard into the given composite (Ctrl+V).
         ENTITY_CLIPBOARD_PASTE,
+
+        // OpenCAGE -> Level Viewer: something was dropped on the viewport at drop_viewport_x/y. Only
+        // this side has the geometry, so it raycasts the position and answers with ENTITY_CREATE_REQUEST.
+        VIEWPORT_DROP_REQUEST,
     }
 
     public class Packet
@@ -47,7 +51,7 @@ namespace OpenCAGE.UnityConnection
 
         //Packet metadata
         public PacketEvent packet_event;
-        public int version = 9;
+        public int version = 10;
 
         //Setup metadata
         public string level_name = "";
@@ -76,7 +80,15 @@ namespace OpenCAGE.UnityConnection
         //Modified entity info
         public EntityVariant entity_variant;
         public uint entity_function; //For function entities
+        //Composite to instance (its ShortGuid) instead of creating a function entity, 0 = function entity
+        public uint create_composite_instance = 0;
         public List<uint> entity_pointed; //For alias/proxy entities
+
+        //Viewport drag & drop (VIEWPORT_DROP_REQUEST): where the drop landed, as a 0-1 fraction of the
+        //viewport's size. A fraction rather than pixels because the host panel and the viewer window
+        //need not agree on DPI.
+        public float drop_viewport_x = 0f;
+        public float drop_viewport_y = 0f;
 
         //Track if things have changed
         public bool dirty = false;

@@ -704,6 +704,12 @@ public partial class CommandsEditorConnection : Node3D
             return;
         }
 
+        if (packet.packet_event == PacketEvent.VIEWPORT_DROP_REQUEST)
+        {
+            HandleViewportDropRequest(packet);
+            return;
+        }
+
         if (packet.packet_event == PacketEvent.ENTITY_PARAMETER_MODIFIED
             || packet.packet_event == PacketEvent.ENTITY_MOVED
             || packet.packet_event == PacketEvent.ENTITY_RESOURCE_MODIFIED)
@@ -1345,6 +1351,51 @@ public partial class CommandsEditorConnection : Node3D
         };
         SendMessage(packet);
         return true;
+    }
+
+    /// <summary>
+    /// A composite dragged out of OpenCAGE's browser and dropped on the viewport. OpenCAGE can only
+    /// tell us where in the viewport the drop landed - the geometry to hit is all on this side - so we
+    /// raycast it exactly as creation mode does on a click and answer with the placement.
+    /// </summary>
+    private void HandleViewportDropRequest(Packet packet)
+    {
+        if (packet.create_composite_instance == 0 || _scene == null || !_scene.Content.Loaded)
+            return;
+
+        uint compositeId;
+        bool compositeLoaded;
+        lock (_lock)
+        {
+            compositeId = _currentComposite;
+            compositeLoaded = _compositeLoaded;
+        }
+
+        if (!compositeLoaded || compositeId == 0)
+            return;
+
+        Camera3D camera = FindCamera();
+        Viewport viewport = camera?.GetViewport();
+        if (viewport == null)
+            return;
+
+        Vector2 size = viewport.GetVisibleRect().Size;
+        Vector2 screenPosition = new Vector2(
+            Mathf.Clamp(packet.drop_viewport_x, 0f, 1f) * size.X,
+            Mathf.Clamp(packet.drop_viewport_y, 0f, 1f) * size.Y);
+
+        if (!_scene.TryComputeCreatePlacement(camera, screenPosition, out Vector3 godotLocalPosition))
+            return;
+
+        Vector3 cathodePosition = CathodeCoordinates.PositionFromGodot(godotLocalPosition);
+        SendMessage(new Packet(PacketEvent.ENTITY_CREATE_REQUEST)
+        {
+            composite = compositeId,
+            create_composite_instance = packet.create_composite_instance,
+            has_transform = true,
+            position = new System.Numerics.Vector3(cathodePosition.X, cathodePosition.Y, cathodePosition.Z),
+            rotation = new System.Numerics.Vector3(0f, 0f, 0f),
+        });
     }
 
     private bool ApplyActiveComposite(Packet packet)

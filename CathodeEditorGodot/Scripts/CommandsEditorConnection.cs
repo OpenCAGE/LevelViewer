@@ -120,6 +120,7 @@ public partial class CommandsEditorConnection : Node3D
     /// <summary>Where the selection waiting in _pathEntities came from; consumed by ApplySelectionNow.</summary>
     private AlienScene.SelectionOrigin _pendingSelectionOrigin = AlienScene.SelectionOrigin.Remote;
     private readonly HashSet<uint> _viewerOriginatedEntityAdds = new HashSet<uint>();
+    private readonly HashSet<uint> _releasedEphemeralAliases = new HashSet<uint>();
     private uint _progressiveDeepSelectLeafId;
     private int _progressiveDeepSelectDepth;
     private uint _progressiveDeepSelectActiveComposite;
@@ -128,8 +129,8 @@ public partial class CommandsEditorConnection : Node3D
     private List<uint> _progressiveDeepSelectCompositeIds;
     private uint _ephemeralDeepSelectAliasCompositeId;
     private uint _ephemeralDeepSelectAliasEntityId;
-    private uint _pendingEphemeralDeepSelectDeleteCompositeId;
-    private uint _pendingEphemeralDeepSelectDeleteEntityId;
+    private uint _pendingEphemeralDeepSelectReleaseCompositeId;
+    private uint _pendingEphemeralDeepSelectReleaseEntityId;
 
     public bool IsWebSocketConnected => _client != null && _client.State == WebSocketState.Open;
 
@@ -646,6 +647,22 @@ public partial class CommandsEditorConnection : Node3D
             }
         }
 
+        /* Likewise the ENTITY_DELETED answering an alias this side released: it goes out while OpenCAGE's
+         * inspector is still between that alias and whatever replaced it, so its path says nothing is
+         * selected - which the general handling below would take as the replacement being abandoned too.
+         * Take the removal, leave the selection alone. */
+        if (packet.packet_event == PacketEvent.ENTITY_DELETED)
+        {
+            bool releasedHere;
+            lock (_lock)
+                releasedHere = _releasedEphemeralAliases.Remove(packet.entity);
+            if (releasedHere)
+            {
+                RemoveDeletedEntity(packet);
+                return;
+            }
+        }
+
         if (packet.packet_event == PacketEvent.RENDER_FILTERS_CHANGED)
         {
             lock (_lock)
@@ -778,8 +795,8 @@ public partial class CommandsEditorConnection : Node3D
 
             if (selectionChanged)
             {
-                TryRemoveEphemeralDeepSelectAliasIfAbandoned(_currentEntity, _currentComposite);
-                TrySendPendingEphemeralDeepSelectAliasDelete(null, null, false);
+                TryReleaseEphemeralDeepSelectAliasIfAbandoned(_currentEntity, _currentComposite);
+                TrySendPendingEphemeralDeepSelectAliasRelease(null, null, false);
                 _forceSelectionApply = true;
                 _pendingSelectionOrigin = AlienScene.SelectionOrigin.Remote;
             }
@@ -868,35 +885,8 @@ public partial class CommandsEditorConnection : Node3D
                 break;
             }
             case PacketEvent.ENTITY_DELETED:
-            {
-                lock (_lock)
-                {
-                    Composite composite = _scene.Content.Level?.Commands.Entries.FirstOrDefault(o => o.shortGUID.AsUInt32 == packet.composite);
-                    if (composite != null)
-                    {
-                        ShortGuid entityId = new ShortGuid(packet.entity);
-                        switch (packet.entity_variant)
-                        {
-                            case EntityVariant.FUNCTION:
-                                composite.RemoveFunction(entityId);
-                                break;
-                            case EntityVariant.ALIAS:
-                                composite.RemoveAlias(entityId);
-                                break;
-                            case EntityVariant.VARIABLE:
-                                composite.RemoveVariable(entityId);
-                                break;
-                            case EntityVariant.PROXY:
-                                composite.RemoveProxy(entityId);
-                                break;
-                        }
-                    }
-
-                    ClearEphemeralDeepSelectAliasTrackingIfMatch(packet.composite, packet.entity);
-                    _removedEntity = new Tuple<ShortGuid, ShortGuid>(new ShortGuid(packet.composite), new ShortGuid(packet.entity));
-                }
+                RemoveDeletedEntity(packet);
                 break;
-            }
             case PacketEvent.COMPOSITE_ADDED:
             {
                 lock (_lock)
@@ -921,7 +911,11 @@ public partial class CommandsEditorConnection : Node3D
                 {
                     skipReload = ShouldSkipLevelReload(packet.level_name, packet.system_folder);
                     if (!skipReload)
+                    {
                         _didLoadLevel = true;
+                        _viewerOriginatedEntityAdds.Clear();
+                        _releasedEphemeralAliases.Clear();
+                    }
                 }
 
                 if (skipReload)
@@ -1748,6 +1742,11 @@ public partial class CommandsEditorConnection : Node3D
         Packet addPacket = BuildAliasEntityAddedPacket(ownerComposite, alias, pathEntities, pathComposites);
         _viewerOriginatedEntityAdds.Add(alias.shortGUID.AsUInt32);
         await SendMessageAsync(addPacket);
+
+        /* Only now let go of the alias this one replaces. Sent the other way round, OpenCAGE deletes the
+         * old alias while it is still its selection, and the ENTITY_DELETED it answers with says nothing
+         * is selected - which this side reads as the new alias being abandoned too, and releases it. */
+        TrySendPendingEphemeralDeepSelectAliasRelease(null, null, false);
     }
 
     private static Packet BuildSelectionPacket(List<uint> pathEntities, List<uint> pathComposites, bool entitySelected)
@@ -1891,10 +1890,7 @@ public partial class CommandsEditorConnection : Node3D
             Composite ownerComposite = commands.GetComposite(new ShortGuid(ownerCompositeId));
             AliasEntity alias = ownerComposite?.GetEntityByID(new ShortGuid(aliasEntityId)) as AliasEntity;
             if (alias != null)
-            {
-                TrySendPendingEphemeralDeepSelectAliasDelete(null, null, false);
                 _ = SendNewAliasToEditorAsync(ownerComposite, alias, pathEntities, pathComposites, entitySelected);
-            }
 
             return;
         }
@@ -2119,8 +2115,8 @@ public partial class CommandsEditorConnection : Node3D
         {
             if (!_entitySelected || _pathComposites == null || _pathComposites.Count == 0)
             {
-                TryRemoveEphemeralDeepSelectAlias();
-                TrySendPendingEphemeralDeepSelectAliasDelete(null, null, false);
+                TryReleaseEphemeralDeepSelectAlias();
+                TrySendPendingEphemeralDeepSelectAliasRelease(null, null, false);
                 return;
             }
 
@@ -2275,7 +2271,7 @@ public partial class CommandsEditorConnection : Node3D
         bool entitySelected)
     {
         ApplySelectionNow();
-        TryRemoveEphemeralDeepSelectAliasIfAbandoned(
+        TryReleaseEphemeralDeepSelectAliasIfAbandoned(
             entitySelected && pathEntities != null && pathEntities.Count > 0
                 ? pathEntities[pathEntities.Count - 1]
                 : 0,
@@ -2355,9 +2351,9 @@ public partial class CommandsEditorConnection : Node3D
             && pathComposites != null
             && pathComposites.Count == pathEntities.Count;
 
-        if (_pendingEphemeralDeepSelectDeleteEntityId != 0)
+        if (_pendingEphemeralDeepSelectReleaseEntityId != 0)
         {
-            SendPendingEphemeralDeepSelectAliasDelete(
+            SendPendingEphemeralDeepSelectAliasRelease(
                 pathEntities,
                 pathComposites,
                 canBundleSelection);
@@ -2369,20 +2365,28 @@ public partial class CommandsEditorConnection : Node3D
         SendSelectionToEditor(pathEntities, pathComposites, entitySelected);
     }
 
-    private void SendPendingEphemeralDeepSelectAliasDelete(
+    private void SendPendingEphemeralDeepSelectAliasRelease(
         List<uint> selectionPathEntities,
         List<uint> selectionPathComposites,
         bool includeSelection)
     {
-        if (_pendingEphemeralDeepSelectDeleteEntityId == 0)
+        if (_pendingEphemeralDeepSelectReleaseEntityId == 0)
             return;
 
-        Packet packet = new Packet(PacketEvent.ENTITY_DELETED)
+        //The selection that replaced it rides along, so OpenCAGE applies the two in one step
+        Packet packet = new Packet(PacketEvent.ENTITY_ALIAS_RELEASED)
         {
-            composite = _pendingEphemeralDeepSelectDeleteCompositeId,
-            entity = _pendingEphemeralDeepSelectDeleteEntityId,
+            composite = _pendingEphemeralDeepSelectReleaseCompositeId,
+            entity = _pendingEphemeralDeepSelectReleaseEntityId,
             entity_variant = EntityVariant.ALIAS,
         };
+
+        /* Remembered so the ENTITY_DELETED that may answer is taken as just that. An alias OpenCAGE keeps
+         * never answers, and its id stays here until the level is reloaded; the one cost is that a later
+         * deletion of it from OpenCAGE's side would also be read as an answer, its path left unapplied until
+         * the packet after. */
+        lock (_lock)
+            _releasedEphemeralAliases.Add(packet.entity);
 
         if (includeSelection
             && selectionPathEntities != null
@@ -2394,29 +2398,59 @@ public partial class CommandsEditorConnection : Node3D
             packet.path_composites = new List<uint>(selectionPathComposites);
         }
 
-        ClearPendingEphemeralDeepSelectDelete();
+        ClearPendingEphemeralDeepSelectRelease();
         SendMessage(packet);
     }
 
-    private bool TrySendPendingEphemeralDeepSelectAliasDelete(
+    private bool TrySendPendingEphemeralDeepSelectAliasRelease(
         List<uint> selectionPathEntities,
         List<uint> selectionPathComposites,
         bool includeSelection)
     {
-        if (_pendingEphemeralDeepSelectDeleteEntityId == 0)
+        if (_pendingEphemeralDeepSelectReleaseEntityId == 0)
             return false;
 
-        SendPendingEphemeralDeepSelectAliasDelete(
+        SendPendingEphemeralDeepSelectAliasRelease(
             selectionPathEntities,
             selectionPathComposites,
             includeSelection);
         return true;
     }
 
-    private void ClearPendingEphemeralDeepSelectDelete()
+    private void ClearPendingEphemeralDeepSelectRelease()
     {
-        _pendingEphemeralDeepSelectDeleteCompositeId = 0;
-        _pendingEphemeralDeepSelectDeleteEntityId = 0;
+        _pendingEphemeralDeepSelectReleaseCompositeId = 0;
+        _pendingEphemeralDeepSelectReleaseEntityId = 0;
+    }
+
+    private void RemoveDeletedEntity(Packet packet)
+    {
+        lock (_lock)
+        {
+            Composite composite = _scene.Content.Level?.Commands.Entries.FirstOrDefault(o => o.shortGUID.AsUInt32 == packet.composite);
+            if (composite != null)
+            {
+                ShortGuid entityId = new ShortGuid(packet.entity);
+                switch (packet.entity_variant)
+                {
+                    case EntityVariant.FUNCTION:
+                        composite.RemoveFunction(entityId);
+                        break;
+                    case EntityVariant.ALIAS:
+                        composite.RemoveAlias(entityId);
+                        break;
+                    case EntityVariant.VARIABLE:
+                        composite.RemoveVariable(entityId);
+                        break;
+                    case EntityVariant.PROXY:
+                        composite.RemoveProxy(entityId);
+                        break;
+                }
+            }
+
+            ClearEphemeralDeepSelectAliasTrackingIfMatch(packet.composite, packet.entity);
+            _removedEntity = new Tuple<ShortGuid, ShortGuid>(new ShortGuid(packet.composite), new ShortGuid(packet.entity));
+        }
     }
 
     private void TryFillEntityMetadata(Packet packet)
@@ -2823,7 +2857,7 @@ public partial class CommandsEditorConnection : Node3D
             CommitEphemeralDeepSelectAlias(compositeId, entityId);
     }
 
-    private void TryRemoveEphemeralDeepSelectAliasIfAbandoned(uint newSelectedEntityId, uint newSelectedCompositeId)
+    private void TryReleaseEphemeralDeepSelectAliasIfAbandoned(uint newSelectedEntityId, uint newSelectedCompositeId)
     {
         if (_ephemeralDeepSelectAliasEntityId == 0)
             return;
@@ -2834,10 +2868,10 @@ public partial class CommandsEditorConnection : Node3D
             return;
         }
 
-        TryRemoveEphemeralDeepSelectAlias();
+        TryReleaseEphemeralDeepSelectAlias();
     }
 
-    private void TryRemoveEphemeralDeepSelectAlias()
+    private void TryReleaseEphemeralDeepSelectAlias()
     {
         if (_ephemeralDeepSelectAliasEntityId == 0 || _scene?.Content?.Level == null)
             return;
@@ -2855,20 +2889,12 @@ public partial class CommandsEditorConnection : Node3D
             return;
         }
 
-        composite.RemoveAlias(alias);
-        QueueEntityRemoval(compositeId, entityId);
-        _pendingEphemeralDeepSelectDeleteCompositeId = compositeId;
-        _pendingEphemeralDeepSelectDeleteEntityId = entityId;
+        /* Not removed here. Whether the alias was used is OpenCAGE's to say - it may have been edited
+         * there, or been given a flowgraph node, neither of which this side can see - so it is offered
+         * back (ENTITY_ALIAS_RELEASED) and stays put until OpenCAGE's ENTITY_DELETED takes it away. */
+        _pendingEphemeralDeepSelectReleaseCompositeId = compositeId;
+        _pendingEphemeralDeepSelectReleaseEntityId = entityId;
         ClearEphemeralDeepSelectAliasTracking();
-    }
-
-    private void QueueEntityRemoval(uint compositeId, uint entityId)
-    {
-        if (compositeId == 0 || entityId == 0)
-            return;
-
-        _removedEntity = new Tuple<ShortGuid, ShortGuid>(new ShortGuid(compositeId), new ShortGuid(entityId));
-        WakePhysicsProcess();
     }
 
     private static bool EnsureAliasPositionParameter(AliasEntity alias, SyncedParameter sync)

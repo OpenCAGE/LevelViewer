@@ -45,6 +45,11 @@ namespace OpenCAGE.UnityConnection
         // changed were written to a scratch folder (resource_sync_* paths, null = unchanged) for this side
         // to load and patch into the level it already has, so nothing has to be reloaded.
         LEVEL_RESOURCES_MODIFIED,
+
+        // Level Viewer -> OpenCAGE: the alias its deep-select created was deselected before anything
+        // was done with it on that side. OpenCAGE deletes it (answering with ENTITY_DELETED, as for any
+        // deletion) unless it has since been given a reason to stay there: an edit, or a flowgraph node.
+        ENTITY_ALIAS_RELEASED,
     }
 
     public class Packet

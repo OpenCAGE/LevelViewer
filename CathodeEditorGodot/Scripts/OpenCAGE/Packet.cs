@@ -40,6 +40,11 @@ namespace OpenCAGE.UnityConnection
         // OpenCAGE -> Level Viewer: something was dropped on the viewport at drop_viewport_x/y. Only
         // this side has the geometry, so it raycasts the position and answers with ENTITY_CREATE_REQUEST.
         VIEWPORT_DROP_REQUEST,
+
+        // OpenCAGE -> Level Viewer: models, materials, textures or shaders were edited. The tables that
+        // changed were written to a scratch folder (resource_sync_* paths, null = unchanged) for this side
+        // to load and patch into the level it already has, so nothing has to be reloaded.
+        LEVEL_RESOURCES_MODIFIED,
     }
 
     public class Packet
@@ -51,7 +56,7 @@ namespace OpenCAGE.UnityConnection
 
         //Packet metadata
         public PacketEvent packet_event;
-        public int version = 10;
+        public int version = 11;
 
         //Setup metadata
         public string level_name = "";
@@ -89,6 +94,16 @@ namespace OpenCAGE.UnityConnection
         //need not agree on DPI.
         public float drop_viewport_x = 0f;
         public float drop_viewport_y = 0f;
+
+        //Resource sync (LEVEL_RESOURCES_MODIFIED): scratch copies of the tables that changed, null where
+        //one didn't. Textures and models are matched by name on the receiving side; the lists say which
+        //existing ones had their binary replaced, since only the sender can tell that from the metadata.
+        public string resource_sync_textures = null;
+        public string resource_sync_shaders = null;
+        public string resource_sync_materials = null;
+        public string resource_sync_models = null;
+        public List<string> resource_changed_textures = new List<string>();
+        public List<string> resource_changed_models = new List<string>();
 
         //Track if things have changed
         public bool dirty = false;

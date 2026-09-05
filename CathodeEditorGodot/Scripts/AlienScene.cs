@@ -54,6 +54,8 @@ public partial class AlienScene : Node3D
 	private Dictionary<Materials.Material, ShaderMaterial> _wireframeMaterials = new Dictionary<Materials.Material, ShaderMaterial>();
 	private Dictionary<ShaderMaterial, bool> _materialSupport = new Dictionary<ShaderMaterial, bool>();
 	private readonly Dictionary<ulong, ShaderMaterial> _modelReferenceOverrideMaterials = new Dictionary<ulong, ShaderMaterial>();
+	//Which material each override entry was built from, for retiring them when it changes (the key is a hash)
+	private readonly Dictionary<ulong, Materials.Material> _modelReferenceOverrideMaterialSources = new Dictionary<ulong, Materials.Material>();
 	private Dictionary<MeshInstance3D, Materials.Material> _modelReferenceMeshes = new Dictionary<MeshInstance3D, Materials.Material>();
 
 	/// <summary>What a spawned mesh was built from, for remapping it later.</summary>
@@ -201,13 +203,15 @@ public partial class AlienScene : Node3D
 	{
 		AdvanceLoadPipeline();
 		AdvanceLargeSceneRenderPolicyBatch();
+		AdvanceResourceSync();
 		UpdateLoadPipelineProcessing();
 	}
 
 	private void UpdateLoadPipelineProcessing()
 	{
 		bool needsProcess = _loadStep != LoadPipelineStep.None
-			|| _largeScenePolicyRunning;
+			|| _largeScenePolicyRunning
+			|| IsResourceSyncBusy;
 		if (IsProcessing() != needsProcess)
 			SetProcess(needsProcess);
 	}
@@ -591,6 +595,7 @@ public partial class AlienScene : Node3D
 
 		_contentOrigin = Vector3.Zero;
 		_loadedComposite = null;
+		ResetResourceSyncState();
 		_content.Reset();
 	}
 
@@ -4119,7 +4124,10 @@ public partial class AlienScene : Node3D
 		}
 
 		if (shaderMaterial != null)
+		{
 			_modelReferenceOverrideMaterials[cacheKey] = shaderMaterial;
+			_modelReferenceOverrideMaterialSources[cacheKey] = material;
+		}
 
 		return shaderMaterial != null;
 	}
@@ -4227,6 +4235,7 @@ public partial class AlienScene : Node3D
 		}
 
 		_modelReferenceOverrideMaterials.Clear();
+		_modelReferenceOverrideMaterialSources.Clear();
 	}
 
 	private void EnsureSolidMaterial(Materials.Material material)
@@ -4675,7 +4684,7 @@ public partial class AlienScene : Node3D
 		try
 		{
 			Models fresh = new Models(
-				models.Filepath,
+				_modelsRestorePath ?? models.Filepath, //a synced snapshot, once there is one: the level pak lacks what it brought
 				_content.Level.Materials,
 				_content.Level.WeightedCollisions,
 				_content.Level.MorphTargetDB);
@@ -4736,7 +4745,8 @@ public partial class AlienScene : Node3D
 
 			try
 			{
-				Textures fresh = new Textures(live.Filepath);
+				string restorePath = entry.Key == TexturePtr.Source.LEVEL && _levelTexturesRestorePath != null ? _levelTexturesRestorePath : live.Filepath;
+				Textures fresh = new Textures(restorePath);
 				int restored = 0;
 				foreach (int writeIndex in entry.Value)
 				{

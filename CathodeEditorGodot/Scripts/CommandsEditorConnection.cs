@@ -443,7 +443,9 @@ public partial class CommandsEditorConnection : Node3D
         if (LevelViewerRenderIdleThrottle.IsSuspended && _incomingMessages.IsEmpty)
             return;
 
-        while (_incomingMessages.TryDequeue(out string message))
+        // A resource snapshot being taken in holds everything behind it: what follows (an entity resource
+        // naming a model the snapshot brought) has to see the tables it describes.
+        while (!(_scene?.IsResourceSyncBusy ?? false) && _incomingMessages.TryDequeue(out string message))
             HandleMessage(message);
 
         if (_levelName != "" && _didLoadLevel)
@@ -701,6 +703,12 @@ public partial class CommandsEditorConnection : Node3D
                 MarkRenderFiltersDirty(null);
             }
             Callable.From(ApplyCameraSettingsFollowState).CallDeferred();
+            return;
+        }
+
+        if (packet.packet_event == PacketEvent.LEVEL_RESOURCES_MODIFIED)
+        {
+            _scene?.QueueResourceSync(packet);
             return;
         }
 

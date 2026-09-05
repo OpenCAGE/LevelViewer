@@ -29,6 +29,12 @@ public static class AlienSceneTextures
 		_transparencyCache.Clear();
 	}
 
+	public static void ForgetTransparency(Texture2D texture)
+	{
+		if (texture != null)
+			_transparencyCache.Remove(texture);
+	}
+
 	public static void RegisterTransparency(Texture2D texture, bool hasTransparency)
 	{
 		if (texture != null)

@@ -35,6 +35,10 @@ public static class RenderFilters
         }
     }
 
+    /// <summary>
+    /// Whether this type is drawn. Before the first settings packet lands, a filter falls back to
+    /// its default, so the level's models are not hidden for the moment it takes to arrive.
+    /// </summary>
     public static bool IsSceneFilterEnabled(SceneFilterKind kind)
     {
         lock (_lock)
@@ -78,7 +82,7 @@ public static class RenderFilters
         {
             if (_enabledByFunctionType.TryGetValue(functionType, out bool enabled))
                 return enabled;
-            return false;
+            return RenderFilterDefinitions.IsEnabledByDefault(functionType);
         }
     }
 

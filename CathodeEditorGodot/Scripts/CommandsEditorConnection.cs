@@ -1315,6 +1315,40 @@ public partial class CommandsEditorConnection : Node3D
         SyncTransformGizmoToSelection();
     }
 
+    /// <summary>
+    /// Delete in the viewport: ask OpenCAGE to delete what is selected - everything selected, not
+    /// just the one the gizmo is on. It owns the level data, and answers with ENTITY_DELETED.
+    /// </summary>
+    public void SendEntityDeleteRequest()
+    {
+        uint compositeId;
+        uint entityId;
+        bool entitySelected;
+        List<uint> selection;
+        lock (_lock)
+        {
+            compositeId = _currentComposite;
+            entityId = _currentEntity;
+            entitySelected = _entitySelected;
+            selection = new List<uint>(_selectionEntities);
+        }
+
+        if (!entitySelected || entityId == 0 || compositeId == 0)
+            return;
+
+        Packet packet = new Packet(PacketEvent.ENTITY_DELETE_REQUEST)
+        {
+            composite = compositeId,
+            entity = entityId,
+        };
+        if (selection.Count > 1)
+            packet.selection_entities = selection;
+
+        TryFillEntityMetadata(packet);
+        SendMessage(packet);
+        ScheduleEmbeddedInputFocusRestore();
+    }
+
     /// <summary>Ctrl+C in the viewport: copy the selected entity to OpenCAGE's shared entity clipboard.</summary>
     public void SendEntityClipboardCopy()
     {

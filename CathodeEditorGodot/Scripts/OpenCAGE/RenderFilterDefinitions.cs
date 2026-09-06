@@ -20,6 +20,8 @@ namespace OpenCAGE
         Sphere,
         Pyramid,
         UiIcon,
+        //Not a stand-in shape: the model itself, drawn from the entity's renderable resource
+        ModelReference,
     }
 
     /// <summary>
@@ -68,14 +70,18 @@ namespace OpenCAGE
             public readonly float R;
             public readonly float G;
             public readonly float B;
+            /// <summary>Whether this filter is on for someone who has never touched it.</summary>
+            public readonly bool DefaultEnabled;
 
-            public Definition(FunctionType functionType, RenderPreviewKind previewKind, float r, float g, float b)
+            public Definition(FunctionType functionType, RenderPreviewKind previewKind, float r, float g, float b,
+                bool defaultEnabled = false)
             {
                 FunctionType = functionType;
                 PreviewKind = previewKind;
                 R = r;
                 G = g;
                 B = b;
+                DefaultEnabled = defaultEnabled;
             }
 
             public uint FunctionTypeUInt => (uint)FunctionType;
@@ -99,6 +105,11 @@ namespace OpenCAGE
 
         public static readonly Definition[] All = new Definition[]
         {
+            /* The level's own geometry. Unlike everything below it isn't a stand-in shape - the model
+               named by the entity's resource is what gets drawn - so its filter starts on, and turning
+               it off hides the models rather than an icon standing for them. */
+            new Definition(FunctionType.ModelReference, RenderPreviewKind.ModelReference, 0.8f, 0.8f, 0.85f, defaultEnabled: true),
+
             // Box volumes
             new Definition(FunctionType.Box, RenderPreviewKind.Box, 0.85f, 0.85f, 0.85f),
             new Definition(FunctionType.CameraCollisionBox, RenderPreviewKind.Box, 0.6f, 0.75f, 0.9f),
@@ -187,6 +198,17 @@ namespace OpenCAGE
         public static bool IsSupported(FunctionType functionType)
         {
             return SupportedTypes.Contains(functionType);
+        }
+
+        /// <summary>Whether a filter nobody has set yet is on. Only the model references' is.</summary>
+        public static bool IsEnabledByDefault(FunctionType functionType)
+        {
+            return DefinitionsByType.TryGetValue(functionType, out Definition definition) && definition.DefaultEnabled;
+        }
+
+        public static bool IsEnabledByDefault(uint functionType)
+        {
+            return IsEnabledByDefault((FunctionType)functionType);
         }
 
         public static bool TryGetDefinition(FunctionType functionType, out Definition definition)

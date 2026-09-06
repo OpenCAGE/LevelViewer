@@ -32,6 +32,11 @@ namespace OpenCAGE.UnityConnection
         // Level Viewer -> OpenCAGE: create an entity of create_function_type at `position` (creation mode).
         ENTITY_CREATE_REQUEST,
 
+        // Level Viewer -> OpenCAGE: delete what is selected there (Delete pressed in the viewport).
+        // The level data lives on the OpenCAGE side, so it does the deleting and answers with
+        // ENTITY_DELETED as it would for a deletion made in the editor.
+        ENTITY_DELETE_REQUEST,
+
         // Level Viewer -> OpenCAGE: copy the given entity to the shared entity clipboard (Ctrl+C).
         ENTITY_CLIPBOARD_COPY,
         // Level Viewer -> OpenCAGE: paste the shared entity clipboard into the given composite (Ctrl+V).
@@ -67,7 +72,7 @@ namespace OpenCAGE.UnityConnection
 
         //Packet metadata
         public PacketEvent packet_event;
-        public int version = 14;
+        public int version = 15;
 
         //Setup metadata
         public string level_name = "";

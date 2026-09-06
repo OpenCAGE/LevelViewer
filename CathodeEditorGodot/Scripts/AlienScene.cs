@@ -1052,10 +1052,10 @@ public partial class AlienScene : Node3D
 
 			if (!mesh.IsInGroup(ModelReferenceRenderableGroup))
 				mesh.AddToGroup(ModelReferenceRenderableGroup);
-			mesh.Visible = true;
+			mesh.Visible = ModelReferencesShown;
 			MeshInstance3D overlay = FindWireframeOverlay(mesh);
 			if (overlay != null)
-				overlay.Visible = ModelReferenceRenderSettings.WireframeEnabled;
+				overlay.Visible = ModelReferencesShown && ModelReferenceRenderSettings.WireframeEnabled;
 		}
 	}
 
@@ -1289,16 +1289,27 @@ public partial class AlienScene : Node3D
 		return true;
 	}
 
+	/* One entry per node. The level's root composite is registered before the populate and again by
+	   the populate itself, both times for the same node, and everything that walks a composite's
+	   instances then did its work twice: an entity added after the load was spawned twice under the
+	   same parent, where Godot renames the colliding second copy to something like "@Node3D@29908" -
+	   and removal, which looks the node up by name, could never find that one again. It stayed in
+	   the viewport, still pickable, after the entity had gone from the level. */
 	private void RegisterCompositeNode(Composite composite, Node3D compositeNode)
 	{
 		if (composite == null || compositeNode == null)
 			return;
 
-		if (_compositeNodes.ContainsKey(composite.shortGUID))
-			_compositeNodes[composite.shortGUID].Add(compositeNode);
-		else
+		if (!_compositeNodes.TryGetValue(composite.shortGUID, out List<Node3D> compositeInstances))
+		{
 			_compositeNodes[composite.shortGUID] = new List<Node3D> { compositeNode };
+			return;
+		}
+
+		if (!compositeInstances.Contains(compositeNode))
+			compositeInstances.Add(compositeNode);
 	}
+
 
 	private void AddCompositeInstance(Composite composite, Node3D compositeNode, Entity parentEntity)
 	{
@@ -3410,6 +3421,35 @@ public partial class AlienScene : Node3D
 		}
 	}
 
+	/// <summary>Whether the model references' own render filter is asking for them right now.</summary>
+	public static bool ModelReferencesShown => RenderFilters.IsEnabled(FunctionType.ModelReference);
+
+	/* Turning the model references' filter off hides the level's geometry. The meshes are already
+	   spawned and expensive to rebuild, so this is a visibility switch over them, and the entities
+	   stop being pickable while they can't be seen. */
+	private void ApplyModelReferenceRenderFilter()
+	{
+		bool shown = ModelReferencesShown;
+		HashSet<Node3D> owners = new HashSet<Node3D>();
+
+		foreach (MeshInstance3D mesh in _modelReferenceMeshes.Keys)
+		{
+			if (mesh == null || !GodotObject.IsInstanceValid(mesh))
+				continue;
+
+			mesh.Visible = shown;
+			MeshInstance3D overlay = FindWireframeOverlay(mesh);
+			if (overlay != null)
+				overlay.Visible = shown && ModelReferenceRenderSettings.WireframeEnabled;
+
+			if (mesh.GetParent() is Node3D owner && GodotObject.IsInstanceValid(owner))
+				owners.Add(owner);
+		}
+
+		foreach (Node3D owner in owners)
+			LevelViewerPick.SetOwnerSuppressed(owner, !shown);
+	}
+
 	public void RefreshRenderFilters(HashSet<uint> changedFunctionTypes = null)
 	{
 		if (_parentNode == null)
@@ -3417,6 +3457,9 @@ public partial class AlienScene : Node3D
 
 		MaterializeLazyPreviewsForRenderFilters(changedFunctionTypes);
 		EnsureFunctionEntityPreviewCache();
+
+		if (changedFunctionTypes == null || changedFunctionTypes.Contains((uint)FunctionType.ModelReference))
+			ApplyModelReferenceRenderFilter();
 
 		for (int i = 0; i < _cachedFunctionEntityPreviews.Length; i++)
 		{
@@ -3427,6 +3470,7 @@ public partial class AlienScene : Node3D
 				continue;
 			}
 
+			//Handled above, in one pass over the meshes rather than a respawn each
 			if (preview is ModelReferencePreview)
 				continue;
 
@@ -3715,7 +3759,17 @@ public partial class AlienScene : Node3D
 				{
 					if (child == null || !GodotObject.IsInstanceValid(child))
 						continue;
-					if (child.Name != entityNodeName || child is not Node3D entityNode)
+					if (child is not Node3D entityNode)
+						continue;
+
+					/* Normally the node is named after the entity, but a name is not something to
+					   rely on: Godot renames a child whose name a sibling already has. What the node
+					   stands for is what matters, so the map decides and the name is the fallback
+					   for a node that never made it into the map. */
+					bool isOurs = _nodeEntities.TryGetValue(entityNode, out Entity nodeEntity)
+						? nodeEntity != null && nodeEntity.shortGUID == entity
+						: child.Name == entityNodeName;
+					if (!isOurs)
 						continue;
 
 					// One bad instance must not abort the whole removal (and must not escape to
@@ -3912,7 +3966,7 @@ public partial class AlienScene : Node3D
 		MeshInstance3D meshInstance = new MeshInstance3D
 		{
 			Mesh = holder.MainMesh,
-			Visible = !_deferMeshTreeActivation,
+			Visible = !_deferMeshTreeActivation && ModelReferencesShown,
 		};
 		if (!_bulkMeshSpawning)
 			meshInstance.Name = holder.MainMesh.ResourceName + " (" + material.Name + ")";

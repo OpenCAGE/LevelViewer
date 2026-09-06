@@ -224,6 +224,11 @@ public partial class LevelViewerCamera : Camera3D
 
                     GetViewport().SetInputAsHandled();
                 }
+                else if (keyEvent.Keycode == Key.Delete)
+                {
+                    TryDeleteEntitySelection();
+                    GetViewport().SetInputAsHandled();
+                }
                 else if (keyEvent.Keycode == Key.H)
                 {
                     if (keyEvent.ShiftPressed)
@@ -695,6 +700,14 @@ public partial class LevelViewerCamera : Camera3D
             _commandsEditorConnection = GetNodeOrNull<CommandsEditorConnection>(CommandsEditorConnectionPath);
 
         _commandsEditorConnection?.TryStepBackHierarchy();
+    }
+
+    private void TryDeleteEntitySelection()
+    {
+        if (_commandsEditorConnection == null || !GodotObject.IsInstanceValid(_commandsEditorConnection))
+            _commandsEditorConnection = GetNodeOrNull<CommandsEditorConnection>(CommandsEditorConnectionPath);
+
+        _commandsEditorConnection?.SendEntityDeleteRequest();
     }
 
     private void TryClearEntitySelection()

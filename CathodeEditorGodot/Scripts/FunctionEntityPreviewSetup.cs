@@ -30,16 +30,16 @@ public static class FunctionEntityPreviewSetup
                 p => p.Setup(scene, function, ownerCompositeId, mappingScopeInstanceEntityId));
         }
 
-        if (!RenderFilterDefinitions.IsSupported(functionType))
+        //Model references draw the model itself, so they never take one of the stand-in shapes below
+        if (functionType == FunctionType.ModelReference)
         {
-            if (functionType == FunctionType.ModelReference)
-            {
-                return AddPreview<ModelReferencePreview>(
-                    entityNode,
-                    p => p.Setup(scene, function, ownerCompositeId, mappingScopeInstanceEntityId));
-            }
-            return false;
+            return AddPreview<ModelReferencePreview>(
+                entityNode,
+                p => p.Setup(scene, function, ownerCompositeId, mappingScopeInstanceEntityId));
         }
+
+        if (!RenderFilterDefinitions.IsSupported(functionType))
+            return false;
 
         switch (RenderFilterDefinitions.GetPreviewKind(functionType))
         {

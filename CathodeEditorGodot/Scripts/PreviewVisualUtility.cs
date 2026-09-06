@@ -271,8 +271,10 @@ public static class PreviewVisualUtility
 
         FunctionType functionType = entity.function.AsFunctionType;
 
+        /* Model references answer to their own filter, but not to hide-nested: they are the level's
+           geometry rather than script entities standing about in it. */
         if (functionType == FunctionType.ModelReference)
-            return true;
+            return RenderFilters.IsEnabled(functionType);
 
         if (RenderFilterDefinitions.IsSupported(functionType) && !RenderFilters.IsEnabled(functionType))
             return false;

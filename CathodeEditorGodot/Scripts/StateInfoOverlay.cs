@@ -31,6 +31,17 @@ public partial class StateInfoOverlay : Node3D
 		ClearCover();
 	}
 
+	/// <summary>
+	/// Draw the requested states again from whatever the level holds now, even though they are the
+	/// states already drawn - the data behind them was re-read after a save.
+	/// </summary>
+	public void Rebuild(int navMeshState, int coverState)
+	{
+		ClearNavMesh();
+		ClearCover();
+		Apply(navMeshState, coverState);
+	}
+
 	/// <summary>Show the requested states, building each the first time it's asked for.</summary>
 	public void Apply(int navMeshState, int coverState)
 	{

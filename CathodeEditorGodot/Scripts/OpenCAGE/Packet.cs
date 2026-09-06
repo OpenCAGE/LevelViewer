@@ -50,6 +50,12 @@ namespace OpenCAGE.UnityConnection
         // was done with it on that side. OpenCAGE deletes it (answering with ENTITY_DELETED, as for any
         // deletion) unless it has since been given a reason to stay there: an edit, or a flowgraph node.
         ENTITY_ALIAS_RELEASED,
+
+        // OpenCAGE -> Level Viewer: the level was saved, so the generated navigation data on disk
+        // (STATE_x/NAV_MESH, COVER, SPOTTING_POSITIONS, ...) has been rewritten - an instanced save
+        // regenerates all of it. This side reads those files itself, so it re-reads them rather than
+        // being sent them, and redraws whichever state overlay is showing.
+        LEVEL_STATE_RESOURCES_MODIFIED,
     }
 
     public class Packet
@@ -61,7 +67,7 @@ namespace OpenCAGE.UnityConnection
 
         //Packet metadata
         public PacketEvent packet_event;
-        public int version = 11;
+        public int version = 12;
 
         //Setup metadata
         public string level_name = "";

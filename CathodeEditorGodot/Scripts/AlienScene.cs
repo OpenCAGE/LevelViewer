@@ -3734,6 +3734,29 @@ public partial class AlienScene : Node3D
 			_stateInfoOverlay.Apply(navMeshState, coverState);
 	}
 
+	/* OpenCAGE saved the level, so the generated nav data on disk is not the data we read when we
+	   loaded it - an instanced save regenerates the lot. Read it again and redraw what is showing. */
+	public void ReloadStateResources()
+	{
+		if (_content?.Level == null || !_content.Loaded)
+			return;
+
+		try
+		{
+			_content.Level.ReloadStateResources();
+		}
+		catch (Exception e)
+		{
+			ViewerLog.PrintErr("[StateInfo] Could not re-read the state resources: " + e);
+			return;
+		}
+
+		ViewerLog.Print("[StateInfo] Re-read " + _content.Level.StateResources.Count + " state(s) from disk after a save.");
+
+		if (_stateInfoOverlay != null && GodotObject.IsInstanceValid(_stateInfoOverlay))
+			_stateInfoOverlay.Rebuild(_pendingNavMeshState, _pendingCoverState);
+	}
+
 	/* Flip the scene geometry categories on/off in place */
 	public void RefreshSceneGeometryFilters()
 	{

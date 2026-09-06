@@ -729,6 +729,13 @@ public partial class CommandsEditorConnection : Node3D
             return;
         }
 
+        if (packet.packet_event == PacketEvent.LEVEL_STATE_RESOURCES_MODIFIED)
+        {
+            //Reads files, then rebuilds meshes from them: both belong on the main thread
+            Callable.From(() => _scene?.ReloadStateResources()).CallDeferred();
+            return;
+        }
+
         if (packet.packet_event == PacketEvent.VIEWPORT_DROP_REQUEST)
         {
             HandleViewportDropRequest(packet);

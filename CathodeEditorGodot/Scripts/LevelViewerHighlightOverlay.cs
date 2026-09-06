@@ -17,6 +17,10 @@ public static class LevelViewerHighlightOverlay
     private const int RenderPriority = 2;
 
     private const string BackFacesShaderPath = "res://shaders/selection_highlight_overlay_backfaces.gdshader";
+    private const string WireframeShaderPath = "res://shaders/selection_wireframe.gdshader";
+
+
+    private static ShaderMaterial _selectionWireframe;
 
     private static ShaderMaterial _selectionMeshOverlay;
     private static ShaderMaterial _selectionBillboardOverlay;
@@ -76,6 +80,93 @@ public static class LevelViewerHighlightOverlay
                 return billboard ? GetSelectionBillboardOverlay() : GetSelectionMeshOverlay();
         }
     }
+
+    /// <summary>
+    /// Draws the mesh's edges over the top of it, leaving the surface as it is - the shape stays
+    /// readable and the selection reads as an outline drawn through it.
+    /// </summary>
+    public static bool TryApplyWireframeOverlay(MeshInstance3D meshInstance, Dictionary<MeshInstance3D, Material> savedOverlays)
+    {
+        if (meshInstance == null || !GodotObject.IsInstanceValid(meshInstance))
+            return false;
+
+        if (meshInstance.IsInGroup("model_reference_wireframe_overlay"))
+            return false;
+
+        if (savedOverlays.ContainsKey(meshInstance))
+            return false;
+
+        ShaderMaterial wireframe = GetSelectionWireframeMaterial();
+        if (wireframe == null)
+            return false;
+
+        savedOverlays[meshInstance] = meshInstance.MaterialOverlay;
+        meshInstance.MaterialOverlay = wireframe;
+        return true;
+    }
+
+    /// <summary>Draws the mesh as its own edges. Replaces the material, so the surface stops filling in.</summary>
+    public static bool TryApplyWireframe(MeshInstance3D meshInstance, Dictionary<MeshInstance3D, Material> savedOverrides)
+    {
+        if (meshInstance == null || !GodotObject.IsInstanceValid(meshInstance))
+            return false;
+
+        if (meshInstance.IsInGroup("model_reference_wireframe_overlay"))
+            return false;
+
+        if (savedOverrides.ContainsKey(meshInstance))
+            return false;
+
+        ShaderMaterial wireframe = GetSelectionWireframeMaterial();
+        if (wireframe == null)
+            return false;
+
+        savedOverrides[meshInstance] = meshInstance.MaterialOverride;
+        meshInstance.MaterialOverride = wireframe;
+        return true;
+    }
+
+    /// <summary>
+    /// Puts back the materials TryApplyWireframe replaced - unless something else has taken the
+    /// override over since (a material edit while the entity was selected), which is then left alone.
+    /// </summary>
+    public static void RestoreOverrides(Dictionary<MeshInstance3D, Material> savedOverrides)
+    {
+        foreach (KeyValuePair<MeshInstance3D, Material> entry in savedOverrides)
+        {
+            if (entry.Key == null || !GodotObject.IsInstanceValid(entry.Key))
+                continue;
+            if (_selectionWireframe != null && entry.Key.MaterialOverride != _selectionWireframe)
+                continue;
+            entry.Key.MaterialOverride = entry.Value;
+        }
+
+        savedOverrides.Clear();
+    }
+
+    /// <summary>
+
+
+
+
+    public static ShaderMaterial GetSelectionWireframeMaterial()
+    {
+        if (_selectionWireframe == null)
+        {
+            Shader shader = GD.Load<Shader>(WireframeShaderPath);
+            if (shader == null)
+            {
+                ViewerLog.PrintErr("[Selection] Missing " + WireframeShaderPath + " - the wireframe highlight needs the project exporting again.");
+                return null;
+            }
+            _selectionWireframe = new ShaderMaterial { Shader = shader };
+            _selectionWireframe.SetShaderParameter("wireframe_color", LevelViewerSelection.HighlightGreen);
+            _selectionWireframe.RenderPriority = RenderPriority;
+        }
+
+        return _selectionWireframe;
+    }
+
 
     public static bool TryApplyOverlay(
         MeshInstance3D meshInstance,

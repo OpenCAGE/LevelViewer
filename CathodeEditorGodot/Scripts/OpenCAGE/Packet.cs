@@ -67,7 +67,7 @@ namespace OpenCAGE.UnityConnection
 
         //Packet metadata
         public PacketEvent packet_event;
-        public int version = 12;
+        public int version = 13;
 
         //Setup metadata
         public string level_name = "";
@@ -139,6 +139,9 @@ namespace OpenCAGE.UnityConnection
         // State info overlays: index into Level.StateResources, or -1 for off.
         public int show_navmesh_state = -1;
         public int show_cover_state = -1;
+
+        // How the viewer marks the selected entity (LevelViewerHighlightMode).
+        public int selection_highlight_mode = 0;
 
         // Level Viewer log line forwarded to OpenCAGE (VIEWER_LOG).
         public string log_message = "";

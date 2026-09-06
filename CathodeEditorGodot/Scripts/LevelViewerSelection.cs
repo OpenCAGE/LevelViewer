@@ -10,10 +10,33 @@ public static class LevelViewerSelection
     public static readonly Color HighlightGreen = new(0.35f, 1f, 0.45f, 1f);
 
     private static readonly Dictionary<MeshInstance3D, Material> _savedOverlays = new();
+    private static readonly Dictionary<MeshInstance3D, Material> _savedOverrides = new();
     private static Node3D _selectionRoot;
     private static readonly List<MeshInstance3D> _selectionMeshes = new();
 
     public static void SetSelectionRoot(Node3D root) => _selectionRoot = root;
+
+    /// <summary>
+    /// The mode came from OpenCAGE and may have changed with something already selected: what is drawn
+    /// now belongs to the old mode, so it comes off before the same selection is drawn the new way.
+    /// </summary>
+    public static void SetMode(OpenCAGE.UnityConnection.LevelViewerHighlightMode mode)
+    {
+        if (PreviewVisibilitySettings.SelectionHighlightMode == mode)
+            return;
+
+        Node3D selected = _selectionRoot;
+        ClearInternal();
+        PreviewVisibilitySettings.SelectionHighlightMode = mode;
+
+        if (selected == null || !GodotObject.IsInstanceValid(selected))
+            return;
+
+        _selectionRoot = selected;
+        CollectSelectionMeshes(selected);
+        for (int i = 0; i < _selectionMeshes.Count; i++)
+            ApplyMeshHighlight(_selectionMeshes[i]);
+    }
 
     public static void Apply(Node3D selected)
     {
@@ -40,6 +63,7 @@ public static class LevelViewerSelection
     private static void ClearInternal()
     {
         LevelViewerHighlightOverlay.RestoreOverlays(_savedOverlays);
+        LevelViewerHighlightOverlay.RestoreOverrides(_savedOverrides);
         _selectionRoot = null;
         _selectionMeshes.Clear();
     }
@@ -72,10 +96,7 @@ public static class LevelViewerSelection
             if (mesh == null || !GodotObject.IsInstanceValid(mesh))
                 continue;
 
-            if (_savedOverlays.ContainsKey(mesh))
-                continue;
-
-            ApplyMeshHighlight(mesh);
+            ApplyMeshHighlight(mesh); //each mode's apply is a no-op on a mesh it already marked
         }
     }
 
@@ -94,9 +115,19 @@ public static class LevelViewerSelection
 
     private static bool ApplyMeshHighlight(MeshInstance3D meshInstance)
     {
-        return LevelViewerHighlightOverlay.TryApplyOverlay(
-            meshInstance,
-            _savedOverlays,
-            LevelViewerHighlightOverlay.HighlightOverlayMode.Selection);
+        switch (PreviewVisibilitySettings.SelectionHighlightMode)
+        {
+            case OpenCAGE.UnityConnection.LevelViewerHighlightMode.None:
+                return false;
+            case OpenCAGE.UnityConnection.LevelViewerHighlightMode.Wireframe:
+                return LevelViewerHighlightOverlay.TryApplyWireframeOverlay(meshInstance, _savedOverlays);
+            case OpenCAGE.UnityConnection.LevelViewerHighlightMode.WireframeTransparent:
+                return LevelViewerHighlightOverlay.TryApplyWireframe(meshInstance, _savedOverrides);
+            default:
+                return LevelViewerHighlightOverlay.TryApplyOverlay(
+                    meshInstance,
+                    _savedOverlays,
+                    LevelViewerHighlightOverlay.HighlightOverlayMode.Selection);
+        }
     }
 }

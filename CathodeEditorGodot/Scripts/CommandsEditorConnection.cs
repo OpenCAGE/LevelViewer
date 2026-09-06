@@ -1185,6 +1185,12 @@ public partial class CommandsEditorConnection : Node3D
         LevelViewerTransformSnap.GridSize = packet.transform_grid_snap > 0f ? packet.transform_grid_snap : 0f;
         LevelViewerTransformSnap.RotationDegrees = packet.rotation_snap_degrees > 0f ? packet.rotation_snap_degrees : 0f;
 
+        //Marking the selection builds nodes, so it belongs on the main thread - this runs on the socket's
+        LevelViewerHighlightMode highlightMode =
+            LevelViewerViewportDefinitions.NormalizeHighlightMode(packet.selection_highlight_mode);
+        if (PreviewVisibilitySettings.SelectionHighlightMode != highlightMode)
+            Callable.From(() => LevelViewerSelection.SetMode(highlightMode)).CallDeferred();
+
         ApplyDeepSelectModeFromPacket(packet.deep_select_mode);
         ApplyGizmoModeFromPacket(packet.gizmo_mode);
         ApplyCreateModeFromPacket(packet.create_function_type);

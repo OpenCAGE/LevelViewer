@@ -12,6 +12,10 @@ public static class PreviewVisibilitySettings
 
     public static bool HighlightProxies { get; set; } = true;
 
+    /// <summary>How the selected entity is marked. Owned by OpenCAGE, arrives on the settings packet.</summary>
+    public static OpenCAGE.UnityConnection.LevelViewerHighlightMode SelectionHighlightMode { get; set; }
+        = OpenCAGE.UnityConnection.LevelViewerHighlightMode.Green;
+
     public enum DeepSelectModeKind
     {
         None,

@@ -16,8 +16,39 @@ namespace OpenCAGE.UnityConnection
         TranslateLocal = 4,
     }
 
+    /// <summary>How the viewer marks the selected entity.</summary>
+    public enum LevelViewerHighlightMode
+    {
+        Green = 0,
+        Wireframe = 1,
+        WireframeTransparent = 2,
+        None = 3,
+    }
+
     public static class LevelViewerViewportDefinitions
     {
+        public static string FormatHighlightModeLabel(LevelViewerHighlightMode mode)
+        {
+            switch (mode)
+            {
+                case LevelViewerHighlightMode.Wireframe:
+                    return "Wireframe";
+                case LevelViewerHighlightMode.WireframeTransparent:
+                    return "Wireframe Transparent";
+                case LevelViewerHighlightMode.None:
+                    return "None";
+                default:
+                    return "Green";
+            }
+        }
+
+        public static LevelViewerHighlightMode NormalizeHighlightMode(int value)
+        {
+            if (value < 0 || value > (int)LevelViewerHighlightMode.None)
+                return LevelViewerHighlightMode.Green;
+            return (LevelViewerHighlightMode)value;
+        }
+
         public static string FormatSelectionModeLabel(LevelViewerDeepSelectMode mode)
         {
             switch (mode)

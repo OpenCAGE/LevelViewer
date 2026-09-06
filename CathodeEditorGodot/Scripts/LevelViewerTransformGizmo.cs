@@ -12,8 +12,11 @@ public partial class LevelViewerTransformGizmo : Node3D
 {
     public enum GizmoMode { None, TranslateWorld, RotateLocal, RotateWorld, TranslateLocal }
 
-    /// <summary>Fired when dragging moves/rotates the target. Args: local position, local euler rotation degrees.</summary>
-    public Action<Vector3, Vector3> OnTransformChanged;
+    /// <summary>
+    /// Fired for each target when a drag ends. Args: its index in the selection (0 = the anchor the
+    /// gizmo takes its orientation from), local position, local euler rotation degrees.
+    /// </summary>
+    public Action<int, Vector3, Vector3> OnTransformChanged;
 
     /// <summary>Fired once when a drag ends — use for pick-cache invalidation (not every mouse-move frame).</summary>
     public Action<Node3D> OnDragCommitted;
@@ -48,7 +51,10 @@ public partial class LevelViewerTransformGizmo : Node3D
     private enum DragAxis { None, X, Y, Z, XY, XZ, YZ, RotX, RotY, RotZ }
 
     private GizmoMode  _mode      = GizmoMode.None;
+    /* The anchor: it decides the gizmo's orientation in local modes, and a one-entity selection is
+       just this. _targets holds the whole selection with the anchor first. */
     private Node3D     _target;
+    private readonly List<Node3D> _targets = new List<Node3D>();
     private Camera3D   _camera;
     private DragAxis   _dragAxis  = DragAxis.None;
     private DragAxis   _hovAxis   = DragAxis.None;
@@ -58,6 +64,8 @@ public partial class LevelViewerTransformGizmo : Node3D
     private Vector3 _dragPivot;        // world position at drag start (never moves during drag)
     private Vector3 _dragStartPos;
     private Vector3 _dragStartRot;
+    private readonly List<Vector3> _dragStartPositions = new List<Vector3>();     // per target, world
+    private readonly List<Quaternion> _dragStartQuaternions = new List<Quaternion>(); // per target, world
     private Vector3 _dragStartHit;       // ray-plane hit at mouse-down
     private Vector3 _dragAxisDir;      // constrained axis (translate) or rotation axis (rotate)
     private Vector3 _dragPlaneNormal;  // plane used for ray intersection during drag
@@ -101,20 +109,43 @@ public partial class LevelViewerTransformGizmo : Node3D
 
     public void SetTarget(Node3D target, Camera3D camera)
     {
+        SetTargets(target == null ? null : new List<Node3D> { target }, camera);
+    }
+
+    /// <summary>
+    /// Drive several entities at once. The first is the anchor; the gizmo sits at the centre of them
+    /// all and a drag moves the group rigidly, so what it does to one it does to every one.
+    /// </summary>
+    public void SetTargets(IReadOnlyList<Node3D> targets, Camera3D camera)
+    {
         if (_isDragging)
             CommitDrag();
 
-        _target  = target;
         _camera  = camera;
         _isDragging = false;
-        if (!PreviewVisualUtility.HasValidWorldAnchor(_target))
+        _targets.Clear();
+
+        if (targets != null)
         {
-            _target = null;
+            for (int i = 0; i < targets.Count; i++)
+            {
+                Node3D target = targets[i];
+                if (target != null && GodotObject.IsInstanceValid(target)
+                    && PreviewVisualUtility.HasValidWorldAnchor(target))
+                {
+                    _targets.Add(target);
+                }
+            }
+        }
+
+        _target = _targets.Count > 0 ? _targets[0] : null;
+        if (_target == null)
+        {
             Visible = false;
             return;
         }
 
-        GlobalPosition = _target.GlobalPosition;
+        GlobalPosition = GetTargetsCentre();
         RefreshVisibility();
     }
 
@@ -124,8 +155,27 @@ public partial class LevelViewerTransformGizmo : Node3D
             CommitDrag();
 
         _target = null;
+        _targets.Clear();
         _isDragging = false;
         Visible = false;
+    }
+
+    /// <summary>Where the handles sit: on the entity for one, in the middle of them for several.</summary>
+    private Vector3 GetTargetsCentre()
+    {
+        Vector3 total = Vector3.Zero;
+        int count = 0;
+        for (int i = 0; i < _targets.Count; i++)
+        {
+            Node3D target = _targets[i];
+            if (target == null || !GodotObject.IsInstanceValid(target))
+                continue;
+
+            total += target.GlobalPosition;
+            count++;
+        }
+
+        return count == 0 ? GlobalPosition : total / count;
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -163,7 +213,7 @@ public partial class LevelViewerTransformGizmo : Node3D
         }
 
         if (!_isDragging)
-            GlobalPosition = _target.GlobalPosition;
+            GlobalPosition = GetTargetsCentre();
 
         GlobalBasis = GetOrientationBasis();
 
@@ -231,9 +281,18 @@ public partial class LevelViewerTransformGizmo : Node3D
     // ─────────────────────────────────────────────────────────────────────────
     private void BeginDrag(Vector2 mousePos)
     {
-        _dragPivot    = _target.GlobalPosition;
-        _dragStartPos = _dragPivot;
+        //The whole group turns about where the handles are, which for one entity is the entity itself
+        _dragPivot    = GetTargetsCentre();
+        _dragStartPos = _target.GlobalPosition;
         _dragStartRot = _target.RotationDegrees;
+
+        _dragStartPositions.Clear();
+        _dragStartQuaternions.Clear();
+        for (int i = 0; i < _targets.Count; i++)
+        {
+            _dragStartPositions.Add(_targets[i].GlobalPosition);
+            _dragStartQuaternions.Add(GetGlobalQuaternion(_targets[i]));
+        }
 
         if (IsTranslateMode)
         {
@@ -292,19 +351,18 @@ public partial class LevelViewerTransformGizmo : Node3D
         {
             Vector3 worldDelta = currentHit.Value - _dragStartHit;
 
-            if (IsPlane(_dragAxis))
+            // Free movement within the picked plane, or camera-plane movement projected onto one axis.
+            Vector3 delta = IsPlane(_dragAxis)
+                ? worldDelta
+                : _dragAxisDir * worldDelta.Dot(_dragAxisDir);
+
+            for (int i = 0; i < _targets.Count; i++)
             {
-                // Free movement within the picked plane.
-                _target.GlobalPosition = _dragStartPos + worldDelta;
-            }
-            else
-            {
-                // Project camera-plane movement onto the constrained axis.
-                float axisDelta = worldDelta.Dot(_dragAxisDir);
-                _target.GlobalPosition = _dragStartPos + _dragAxisDir * axisDelta;
+                if (GodotObject.IsInstanceValid(_targets[i]))
+                    _targets[i].GlobalPosition = _dragStartPositions[i] + delta;
             }
 
-            GlobalPosition = _target.GlobalPosition;
+            GlobalPosition = _dragPivot + delta;
         }
         else if (IsRotateMode)
         {
@@ -317,17 +375,29 @@ public partial class LevelViewerTransformGizmo : Node3D
             _dragRotRefDir      = to;
             _dragAccumAngleRad += deltaRad;
 
+            /* A group rotates by whole steps of the snap, rather than each entity being snapped to
+               its own angle afterwards - that would pull the group apart. */
+            float angleRad = _dragAccumAngleRad;
+            float rotationStep = LevelViewerTransformSnap.RotationDegrees;
+            if (_targets.Count > 1 && rotationStep > 0f)
+            {
+                angleRad = Mathf.DegToRad(
+                    LevelViewerTransformSnap.SnapValue(Mathf.RadToDeg(angleRad), rotationStep));
+            }
+
             if (_mode == GizmoMode.RotateWorld)
             {
                 Vector3 axis = _dragAxisDir.Normalized();
-                Quaternion worldDelta = new Quaternion(axis, _dragAccumAngleRad);
-                SetGlobalQuaternion(_target, worldDelta * _dragStartGlobalQuat);
+                ApplyGroupRotation(new Quaternion(axis, angleRad));
             }
             else
             {
                 Vector3 localAxis = AxisToLocalDir(_dragAxis).Normalized();
-                Quaternion localDelta = new Quaternion(localAxis, _dragAccumAngleRad);
-                SetGlobalQuaternion(_target, _dragStartGlobalQuat * localDelta);
+                Quaternion localDelta = new Quaternion(localAxis, angleRad);
+                Quaternion anchorRotation = _dragStartGlobalQuat * localDelta;
+                SetGlobalQuaternion(_target, anchorRotation);
+                //What that did to the anchor in world terms is what the rest of the group does
+                ApplyGroupRotationToOthers(anchorRotation * _dragStartGlobalQuat.Inverse());
                 GlobalBasis = _target.GlobalBasis;
             }
         }
@@ -335,6 +405,28 @@ public partial class LevelViewerTransformGizmo : Node3D
         ApplyDragSnap();
 
         // Sync to OpenCAGE / all entity instances only on CommitDrag — not every mouse-move frame.
+    }
+
+    /// <summary>Turn every target by the same world rotation, about the gizmo's pivot.</summary>
+    private void ApplyGroupRotation(Quaternion worldDelta)
+    {
+        SetGlobalQuaternion(_target, worldDelta * _dragStartGlobalQuat);
+        ApplyGroupRotationToOthers(worldDelta);
+    }
+
+    /* The anchor turns on the spot (its own rotation is all that changes, exactly as it always has);
+       everything else also swings round the pivot, which is what keeps the group's shape. */
+    private void ApplyGroupRotationToOthers(Quaternion worldDelta)
+    {
+        for (int i = 1; i < _targets.Count; i++)
+        {
+            Node3D target = _targets[i];
+            if (target == null || !GodotObject.IsInstanceValid(target))
+                continue;
+
+            SetGlobalQuaternion(target, worldDelta * _dragStartQuaternions[i]);
+            target.GlobalPosition = _dragPivot + worldDelta * (_dragStartPositions[i] - _dragPivot);
+        }
     }
 
     private void ApplyDragSnap()
@@ -345,15 +437,30 @@ public partial class LevelViewerTransformGizmo : Node3D
         float grid = LevelViewerTransformSnap.GridSize;
         if (grid > 0f && IsTranslateMode)
         {
+            Vector3 before = _target.GlobalPosition;
             Vector3 pos = _target.Position;
             _target.Position = new Vector3(
                 LevelViewerTransformSnap.SnapValue(pos.X, grid),
                 LevelViewerTransformSnap.SnapValue(pos.Y, grid),
                 LevelViewerTransformSnap.SnapValue(pos.Z, grid));
-            GlobalPosition = _target.GlobalPosition;
+
+            /* Snapping each entity to the grid on its own would pull a group apart, so the anchor is
+               the one that lands on the grid and the rest move with it. */
+            Vector3 correction = _target.GlobalPosition - before;
+            if (correction.LengthSquared() > 0f)
+            {
+                for (int i = 1; i < _targets.Count; i++)
+                {
+                    if (GodotObject.IsInstanceValid(_targets[i]))
+                        _targets[i].GlobalPosition += correction;
+                }
+            }
+
+            GlobalPosition = GetTargetsCentre();
         }
 
-        float rotationStep = LevelViewerTransformSnap.RotationDegrees;
+        //A group's rotation is snapped as one angle while it turns, not per entity afterwards
+        float rotationStep = _targets.Count > 1 ? 0f : LevelViewerTransformSnap.RotationDegrees;
         if (rotationStep > 0f && IsRotateMode)
         {
             Vector3 rot = _target.RotationDegrees;
@@ -426,8 +533,16 @@ public partial class LevelViewerTransformGizmo : Node3D
             return;
 
         ApplyDragSnap();
-        OnTransformChanged?.Invoke(_target.Position, _target.RotationDegrees);
-        OnDragCommitted?.Invoke(_target);
+
+        for (int i = 0; i < _targets.Count; i++)
+        {
+            Node3D target = _targets[i];
+            if (target == null || !GodotObject.IsInstanceValid(target))
+                continue;
+
+            OnTransformChanged?.Invoke(i, target.Position, target.RotationDegrees);
+            OnDragCommitted?.Invoke(target);
+        }
     }
 
     // ─────────────────────────────────────────────────────────────────────────

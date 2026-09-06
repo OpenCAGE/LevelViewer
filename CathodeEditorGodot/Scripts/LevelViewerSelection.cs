@@ -11,10 +11,10 @@ public static class LevelViewerSelection
 
     private static readonly Dictionary<MeshInstance3D, Material> _savedOverlays = new();
     private static readonly Dictionary<MeshInstance3D, Material> _savedOverrides = new();
-    private static Node3D _selectionRoot;
+    /* Everything currently marked. One entry for an ordinary selection; several once entities are
+       ctrl-clicked together. The first is the one the rest of the viewer treats as the selection. */
+    private static readonly List<Node3D> _selectionRoots = new();
     private static readonly List<MeshInstance3D> _selectionMeshes = new();
-
-    public static void SetSelectionRoot(Node3D root) => _selectionRoot = root;
 
     /// <summary>
     /// The mode came from OpenCAGE and may have changed with something already selected: what is drawn
@@ -25,34 +25,68 @@ public static class LevelViewerSelection
         if (PreviewVisibilitySettings.SelectionHighlightMode == mode)
             return;
 
-        Node3D selected = _selectionRoot;
+        List<Node3D> selected = new List<Node3D>(_selectionRoots);
         ClearInternal();
         PreviewVisibilitySettings.SelectionHighlightMode = mode;
-
-        if (selected == null || !GodotObject.IsInstanceValid(selected))
-            return;
-
-        _selectionRoot = selected;
-        CollectSelectionMeshes(selected);
-        for (int i = 0; i < _selectionMeshes.Count; i++)
-            ApplyMeshHighlight(_selectionMeshes[i]);
+        MarkAll(selected);
     }
 
     public static void Apply(Node3D selected)
     {
-        if (selected != null && GodotObject.IsInstanceValid(selected) && selected == _selectionRoot)
+        Apply(selected == null ? null : new List<Node3D> { selected });
+    }
+
+    /// <summary>Mark every node in the selection. The first is the one the gizmo and camera follow.</summary>
+    public static void Apply(IReadOnlyList<Node3D> selected)
+    {
+        if (SameAsCurrent(selected))
             return;
 
         ClearInternal();
-        _selectionRoot = selected;
+        MarkAll(selected);
+    }
 
-        if (selected == null || !GodotObject.IsInstanceValid(selected))
+    private static void MarkAll(IReadOnlyList<Node3D> selected)
+    {
+        if (selected == null)
             return;
 
-        CollectSelectionMeshes(selected);
+        for (int i = 0; i < selected.Count; i++)
+        {
+            Node3D node = selected[i];
+            if (node == null || !GodotObject.IsInstanceValid(node))
+                continue;
+
+            _selectionRoots.Add(node);
+            CollectSelectionMeshes(node, append: true);
+        }
 
         for (int i = 0; i < _selectionMeshes.Count; i++)
             ApplyMeshHighlight(_selectionMeshes[i]);
+    }
+
+    private static bool SameAsCurrent(IReadOnlyList<Node3D> selected)
+    {
+        int count = selected?.Count ?? 0;
+        int valid = 0;
+        for (int i = 0; i < count; i++)
+            if (selected[i] != null && GodotObject.IsInstanceValid(selected[i]))
+                valid++;
+
+        if (valid != _selectionRoots.Count || valid == 0)
+            return false;
+
+        int at = 0;
+        for (int i = 0; i < count; i++)
+        {
+            Node3D node = selected[i];
+            if (node == null || !GodotObject.IsInstanceValid(node))
+                continue;
+            if (_selectionRoots[at++] != node)
+                return false;
+        }
+
+        return true;
     }
 
     public static void Clear()
@@ -64,20 +98,21 @@ public static class LevelViewerSelection
     {
         LevelViewerHighlightOverlay.RestoreOverlays(_savedOverlays);
         LevelViewerHighlightOverlay.RestoreOverrides(_savedOverrides);
-        _selectionRoot = null;
+        _selectionRoots.Clear();
         _selectionMeshes.Clear();
     }
 
     public static bool IsUnderSelection(Node node)
     {
-        if (_selectionRoot == null || node == null)
+        if (node == null || _selectionRoots.Count == 0)
             return false;
 
         Node current = node;
         while (current != null)
         {
-            if (current == _selectionRoot)
-                return true;
+            for (int i = 0; i < _selectionRoots.Count; i++)
+                if (current == _selectionRoots[i])
+                    return true;
 
             current = current.GetParent();
         }
@@ -87,7 +122,7 @@ public static class LevelViewerSelection
 
     public static void ReapplyIfSelectionActive()
     {
-        if (_selectionRoot == null || !GodotObject.IsInstanceValid(_selectionRoot))
+        if (_selectionRoots.Count == 0)
             return;
 
         for (int i = 0; i < _selectionMeshes.Count; i++)
@@ -100,14 +135,17 @@ public static class LevelViewerSelection
         }
     }
 
-    private static void CollectSelectionMeshes(Node3D selected)
+    private static void CollectSelectionMeshes(Node3D selected, bool append = false)
     {
-        _selectionMeshes.Clear();
+        if (!append)
+            _selectionMeshes.Clear();
+
         if (selected == null || !GodotObject.IsInstanceValid(selected))
             return;
 
+        int before = _selectionMeshes.Count;
         LevelViewerPick.CollectPickMeshesForEntitySubtree(selected, _selectionMeshes);
-        if (_selectionMeshes.Count > 0)
+        if (_selectionMeshes.Count > before)
             return;
 
         PreviewVisualUtility.CollectMeshInstancesForEntityVisual(selected, _selectionMeshes);

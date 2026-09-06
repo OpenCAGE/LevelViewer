@@ -67,7 +67,7 @@ namespace OpenCAGE.UnityConnection
 
         //Packet metadata
         public PacketEvent packet_event;
-        public int version = 13;
+        public int version = 14;
 
         //Setup metadata
         public string level_name = "";
@@ -81,6 +81,12 @@ namespace OpenCAGE.UnityConnection
         public List<uint> path_composites = new List<uint>();
         public uint entity;
         public uint composite;
+
+        // Everything selected in `composite`, `entity` first, when more than one thing is selected.
+        // Empty means the selection is just `entity` - the usual case - so a one-entity selection is
+        // untouched by any of this. `entity` stays the one the inspector, the camera and the gizmo's
+        // own orientation follow; the rest come along for highlighting and for being transformed with it.
+        public List<uint> selection_entities = new List<uint>();
 
         //Transform
         public bool has_transform = false;

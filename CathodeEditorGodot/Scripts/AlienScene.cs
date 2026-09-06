@@ -42,6 +42,12 @@ public partial class AlienScene : Node3D
 
 	private Composite _loadedComposite = null;
 	private Node3D _selectedEntity;
+
+	/* The whole selection, the primary (_selectedEntity) first: entities ctrl-clicked together in the
+	   viewport, or multi-selected in OpenCAGE's entity list. One entry for an ordinary selection.
+	   _selectedEntityIds runs in step with it, so the gizmo can name the entity behind each node. */
+	private readonly List<Node3D> _selectedEntities = new List<Node3D>();
+	private readonly List<uint> _selectedEntityIds = new List<uint>();
 	public uint CompositeID => _loadedComposite == null ? 0 : _loadedComposite.shortGUID.AsUInt32;
 	public string CompositeIDString => _loadedComposite == null || _loadedComposite.shortGUID == ShortGuid.Invalid ? "" : _loadedComposite.shortGUID.ToByteString();
 	public int ModelReferenceMeshCount => _modelReferenceMeshes.Count;
@@ -320,6 +326,25 @@ public partial class AlienScene : Node3D
 		return entity != null && GodotObject.IsInstanceValid(entity);
 	}
 
+	/// <summary>The whole selection, primary first, with the entity id each node stands for.</summary>
+	public int GetSelectedEntities(List<Node3D> nodes, List<uint> entityIds)
+	{
+		nodes?.Clear();
+		entityIds?.Clear();
+
+		for (int i = 0; i < _selectedEntities.Count; i++)
+		{
+			Node3D node = _selectedEntities[i];
+			if (node == null || !GodotObject.IsInstanceValid(node))
+				continue;
+
+			nodes?.Add(node);
+			entityIds?.Add(i < _selectedEntityIds.Count ? _selectedEntityIds[i] : 0);
+		}
+
+		return nodes?.Count ?? entityIds?.Count ?? 0;
+	}
+
 	public bool SupportsTransformGizmo(Node3D selectedNode)
 	{
 		if (selectedNode == null || !GodotObject.IsInstanceValid(selectedNode) || _parentNode == null)
@@ -390,6 +415,8 @@ public partial class AlienScene : Node3D
 	private void ClearSelectedEntity()
 	{
 		_selectedEntity = null;
+		_selectedEntities.Clear();
+		_selectedEntityIds.Clear();
 		LevelViewerSelection.Clear();
 		LevelViewerLightRadius.Clear();
 		RefreshAliasHighlights(forceRebuild: false);
@@ -1966,6 +1993,17 @@ public partial class AlienScene : Node3D
 
 	public void SelectEntity(List<uint> entityPath, List<uint> compositePath, bool entitySelected, SelectionOrigin origin = SelectionOrigin.Remote)
 	{
+		SelectEntity(entityPath, compositePath, entitySelected, null, origin);
+	}
+
+	/// <summary>
+	/// <paramref name="selectionEntityIds"/> is the whole selection when more than one entity is
+	/// selected: ids in the composite the path ends at, the primary first. They share the path, so
+	/// each resolves as that path with its own id on the end. Null or one id is a plain selection.
+	/// </summary>
+	public void SelectEntity(List<uint> entityPath, List<uint> compositePath, bool entitySelected,
+		List<uint> selectionEntityIds, SelectionOrigin origin = SelectionOrigin.Remote)
+	{
 		if (!entitySelected || entityPath == null || entityPath.Count == 0)
 		{
 			if (_selectedEntity == null)
@@ -1978,16 +2016,29 @@ public partial class AlienScene : Node3D
 		try
 		{
 			Node3D entityNode = TryResolveSelectionNode(entityPath, compositePath);
-			if (entityNode == _selectedEntity && entityNode != null)
+			List<Node3D> selectionNodes = ResolveSelectionNodes(
+				entityNode, entityPath, compositePath, selectionEntityIds, out List<uint> selectionIds);
+
+			if (entityNode == _selectedEntity && entityNode != null && SelectionNodesUnchanged(selectionNodes))
 			{
 				RefreshSelectedLightRadiusVisual();
 				return;
 			}
 
 			_selectedEntity = entityNode;
+			_selectedEntities.Clear();
+			_selectedEntities.AddRange(selectionNodes);
+			_selectedEntityIds.Clear();
+			_selectedEntityIds.AddRange(selectionIds);
+
+			for (int i = 0; i < selectionNodes.Count; i++)
+			{
+				LevelViewerProxyHighlight.ReleaseNode(selectionNodes[i]);
+				LevelViewerAliasHighlight.ReleaseNode(selectionNodes[i]);
+			}
 			LevelViewerProxyHighlight.ReleaseNode(entityNode);
 			LevelViewerAliasHighlight.ReleaseNode(entityNode);
-			LevelViewerSelection.Apply(entityNode);
+			LevelViewerSelection.Apply(selectionNodes);
 
 			try
 			{
@@ -2098,6 +2149,61 @@ public partial class AlienScene : Node3D
 			LevelViewerView.FrameAll(ParentNode ?? target, camera, focusEditor: true);
 		else
 			LevelViewerView.FrameRuntimeCamera(ParentNode ?? target, camera);
+	}
+
+	/* The primary node plus one per other selected id, in selection order. Ids that resolve to
+	   nothing (an entity with no visual, or one that isn't in the scene) are dropped: they stay
+	   selected in OpenCAGE, there is just nothing here to mark or move. */
+	private List<Node3D> ResolveSelectionNodes(
+		Node3D primaryNode,
+		List<uint> entityPath,
+		List<uint> compositePath,
+		List<uint> selectionEntityIds,
+		out List<uint> resolvedIds)
+	{
+		List<Node3D> nodes = new List<Node3D>();
+		resolvedIds = new List<uint>();
+
+		uint primaryId = entityPath[entityPath.Count - 1];
+		if (primaryNode != null && GodotObject.IsInstanceValid(primaryNode))
+		{
+			nodes.Add(primaryNode);
+			resolvedIds.Add(primaryId);
+		}
+
+		if (selectionEntityIds == null || selectionEntityIds.Count < 2)
+			return nodes;
+
+		List<uint> path = new List<uint>(entityPath);
+		int last = path.Count - 1;
+		for (int i = 0; i < selectionEntityIds.Count; i++)
+		{
+			uint entityId = selectionEntityIds[i];
+			if (entityId == 0 || entityId == primaryId || resolvedIds.Contains(entityId))
+				continue;
+
+			path[last] = entityId;
+			Node3D node = TryResolveSelectionNode(path, compositePath);
+			if (node == null || !GodotObject.IsInstanceValid(node) || nodes.Contains(node))
+				continue;
+
+			nodes.Add(node);
+			resolvedIds.Add(entityId);
+		}
+
+		return nodes;
+	}
+
+	private bool SelectionNodesUnchanged(List<Node3D> selectionNodes)
+	{
+		if (selectionNodes.Count != _selectedEntities.Count)
+			return false;
+
+		for (int i = 0; i < selectionNodes.Count; i++)
+			if (selectionNodes[i] != _selectedEntities[i])
+				return false;
+
+		return true;
 	}
 
 	private Node3D TryResolveSelectionNode(List<uint> entityPath, List<uint> compositePath)

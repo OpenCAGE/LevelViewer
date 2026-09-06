@@ -625,7 +625,15 @@ public partial class LevelViewerCamera : Camera3D
                     GetViewport().SetInputAsHandled();
                     break;
                 }
-                TryPickSelect(mouseButton.Position);
+                /* Ctrl adds what you click to the selection; shift takes it back out again. Neither
+                   drills, so what they pick is always something in the composite on screen. */
+                TryPickSelect(
+                    mouseButton.Position,
+                    mouseButton.CtrlPressed
+                        ? CommandsEditorConnection.SelectionChange.Add
+                        : mouseButton.ShiftPressed
+                            ? CommandsEditorConnection.SelectionChange.Toggle
+                            : CommandsEditorConnection.SelectionChange.Replace);
                 GetViewport().SetInputAsHandled();
                 break;
             case MouseButton.Right:
@@ -659,7 +667,8 @@ public partial class LevelViewerCamera : Camera3D
         }
     }
 
-    private void TryPickSelect(Vector2 screenPosition)
+    private void TryPickSelect(Vector2 screenPosition,
+        CommandsEditorConnection.SelectionChange change = CommandsEditorConnection.SelectionChange.Replace)
     {
         // Gizmo handles always win over scene geometry at the same screen pixel.
         LevelViewerTransformGizmo gizmo = GetGizmo();
@@ -669,7 +678,7 @@ public partial class LevelViewerCamera : Camera3D
         if (_commandsEditorConnection == null || !GodotObject.IsInstanceValid(_commandsEditorConnection))
             _commandsEditorConnection = GetNodeOrNull<CommandsEditorConnection>(CommandsEditorConnectionPath);
 
-        _commandsEditorConnection?.TryPickSelectAtScreen(this, screenPosition);
+        _commandsEditorConnection?.TryPickSelectAtScreen(this, screenPosition, change);
     }
 
     private void TryPickDrillIntoComposite(Vector2 screenPosition)

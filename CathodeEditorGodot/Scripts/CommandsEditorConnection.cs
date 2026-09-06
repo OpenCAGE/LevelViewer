@@ -35,6 +35,15 @@ public partial class CommandsEditorConnection : Node3D
     private uint _currentComposite;
     private uint _currentEntity;
 
+    /* Everything selected in _currentComposite, _currentEntity first, when several entities are
+       selected at once; empty for an ordinary one-entity selection. Ids only: they all share the
+       selected entity's path, so each is that path with its own id on the end. */
+    private List<uint> _selectionEntities = new List<uint>();
+
+    /* Entity ids behind the gizmo's targets, in the gizmo's own order, so a drag knows which entity
+       each moved node belongs to. */
+    private List<uint> _gizmoTargetEntityIds = new List<uint>();
+
     private uint _currentEntityGOID = 0;
 
     private bool _didLoadLevel = true;
@@ -127,10 +136,11 @@ public partial class CommandsEditorConnection : Node3D
     private uint[] _progressiveDeepSelectInstancePath = System.Array.Empty<uint>();
     private List<uint> _progressiveDeepSelectEntityIds;
     private List<uint> _progressiveDeepSelectCompositeIds;
-    private uint _ephemeralDeepSelectAliasCompositeId;
-    private uint _ephemeralDeepSelectAliasEntityId;
-    private uint _pendingEphemeralDeepSelectReleaseCompositeId;
-    private uint _pendingEphemeralDeepSelectReleaseEntityId;
+    /* Aliases a deep-select pick made and nothing has used yet. Ctrl-clicking several nested entities
+       makes one each, so these are sets: an alias is let go when it leaves the selection, not when
+       the selection merely moves on to another one. */
+    private readonly List<(uint Composite, uint Entity)> _ephemeralDeepSelectAliases = new List<(uint, uint)>();
+    private readonly List<(uint Composite, uint Entity)> _pendingEphemeralDeepSelectReleases = new List<(uint, uint)>();
 
     public bool IsWebSocketConnected => _client != null && _client.State == WebSocketState.Open;
 
@@ -326,16 +336,28 @@ public partial class CommandsEditorConnection : Node3D
         }
 
         Camera3D activeCamera = camera ?? FindCamera();
-        if (_scene != null
-            && _scene.TryGetSelectedEntity(out Node3D selected)
-            && _scene.SupportsTransformGizmo(selected))
+        List<Node3D> targets = new List<Node3D>();
+        List<uint> targetEntityIds = new List<uint>();
+        if (_scene != null)
         {
-            _transformGizmo.SetTarget(selected, activeCamera);
+            _scene.GetSelectedEntities(targets, targetEntityIds);
+
+            //Only what can actually be moved; the first survivor anchors the gizmo
+            for (int i = targets.Count - 1; i >= 0; i--)
+            {
+                if (_scene.SupportsTransformGizmo(targets[i]))
+                    continue;
+
+                targets.RemoveAt(i);
+                targetEntityIds.RemoveAt(i);
+            }
         }
+
+        _gizmoTargetEntityIds = targetEntityIds;
+        if (targets.Count > 0)
+            _transformGizmo.SetTargets(targets, activeCamera);
         else
-        {
             _transformGizmo.ClearTarget();
-        }
     }
 
     public override void _ExitTree()
@@ -778,6 +800,10 @@ public partial class CommandsEditorConnection : Node3D
             _currentComposite = _compositeLoaded ? _pathComposites[_pathComposites.Count - 1] : 0;
             _currentEntity = _entitySelected ? _pathEntities[_pathEntities.Count - 1] : 0;
 
+            List<uint> previousSelectionEntities = _selectionEntities;
+            _selectionEntities = NormalizeSelectionEntities(
+                packet.selection_entities, _currentEntity, _entitySelected);
+
             _showCameraPosition = packet.show_camera_position;
             bool hideNestedChanged = ApplyViewerSettings(packet);
             ApplyActiveComposite(packet);
@@ -791,7 +817,8 @@ public partial class CommandsEditorConnection : Node3D
             bool navigationChanged = activeCompositeChanged || instancePathChanged;
             bool selectionChanged = previousEntitySelected != _entitySelected
                 || previousEntity != _currentEntity
-                || compositePathChanged;
+                || compositePathChanged
+                || !PathsEqual(previousSelectionEntities, _selectionEntities);
 
             if (navigationChanged)
             {
@@ -1750,9 +1777,10 @@ public partial class CommandsEditorConnection : Node3D
         AliasEntity alias,
         List<uint> pathEntities,
         List<uint> pathComposites,
-        bool entitySelected)
+        bool entitySelected,
+        List<uint> selectionEntities = null)
     {
-        Packet addPacket = BuildAliasEntityAddedPacket(ownerComposite, alias, pathEntities, pathComposites);
+        Packet addPacket = BuildAliasEntityAddedPacket(ownerComposite, alias, pathEntities, pathComposites, selectionEntities);
         _viewerOriginatedEntityAdds.Add(alias.shortGUID.AsUInt32);
         await SendMessageAsync(addPacket);
 
@@ -1762,7 +1790,8 @@ public partial class CommandsEditorConnection : Node3D
         TrySendPendingEphemeralDeepSelectAliasRelease(null, null, false);
     }
 
-    private static Packet BuildSelectionPacket(List<uint> pathEntities, List<uint> pathComposites, bool entitySelected)
+    private static Packet BuildSelectionPacket(List<uint> pathEntities, List<uint> pathComposites, bool entitySelected,
+        List<uint> selectionEntities = null)
     {
         Packet packet = new Packet(PacketEvent.ENTITY_SELECTED)
         {
@@ -1776,17 +1805,31 @@ public partial class CommandsEditorConnection : Node3D
         if (entitySelected && pathEntities != null && pathEntities.Count > 0)
             packet.entity = pathEntities[pathEntities.Count - 1];
 
+        if (selectionEntities != null && selectionEntities.Count > 1)
+            packet.selection_entities = new List<uint>(selectionEntities);
+
         return packet;
     }
 
-    public void TryPickSelectAtScreen(Camera3D camera, Vector2 screenPosition)
+    /// <summary>What a viewport click does to the selection that is already there.</summary>
+    public enum SelectionChange
+    {
+        Replace,
+        Add,    //ctrl-click: joins the selection, and becomes the one the gizmo and inspector follow
+        Toggle, //shift-click: leaves the selection if it is in it, joins it if it isn't
+    }
+
+    public void TryPickSelectAtScreen(Camera3D camera, Vector2 screenPosition,
+        SelectionChange change = SelectionChange.Replace)
     {
         if (_scene == null || camera == null || !_scene.Content.Loaded)
             return;
 
         if (!_scene.TryPickSelectionTarget(camera, screenPosition, out LevelViewerPick.SelectionTarget target, out _))
         {
-            TryClearEntitySelection();
+            //Ctrl- or shift-clicking nothing leaves the selection alone rather than dropping it
+            if (change == SelectionChange.Replace)
+                TryClearEntitySelection();
             return;
         }
 
@@ -1883,7 +1926,33 @@ public partial class CommandsEditorConnection : Node3D
             MarkCompositeFocusDirty();
         }
 
-        ApplyLocalSelection(pathEntities, pathComposites, entitySelected);
+        /* What the click did to the selection. A plain click replaces it; ctrl and shift fold the
+           entity just picked - a deep-select alias included, since that alias lives in the composite
+           on screen alongside everything else selected - into the selection that is already there. */
+        uint pickedEntityId = entitySelected && pathEntities.Count > 0 ? pathEntities[pathEntities.Count - 1] : 0;
+        List<uint> selectionEntities = null;
+        if (change != SelectionChange.Replace && pickedEntityId != 0)
+        {
+            /* Clicking the same thing again in progressive deep select goes a level deeper into it.
+               That is the same entity being selected further in, not another one, so it takes the
+               place of what it drilled from rather than joining it. */
+            bool wentDeeper = deepSelectDepth > 0;
+            if (!TryCombineWithCurrentSelection(pathEntities, pathComposites, change, wentDeeper, out selectionEntities))
+            {
+                //Shift-clicked the last selected entity: nothing is selected any more
+                TryClearEntitySelection();
+                return;
+            }
+
+            //Whatever leads the selection is what the path has to name
+            if (selectionEntities != null)
+            {
+                pathEntities = new List<uint>(pathEntities);
+                pathEntities[pathEntities.Count - 1] = selectionEntities[0];
+            }
+        }
+
+        ApplyLocalSelection(pathEntities, pathComposites, entitySelected, selectionEntities);
         ApplySelectionNowAndCleanupEphemeralAlias(pathEntities, pathComposites, entitySelected);
         UpdateEphemeralDeepSelectAliasTracking(pathEntities, pathComposites, entitySelected);
 
@@ -1891,7 +1960,7 @@ public partial class CommandsEditorConnection : Node3D
         if (createdNewAlias)
         {
             uint ownerCompositeId = pathComposites[pathComposites.Count - 1];
-            uint aliasEntityId = pathEntities[pathEntities.Count - 1];
+            uint aliasEntityId = pickedEntityId;
             LevelViewerPick.TryBuildAliasSelectionPath(
                 target,
                 ownerCompositeId,
@@ -1903,12 +1972,96 @@ public partial class CommandsEditorConnection : Node3D
             Composite ownerComposite = commands.GetComposite(new ShortGuid(ownerCompositeId));
             AliasEntity alias = ownerComposite?.GetEntityByID(new ShortGuid(aliasEntityId)) as AliasEntity;
             if (alias != null)
-                _ = SendNewAliasToEditorAsync(ownerComposite, alias, pathEntities, pathComposites, entitySelected);
+                _ = SendNewAliasToEditorAsync(ownerComposite, alias, pathEntities, pathComposites, entitySelected, selectionEntities);
 
             return;
         }
 
-        SendSelectionToEditorWithPendingEphemeralDelete(pathEntities, pathComposites, entitySelected);
+        SendSelectionToEditorWithPendingEphemeralDelete(pathEntities, pathComposites, entitySelected, selectionEntities);
+    }
+
+    /* Fold the entity a ctrl- or shift-click landed on into the selection already there. False when
+       nothing would be left selected. The selection that comes back leads with the entity the rest of
+       the viewer should follow - the one just clicked, or, if that one was clicked back out, whatever
+       is now first. A pick somewhere the current selection can't live (another composite, or a
+       different way in to this one) simply replaces it, as an ordinary click would. */
+    private bool TryCombineWithCurrentSelection(
+        List<uint> pathEntities,
+        List<uint> pathComposites,
+        SelectionChange change,
+        bool replacesLeader,
+        out List<uint> selectionEntities)
+    {
+        uint pickedEntityId = pathEntities[pathEntities.Count - 1];
+        selectionEntities = null;
+
+        List<uint> selection;
+        List<uint> currentPathEntities;
+        List<uint> currentPathComposites;
+        bool entitySelected;
+        uint currentEntity;
+        lock (_lock)
+        {
+            selection = new List<uint>(_selectionEntities);
+            currentPathEntities = _pathEntities;
+            currentPathComposites = _pathComposites;
+            entitySelected = _entitySelected;
+            currentEntity = _currentEntity;
+        }
+
+        if (!entitySelected || currentEntity == 0
+            || !SelectionPathsShareParent(currentPathEntities, currentPathComposites, pathEntities, pathComposites))
+        {
+            return true; //nothing to join: the pick stands on its own
+        }
+
+        if (selection.Count == 0)
+            selection.Add(currentEntity);
+
+        //A deeper look at the entity that is leading the selection stands in for it
+        if (replacesLeader && selection.Count > 0)
+            selection.RemoveAt(0);
+
+        if (!replacesLeader && change == SelectionChange.Toggle && selection.Contains(pickedEntityId))
+        {
+            selection.Remove(pickedEntityId);
+        }
+        else
+        {
+            //Whatever was clicked last leads the selection, so the gizmo and the inspector follow it
+            selection.Remove(pickedEntityId);
+            selection.Insert(0, pickedEntityId);
+        }
+
+        if (selection.Count == 0)
+            return false;
+
+        selectionEntities = selection;
+        return true;
+    }
+
+    /* Two selection paths can hold entities selected together when they name the same composite and
+       the same way in to it - only the entity on the end differs. */
+    private static bool SelectionPathsShareParent(
+        List<uint> currentPathEntities,
+        List<uint> currentPathComposites,
+        List<uint> pathEntities,
+        List<uint> pathComposites)
+    {
+        if (currentPathEntities == null || pathEntities == null
+            || currentPathComposites == null || pathComposites == null
+            || currentPathEntities.Count == 0 || pathEntities.Count == 0
+            || currentPathEntities.Count != pathEntities.Count
+            || !PathsEqual(currentPathComposites, pathComposites))
+        {
+            return false;
+        }
+
+        for (int i = 0; i < pathEntities.Count - 1; i++)
+            if (currentPathEntities[i] != pathEntities[i])
+                return false;
+
+        return true;
     }
 
     public void TryPickDrillIntoCompositeAtScreen(Camera3D camera, Vector2 screenPosition)
@@ -2184,7 +2337,8 @@ public partial class CommandsEditorConnection : Node3D
         ApplySelectionNowAndCleanupEphemeralAlias(pathEntities, pathComposites, entitySelected);
     }
 
-    private void ApplyLocalSelection(List<uint> pathEntities, List<uint> pathComposites, bool entitySelected)
+    private void ApplyLocalSelection(List<uint> pathEntities, List<uint> pathComposites, bool entitySelected,
+        List<uint> selectionEntities = null)
     {
         lock (_lock)
         {
@@ -2199,6 +2353,7 @@ public partial class CommandsEditorConnection : Node3D
             _currentEntity = _entitySelected && _pathEntities != null && _pathEntities.Count > 0
                 ? _pathEntities[_pathEntities.Count - 1]
                 : 0;
+            _selectionEntities = NormalizeSelectionEntities(selectionEntities, _currentEntity, _entitySelected);
             _forceSelectionApply = true;
             _pendingSelectionOrigin = AlienScene.SelectionOrigin.ViewportPick;
 
@@ -2301,6 +2456,7 @@ public partial class CommandsEditorConnection : Node3D
         bool entitySelected;
         List<uint> pathEntities;
         List<uint> pathComposites;
+        List<uint> selectionEntities;
         AlienScene.SelectionOrigin origin;
 
         lock (_lock)
@@ -2311,13 +2467,33 @@ public partial class CommandsEditorConnection : Node3D
             entitySelected = _entitySelected;
             pathEntities = _pathEntities;
             pathComposites = _pathComposites;
+            selectionEntities = _selectionEntities;
             origin = _pendingSelectionOrigin;
             _pendingSelectionOrigin = AlienScene.SelectionOrigin.Remote;
             _currentEntityGOID = _currentEntity;
             _forceSelectionApply = false;
         }
 
-        _scene.SelectEntity(pathEntities, pathComposites, entitySelected, origin);
+        _scene.SelectEntity(pathEntities, pathComposites, entitySelected, selectionEntities, origin);
+    }
+
+    /* A selection set as the rest of this side wants it: the selected entity first, no repeats, and
+       empty unless there is really more than one thing selected. */
+    private static List<uint> NormalizeSelectionEntities(List<uint> selectionEntities, uint primary, bool entitySelected)
+    {
+        List<uint> normalized = new List<uint>();
+        if (!entitySelected || primary == 0 || selectionEntities == null || selectionEntities.Count < 2)
+            return normalized;
+
+        normalized.Add(primary);
+        for (int i = 0; i < selectionEntities.Count; i++)
+        {
+            uint entityId = selectionEntities[i];
+            if (entityId != 0 && !normalized.Contains(entityId))
+                normalized.Add(entityId);
+        }
+
+        return normalized.Count > 1 ? normalized : new List<uint>();
     }
 
     private static bool PathsEqual(IReadOnlyList<uint> left, IReadOnlyList<uint> right)
@@ -2340,12 +2516,13 @@ public partial class CommandsEditorConnection : Node3D
         return true;
     }
 
-    private void SendSelectionToEditor(List<uint> pathEntities, List<uint> pathComposites, bool entitySelected)
+    private void SendSelectionToEditor(List<uint> pathEntities, List<uint> pathComposites, bool entitySelected,
+        List<uint> selectionEntities = null)
     {
         if (pathComposites == null || pathComposites.Count == 0)
             return;
 
-        Packet packet = BuildSelectionPacket(pathEntities, pathComposites, entitySelected);
+        Packet packet = BuildSelectionPacket(pathEntities, pathComposites, entitySelected, selectionEntities);
         if (entitySelected && pathEntities != null && pathEntities.Count > 0)
             TryFillEntityMetadata(packet);
 
@@ -2356,7 +2533,8 @@ public partial class CommandsEditorConnection : Node3D
     private void SendSelectionToEditorWithPendingEphemeralDelete(
         List<uint> pathEntities,
         List<uint> pathComposites,
-        bool entitySelected)
+        bool entitySelected,
+        List<uint> selectionEntities = null)
     {
         bool canBundleSelection = entitySelected
             && pathEntities != null
@@ -2364,76 +2542,87 @@ public partial class CommandsEditorConnection : Node3D
             && pathComposites != null
             && pathComposites.Count == pathEntities.Count;
 
-        if (_pendingEphemeralDeepSelectReleaseEntityId != 0)
+        if (_pendingEphemeralDeepSelectReleases.Count != 0)
         {
             SendPendingEphemeralDeepSelectAliasRelease(
                 pathEntities,
                 pathComposites,
-                canBundleSelection);
+                canBundleSelection,
+                selectionEntities);
 
             if (canBundleSelection)
                 return;
         }
 
-        SendSelectionToEditor(pathEntities, pathComposites, entitySelected);
+        SendSelectionToEditor(pathEntities, pathComposites, entitySelected, selectionEntities);
     }
 
     private void SendPendingEphemeralDeepSelectAliasRelease(
         List<uint> selectionPathEntities,
         List<uint> selectionPathComposites,
-        bool includeSelection)
+        bool includeSelection,
+        List<uint> selectionEntities = null)
     {
-        if (_pendingEphemeralDeepSelectReleaseEntityId == 0)
+        if (_pendingEphemeralDeepSelectReleases.Count == 0)
             return;
 
-        //The selection that replaced it rides along, so OpenCAGE applies the two in one step
-        Packet packet = new Packet(PacketEvent.ENTITY_ALIAS_RELEASED)
-        {
-            composite = _pendingEphemeralDeepSelectReleaseCompositeId,
-            entity = _pendingEphemeralDeepSelectReleaseEntityId,
-            entity_variant = EntityVariant.ALIAS,
-        };
-
-        /* Remembered so the ENTITY_DELETED that may answer is taken as just that. An alias OpenCAGE keeps
-         * never answers, and its id stays here until the level is reloaded; the one cost is that a later
-         * deletion of it from OpenCAGE's side would also be read as an answer, its path left unapplied until
-         * the packet after. */
-        lock (_lock)
-            _releasedEphemeralAliases.Add(packet.entity);
-
-        if (includeSelection
-            && selectionPathEntities != null
-            && selectionPathComposites != null
-            && selectionPathEntities.Count > 0
-            && selectionPathEntities.Count == selectionPathComposites.Count)
-        {
-            packet.path_entities = new List<uint>(selectionPathEntities);
-            packet.path_composites = new List<uint>(selectionPathComposites);
-        }
-
+        List<(uint Composite, uint Entity)> releases = new List<(uint, uint)>(_pendingEphemeralDeepSelectReleases);
         ClearPendingEphemeralDeepSelectRelease();
-        SendMessage(packet);
+
+        for (int i = 0; i < releases.Count; i++)
+        {
+            Packet packet = new Packet(PacketEvent.ENTITY_ALIAS_RELEASED)
+            {
+                composite = releases[i].Composite,
+                entity = releases[i].Entity,
+                entity_variant = EntityVariant.ALIAS,
+            };
+
+            /* Remembered so the ENTITY_DELETED that may answer is taken as just that. An alias OpenCAGE keeps
+             * never answers, and its id stays here until the level is reloaded; the one cost is that a later
+             * deletion of it from OpenCAGE's side would also be read as an answer, its path left unapplied until
+             * the packet after. */
+            lock (_lock)
+                _releasedEphemeralAliases.Add(packet.entity);
+
+            //The selection that replaced them rides along with the last, so OpenCAGE applies it in one step
+            if (includeSelection
+                && i == releases.Count - 1
+                && selectionPathEntities != null
+                && selectionPathComposites != null
+                && selectionPathEntities.Count > 0
+                && selectionPathEntities.Count == selectionPathComposites.Count)
+            {
+                packet.path_entities = new List<uint>(selectionPathEntities);
+                packet.path_composites = new List<uint>(selectionPathComposites);
+                if (selectionEntities != null && selectionEntities.Count > 1)
+                    packet.selection_entities = new List<uint>(selectionEntities);
+            }
+
+            SendMessage(packet);
+        }
     }
 
     private bool TrySendPendingEphemeralDeepSelectAliasRelease(
         List<uint> selectionPathEntities,
         List<uint> selectionPathComposites,
-        bool includeSelection)
+        bool includeSelection,
+        List<uint> selectionEntities = null)
     {
-        if (_pendingEphemeralDeepSelectReleaseEntityId == 0)
+        if (_pendingEphemeralDeepSelectReleases.Count == 0)
             return false;
 
         SendPendingEphemeralDeepSelectAliasRelease(
             selectionPathEntities,
             selectionPathComposites,
-            includeSelection);
+            includeSelection,
+            selectionEntities);
         return true;
     }
 
     private void ClearPendingEphemeralDeepSelectRelease()
     {
-        _pendingEphemeralDeepSelectReleaseCompositeId = 0;
-        _pendingEphemeralDeepSelectReleaseEntityId = 0;
+        _pendingEphemeralDeepSelectReleases.Clear();
     }
 
     private void RemoveDeletedEntity(Packet packet)
@@ -2494,20 +2683,38 @@ public partial class CommandsEditorConnection : Node3D
             + " | pos=" + (target?.Position.ToString() ?? "?"));
     }
 
-    private void OnGizmoTransformChanged(Vector3 godotPos, Vector3 godotRotDeg)
+    /* One of the gizmo's targets finished being dragged. <paramref name="targetIndex"/> is its place
+       in the selection, which names the entity: everything selected together shares the selected
+       entity's path, so each one's path is that path with its own id on the end. */
+    private void OnGizmoTransformChanged(int targetIndex, Vector3 godotPos, Vector3 godotRotDeg)
     {
         List<uint> pathEntities;
         List<uint> pathComposites;
         bool entitySelected;
+        List<uint> gizmoTargetEntityIds;
         lock (_lock)
         {
             pathEntities   = _pathEntities;
             pathComposites = _pathComposites;
             entitySelected = _entitySelected;
+            gizmoTargetEntityIds = _gizmoTargetEntityIds;
         }
 
         if (!entitySelected || pathEntities == null || pathEntities.Count == 0 || pathComposites == null || pathComposites.Count == 0)
             return;
+
+        uint movedEntityId = gizmoTargetEntityIds != null && targetIndex >= 0 && targetIndex < gizmoTargetEntityIds.Count
+            ? gizmoTargetEntityIds[targetIndex]
+            : 0;
+        if (movedEntityId != 0 && movedEntityId != pathEntities[pathEntities.Count - 1])
+        {
+            pathEntities = new List<uint>(pathEntities);
+            pathEntities[pathEntities.Count - 1] = movedEntityId;
+        }
+        else if (movedEntityId == 0 && targetIndex != 0)
+        {
+            return; //nothing to address it by
+        }
 
         ShortGuid compositeId = new ShortGuid(pathComposites[pathComposites.Count - 1]);
         ShortGuid entityId = new ShortGuid(pathEntities[pathEntities.Count - 1]);
@@ -2811,10 +3018,10 @@ public partial class CommandsEditorConnection : Node3D
         uint entityId = pathEntities[pathEntities.Count - 1];
         Composite composite = _scene.Content.Level.Commands.GetComposite(new ShortGuid(compositeId));
         Entity entity = composite?.GetEntityByID(new ShortGuid(entityId));
+        /* Only ever adds: aliases that are no longer selected have already been let go of by the
+           abandonment check, and the ones still selected have to stay tracked. */
         if (entity is AliasEntity alias && IsAliasParameterFree(alias))
             TrackEphemeralDeepSelectAlias(compositeId, entityId);
-        else
-            ClearEphemeralDeepSelectAliasTracking();
     }
 
     private static bool IsAliasParameterFree(AliasEntity alias)
@@ -2824,39 +3031,30 @@ public partial class CommandsEditorConnection : Node3D
 
     private void TrackEphemeralDeepSelectAlias(uint compositeId, uint aliasEntityId)
     {
-        _ephemeralDeepSelectAliasCompositeId = compositeId;
-        _ephemeralDeepSelectAliasEntityId = aliasEntityId;
+        if (aliasEntityId == 0 || _ephemeralDeepSelectAliases.Contains((compositeId, aliasEntityId)))
+            return;
+
+        _ephemeralDeepSelectAliases.Add((compositeId, aliasEntityId));
     }
 
     private void ClearEphemeralDeepSelectAliasTracking()
     {
-        _ephemeralDeepSelectAliasCompositeId = 0;
-        _ephemeralDeepSelectAliasEntityId = 0;
+        _ephemeralDeepSelectAliases.Clear();
     }
 
     private void ClearEphemeralDeepSelectAliasTrackingIfMatch(uint compositeId, uint entityId)
     {
-        if (entityId != 0
-            && entityId == _ephemeralDeepSelectAliasEntityId
-            && compositeId == _ephemeralDeepSelectAliasCompositeId)
-        {
-            ClearEphemeralDeepSelectAliasTracking();
-        }
+        _ephemeralDeepSelectAliases.Remove((compositeId, entityId));
     }
 
     private void CommitEphemeralDeepSelectAlias(uint compositeId, uint aliasEntityId)
     {
-        if (aliasEntityId != 0
-            && aliasEntityId == _ephemeralDeepSelectAliasEntityId
-            && compositeId == _ephemeralDeepSelectAliasCompositeId)
-        {
-            ClearEphemeralDeepSelectAliasTracking();
-        }
+        _ephemeralDeepSelectAliases.Remove((compositeId, aliasEntityId));
     }
 
     private void TryCommitEphemeralDeepSelectAliasAfterParameterSync(uint compositeId, uint entityId)
     {
-        if (entityId == 0 || entityId != _ephemeralDeepSelectAliasEntityId || compositeId != _ephemeralDeepSelectAliasCompositeId)
+        if (entityId == 0 || !_ephemeralDeepSelectAliases.Contains((compositeId, entityId)))
             return;
 
         if (_scene?.Content?.Level == null)
@@ -2872,42 +3070,55 @@ public partial class CommandsEditorConnection : Node3D
 
     private void TryReleaseEphemeralDeepSelectAliasIfAbandoned(uint newSelectedEntityId, uint newSelectedCompositeId)
     {
-        if (_ephemeralDeepSelectAliasEntityId == 0)
-            return;
-
-        if (newSelectedEntityId == _ephemeralDeepSelectAliasEntityId
-            && (newSelectedCompositeId == 0 || newSelectedCompositeId == _ephemeralDeepSelectAliasCompositeId))
+        for (int i = _ephemeralDeepSelectAliases.Count - 1; i >= 0; i--)
         {
-            return;
-        }
+            (uint compositeId, uint entityId) = _ephemeralDeepSelectAliases[i];
+            if (IsInCurrentSelection(compositeId, entityId, newSelectedEntityId, newSelectedCompositeId))
+                continue;
 
-        TryReleaseEphemeralDeepSelectAlias();
+            ReleaseEphemeralDeepSelectAliasAt(i);
+        }
+    }
+
+    /* An alias that is still one of the selected entities is not abandoned - ctrl-clicking a second
+       nested entity leaves the first one selected, so it has to stay. */
+    private bool IsInCurrentSelection(uint compositeId, uint entityId, uint newSelectedEntityId, uint newSelectedCompositeId)
+    {
+        if (entityId == newSelectedEntityId && (newSelectedCompositeId == 0 || newSelectedCompositeId == compositeId))
+            return true;
+
+        List<uint> selection = _selectionEntities;
+        return selection != null
+            && selection.Contains(entityId)
+            && (_currentComposite == 0 || _currentComposite == compositeId);
     }
 
     private void TryReleaseEphemeralDeepSelectAlias()
     {
-        if (_ephemeralDeepSelectAliasEntityId == 0 || _scene?.Content?.Level == null)
+        for (int i = _ephemeralDeepSelectAliases.Count - 1; i >= 0; i--)
+            ReleaseEphemeralDeepSelectAliasAt(i);
+    }
+
+    private void ReleaseEphemeralDeepSelectAliasAt(int index)
+    {
+        (uint compositeId, uint entityId) = _ephemeralDeepSelectAliases[index];
+        _ephemeralDeepSelectAliases.RemoveAt(index);
+
+        if (_scene?.Content?.Level == null)
             return;
 
-        uint compositeId = _ephemeralDeepSelectAliasCompositeId;
-        uint entityId = _ephemeralDeepSelectAliasEntityId;
         Composite composite = _scene.Content.Level.Commands.GetComposite(new ShortGuid(compositeId));
         AliasEntity alias = composite != null
             ? GetEntity(composite, new ShortGuid(entityId), EntityVariant.ALIAS) as AliasEntity
             : null;
 
         if (alias == null || !IsAliasParameterFree(alias))
-        {
-            ClearEphemeralDeepSelectAliasTracking();
             return;
-        }
 
         /* Not removed here. Whether the alias was used is OpenCAGE's to say - it may have been edited
          * there, or been given a flowgraph node, neither of which this side can see - so it is offered
          * back (ENTITY_ALIAS_RELEASED) and stays put until OpenCAGE's ENTITY_DELETED takes it away. */
-        _pendingEphemeralDeepSelectReleaseCompositeId = compositeId;
-        _pendingEphemeralDeepSelectReleaseEntityId = entityId;
-        ClearEphemeralDeepSelectAliasTracking();
+        _pendingEphemeralDeepSelectReleases.Add((compositeId, entityId));
     }
 
     private static bool EnsureAliasPositionParameter(AliasEntity alias, SyncedParameter sync)
@@ -2936,7 +3147,8 @@ public partial class CommandsEditorConnection : Node3D
         Composite ownerComposite,
         AliasEntity alias,
         List<uint> pathEntities,
-        List<uint> pathComposites)
+        List<uint> pathComposites,
+        List<uint> selectionEntities = null)
     {
         return new Packet(PacketEvent.ENTITY_ADDED)
         {
@@ -2946,6 +3158,10 @@ public partial class CommandsEditorConnection : Node3D
             entity_pointed = alias.alias.pathUint,
             path_entities = pathEntities ?? new List<uint>(),
             path_composites = pathComposites ?? new List<uint>(),
+            //Added as part of a multi-selection: OpenCAGE selects the whole set once it has the alias
+            selection_entities = selectionEntities != null && selectionEntities.Count > 1
+                ? new List<uint>(selectionEntities)
+                : new List<uint>(),
         };
     }
 

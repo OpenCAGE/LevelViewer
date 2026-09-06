@@ -216,7 +216,12 @@ public partial class LevelViewerCamera : Camera3D
                 }
                 else if (keyEvent.Keycode == Key.Escape)
                 {
-                    TryClearEntitySelection();
+                    // Escape leaves creation mode; with no mode to leave, it clears the selection.
+                    if (ExitCreateModeIfActive())
+                        _commandsEditorConnection?.SendViewportModeToEditor();
+                    else
+                        TryClearEntitySelection();
+
                     GetViewport().SetInputAsHandled();
                 }
                 else if (keyEvent.Keycode == Key.H)
@@ -1315,7 +1320,7 @@ public partial class LevelViewerCamera : Camera3D
             return;
 
         // Choosing a gizmo mode exits entity creation mode.
-        _commandsEditorConnection?.ExitCreateMode();
+        ExitCreateModeIfActive();
 
         gizmo.SetMode(mode);
 
@@ -1365,11 +1370,30 @@ public partial class LevelViewerCamera : Camera3D
 
     private void SetDeepSelectMode(PreviewVisibilitySettings.DeepSelectModeKind mode)
     {
-        if (PreviewVisibilitySettings.DeepSelectMode == mode)
-            return;
+        // Choosing a selection mode exits entity creation mode.
+        bool changed = ExitCreateModeIfActive();
 
-        _commandsEditorConnection?.ResetProgressiveDeepSelectPickState();
-        PreviewVisibilitySettings.DeepSelectMode = mode;
-        _commandsEditorConnection?.SendViewportModeToEditor();
+        if (PreviewVisibilitySettings.DeepSelectMode != mode)
+        {
+            _commandsEditorConnection?.ResetProgressiveDeepSelectPickState();
+            PreviewVisibilitySettings.DeepSelectMode = mode;
+            changed = true;
+        }
+
+        if (changed)
+            _commandsEditorConnection?.SendViewportModeToEditor();
+    }
+
+    /// <summary>Leave entity creation mode. False if it wasn't active, so callers can fall through.</summary>
+    private bool ExitCreateModeIfActive()
+    {
+        if (_commandsEditorConnection == null || !GodotObject.IsInstanceValid(_commandsEditorConnection))
+            _commandsEditorConnection = GetNodeOrNull<CommandsEditorConnection>(CommandsEditorConnectionPath);
+
+        if (_commandsEditorConnection == null || !_commandsEditorConnection.CreateModeActive)
+            return false;
+
+        _commandsEditorConnection.ExitCreateMode();
+        return true;
     }
 }

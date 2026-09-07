@@ -1349,27 +1349,36 @@ public partial class CommandsEditorConnection : Node3D
         ScheduleEmbeddedInputFocusRestore();
     }
 
-    /// <summary>Ctrl+C in the viewport: copy the selected entity to OpenCAGE's shared entity clipboard.</summary>
+    /// <summary>
+    /// Ctrl+C in the viewport: copy the selection to OpenCAGE's shared entity clipboard. The primary
+    /// entity travels as the packet's entity; a ctrl-click selection of several travels the way a
+    /// delete does, in selection_entities, so a paste brings all of them back rather than one.
+    /// </summary>
     public void SendEntityClipboardCopy()
     {
         uint compositeId;
         uint entityId;
         bool entitySelected;
+        List<uint> selection;
         lock (_lock)
         {
             compositeId = _currentComposite;
             entityId = _currentEntity;
             entitySelected = _entitySelected;
+            selection = new List<uint>(_selectionEntities);
         }
 
         if (!entitySelected || compositeId == 0 || entityId == 0)
             return;
 
-        SendMessage(new Packet(PacketEvent.ENTITY_CLIPBOARD_COPY)
+        Packet packet = new Packet(PacketEvent.ENTITY_CLIPBOARD_COPY)
         {
             composite = compositeId,
             entity = entityId,
-        });
+        };
+        if (selection.Count > 1)
+            packet.selection_entities = selection;
+        SendMessage(packet);
     }
 
     /// <summary>Ctrl+V in the viewport: ask OpenCAGE to paste its entity clipboard into the current composite.</summary>

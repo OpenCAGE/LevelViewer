@@ -1447,6 +1447,21 @@ public partial class CommandsEditorConnection : Node3D
     }
 
     /// <summary>
+    /// Ask OpenCAGE to undo. The stack is over there, and this window is a separate process, so with
+    /// the viewport focused its Ctrl+Z never reaches the editor's own chords (issue 667).
+    /// </summary>
+    public void SendUndoRequest()
+    {
+        SendMessage(new Packet(PacketEvent.UNDO_REQUEST));
+    }
+
+    /// <summary>Ask OpenCAGE to redo - Ctrl+Y, or Ctrl+Shift+Z.</summary>
+    public void SendRedoRequest()
+    {
+        SendMessage(new Packet(PacketEvent.REDO_REQUEST));
+    }
+
+    /// <summary>
     /// Creation-mode click: raycast the scene for a placement position and ask OpenCAGE to create
     /// an entity of the active function type there.
     /// </summary>

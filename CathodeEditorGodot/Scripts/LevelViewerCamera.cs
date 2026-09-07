@@ -3,7 +3,7 @@ using System;
 using System.Runtime.InteropServices;
 
 /// <summary>
-/// Free camera: WASD/QE move; RMB look; MMB pan; LMB select entity; Ctrl+MMB step into composite instance; - step back hierarchy; 0/8/9 set regular/deep/advanced deep select; 1-4 transform/rotate world/local, 5 none; H hide selected; Shift+H unhide all; scroll adjusts speed; Z frames selection.
+/// Free camera: WASD/QE move; RMB look; MMB pan; LMB select entity; Ctrl+MMB step into composite instance; - step back hierarchy; 0/8/9 set regular/deep/advanced deep select; 1-4 transform/rotate world/local, 5 none; H hide selected; Shift+H unhide all; scroll adjusts speed; Z frames selection; Ctrl+Z/Ctrl+Y undo/redo in OpenCAGE.
 /// MoveSpeed is world units per second (framerate-independent via delta).
 /// </summary>
 public partial class LevelViewerCamera : Camera3D
@@ -163,6 +163,27 @@ public partial class LevelViewerCamera : Camera3D
                 {
                     _commandsEditorConnection?.SendEntityClipboardPaste();
                     GetViewport().SetInputAsHandled();
+                }
+                /* Same chords, and the same Alt exclusion, as OpenCAGE.Undo.UndoKeys - a step undone from
+                   the viewport and one undone from a panel should take the same keys. */
+                else if (keyEvent.CtrlPressed && !keyEvent.AltPressed
+                    && keyEvent.Keycode == Key.Z && !keyEvent.ShiftPressed)
+                {
+                    _commandsEditorConnection?.SendUndoRequest();
+                    GetViewport().SetInputAsHandled();
+                }
+                else if (keyEvent.CtrlPressed && !keyEvent.AltPressed
+                    && (keyEvent.Keycode == Key.Y || (keyEvent.Keycode == Key.Z && keyEvent.ShiftPressed)))
+                {
+                    _commandsEditorConnection?.SendRedoRequest();
+                    GetViewport().SetInputAsHandled();
+                }
+                /* Everything below is a bare key, so a chord must not fall into it. Ctrl+Z used to land
+                   on Z and fly the camera at the selection instead of undoing (issue 667), and the same
+                   trap sits under Ctrl+Delete and the rest of them. */
+                else if (keyEvent.CtrlPressed || keyEvent.AltPressed || keyEvent.MetaPressed)
+                {
+                    break;
                 }
                 else if (keyEvent.Keycode == Key.Z)
                 {

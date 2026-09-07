@@ -68,6 +68,12 @@ namespace OpenCAGE.UnityConnection
         // rather than the viewer trying to keep up with it.
         // Appended, not inserted: these travel as numbers, so an existing event's value must not move.
         ZONES_CHANGED,
+
+        // Level Viewer -> OpenCAGE: Ctrl+Z / Ctrl+Y (or Ctrl+Shift+Z) pressed with the viewport focused.
+        // The undo stack lives on the OpenCAGE side and the viewport is a separate process, so its
+        // window never sees those keys through the WinForms chords - it has to ask.
+        UNDO_REQUEST,
+        REDO_REQUEST,
     }
 
     public class Packet
@@ -79,7 +85,7 @@ namespace OpenCAGE.UnityConnection
 
         //Packet metadata
         public PacketEvent packet_event;
-        public int version = 16;
+        public int version = 17;
 
         //Setup metadata
         public string level_name = "";

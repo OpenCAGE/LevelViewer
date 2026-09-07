@@ -40,6 +40,11 @@ public partial class CommandsEditorConnection : Node3D
        selected entity's path, so each is that path with its own id on the end. */
     private List<uint> _selectionEntities = new List<uint>();
 
+    /* Instance paths that ride along with the selection for marking only - a TriggerSequence's
+       members. Kept apart from _selectionEntities: those are what the gizmo moves and what Delete
+       deletes, and a sequence's members are neither. */
+    private List<List<uint>> _selectionEntityPaths = null;
+
     /* Entity ids behind the gizmo's targets, in the gizmo's own order, so a drag knows which entity
        each moved node belongs to. */
     private List<uint> _gizmoTargetEntityIds = new List<uint>();
@@ -454,7 +459,7 @@ public partial class CommandsEditorConnection : Node3D
 
         lock (_lock)
         {
-            if (_renderFiltersDirty || _compositeFocusDirty)
+            if (_renderFiltersDirty || _compositeFocusDirty || _zonesDirty)
                 return true;
         }
 
@@ -526,6 +531,16 @@ public partial class CommandsEditorConnection : Node3D
 
         if (sceneFiltersDirty && _scene != null && _scene.Content.Loaded)
             _scene.RefreshSceneGeometryFilters();
+
+        bool zonesDirty = false;
+        lock (_lock)
+        {
+            zonesDirty = _zonesDirty;
+            _zonesDirty = false;
+        }
+
+        if (zonesDirty && _scene != null && _scene.Content.Loaded)
+            _scene.RefreshZoneOverlay();
 
         int renderFiltersGeneration = -1;
         lock (_lock)
@@ -745,6 +760,19 @@ public partial class CommandsEditorConnection : Node3D
             return;
         }
 
+        if (packet.packet_event == PacketEvent.ZONES_CHANGED)
+        {
+            //Nothing but the table: it carries no path, so it must not disturb the selection
+            LevelViewerZoneHighlight.SetZones(packet.zones);
+            lock (_lock)
+            {
+                PreviewVisibilitySettings.ShowZones = packet.show_zones;
+                _zonesDirty = true;
+            }
+            WakePhysicsProcess();
+            return;
+        }
+
         if (packet.packet_event == PacketEvent.LEVEL_RESOURCES_MODIFIED)
         {
             _scene?.QueueResourceSync(packet);
@@ -804,6 +832,11 @@ public partial class CommandsEditorConnection : Node3D
             _selectionEntities = NormalizeSelectionEntities(
                 packet.selection_entities, _currentEntity, _entitySelected);
 
+            /* A TriggerSequence brings its members along to be marked with it. OpenCAGE resolves them
+               at the click, so the paths arrive with the selection and are simply taken as they come. */
+            List<List<uint>> previousSelectionPaths = _selectionEntityPaths;
+            _selectionEntityPaths = _entitySelected ? packet.selection_entity_paths : null;
+
             _showCameraPosition = packet.show_camera_position;
             bool hideNestedChanged = ApplyViewerSettings(packet);
             ApplyActiveComposite(packet);
@@ -818,7 +851,8 @@ public partial class CommandsEditorConnection : Node3D
             bool selectionChanged = previousEntitySelected != _entitySelected
                 || previousEntity != _currentEntity
                 || compositePathChanged
-                || !PathsEqual(previousSelectionEntities, _selectionEntities);
+                || !PathsEqual(previousSelectionEntities, _selectionEntities)
+                || !PathListsEqual(previousSelectionPaths, _selectionEntityPaths);
 
             if (navigationChanged)
             {
@@ -1209,6 +1243,17 @@ public partial class CommandsEditorConnection : Node3D
         PreviewVisibilitySettings.HighlightAliases = packet.highlight_aliases;
         PreviewVisibilitySettings.HighlightProxies = packet.highlight_proxies;
 
+        if (PreviewVisibilitySettings.ShowZones != packet.show_zones)
+        {
+            PreviewVisibilitySettings.ShowZones = packet.show_zones;
+
+            /* Only act on it here when it is going OFF, which is a straight clear. Switching it ON is
+               always followed by a ZONES_CHANGED carrying a freshly calculated table, and rebuilding
+               now would colour the level from whatever table was left over from last time. */
+            if (!packet.show_zones)
+                _zonesDirty = true;
+        }
+
         LevelViewerTransformSnap.GridSize = packet.transform_grid_snap > 0f ? packet.transform_grid_snap : 0f;
         LevelViewerTransformSnap.RotationDegrees = packet.rotation_snap_degrees > 0f ? packet.rotation_snap_degrees : 0f;
 
@@ -1532,6 +1577,7 @@ public partial class CommandsEditorConnection : Node3D
     }
 
     private bool _sceneFiltersDirty = false;
+    private bool _zonesDirty = false;
     private bool _stateInfoDirty = false;
     private int _pendingNavMeshState = -1;
     private int _pendingCoverState = -1;
@@ -2397,6 +2443,9 @@ public partial class CommandsEditorConnection : Node3D
                 ? _pathEntities[_pathEntities.Count - 1]
                 : 0;
             _selectionEntities = NormalizeSelectionEntities(selectionEntities, _currentEntity, _entitySelected);
+            /* A pick made here knows nothing about what a TriggerSequence points at - only OpenCAGE
+               resolves that. The echo of this selection comes back carrying the members. */
+            _selectionEntityPaths = null;
             _forceSelectionApply = true;
             _pendingSelectionOrigin = AlienScene.SelectionOrigin.ViewportPick;
 
@@ -2500,6 +2549,7 @@ public partial class CommandsEditorConnection : Node3D
         List<uint> pathEntities;
         List<uint> pathComposites;
         List<uint> selectionEntities;
+        List<List<uint>> selectionEntityPaths;
         AlienScene.SelectionOrigin origin;
 
         lock (_lock)
@@ -2511,13 +2561,14 @@ public partial class CommandsEditorConnection : Node3D
             pathEntities = _pathEntities;
             pathComposites = _pathComposites;
             selectionEntities = _selectionEntities;
+            selectionEntityPaths = _selectionEntityPaths;
             origin = _pendingSelectionOrigin;
             _pendingSelectionOrigin = AlienScene.SelectionOrigin.Remote;
             _currentEntityGOID = _currentEntity;
             _forceSelectionApply = false;
         }
 
-        _scene.SelectEntity(pathEntities, pathComposites, entitySelected, selectionEntities, origin);
+        _scene.SelectEntity(pathEntities, pathComposites, entitySelected, selectionEntities, origin, selectionEntityPaths);
     }
 
     /* A selection set as the rest of this side wants it: the selected entity first, no repeats, and
@@ -2537,6 +2588,25 @@ public partial class CommandsEditorConnection : Node3D
         }
 
         return normalized.Count > 1 ? normalized : new List<uint>();
+    }
+
+    private static bool PathListsEqual(List<List<uint>> left, List<List<uint>> right)
+    {
+        if (ReferenceEquals(left, right))
+            return true;
+
+        int leftCount = left?.Count ?? 0;
+        int rightCount = right?.Count ?? 0;
+        if (leftCount != rightCount)
+            return false;
+
+        for (int i = 0; i < leftCount; i++)
+        {
+            if (!PathsEqual(left[i], right[i]))
+                return false;
+        }
+
+        return true;
     }
 
     private static bool PathsEqual(IReadOnlyList<uint> left, IReadOnlyList<uint> right)

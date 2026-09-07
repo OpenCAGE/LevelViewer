@@ -61,6 +61,13 @@ namespace OpenCAGE.UnityConnection
         // regenerates all of it. This side reads those files itself, so it re-reads them rather than
         // being sent them, and redraws whichever state overlay is showing.
         LEVEL_STATE_RESOURCES_MODIFIED,
+
+        // OpenCAGE -> Level Viewer: the zone table, recalculated from the live level. Zone membership
+        // is decided entirely by links (a Zone's 'composites' pin -> TriggerSequences -> their entries),
+        // and links are not part of the entity sync, so this side works it out and sends the answer
+        // rather than the viewer trying to keep up with it.
+        // Appended, not inserted: these travel as numbers, so an existing event's value must not move.
+        ZONES_CHANGED,
     }
 
     public class Packet
@@ -72,7 +79,7 @@ namespace OpenCAGE.UnityConnection
 
         //Packet metadata
         public PacketEvent packet_event;
-        public int version = 15;
+        public int version = 16;
 
         //Setup metadata
         public string level_name = "";
@@ -150,6 +157,8 @@ namespace OpenCAGE.UnityConnection
         // State info overlays: index into Level.StateResources, or -1 for off.
         public int show_navmesh_state = -1;
         public int show_cover_state = -1;
+        // Tint the level's geometry by the zone each part of it belongs to ('Show Zones' on the toolbar).
+        public bool show_zones = false;
 
         // How the viewer marks the selected entity (LevelViewerHighlightMode).
         public int selection_highlight_mode = 0;
@@ -159,5 +168,15 @@ namespace OpenCAGE.UnityConnection
         public bool log_is_error = false;
 
         public SyncedMaterialMappingSet material_mapping = null;
+
+        // The level's zones and what each one covers (ZONES_CHANGED). Null on every other packet - it
+        // is only ever sent when it has been recalculated, never as part of the generic metadata.
+        public List<SyncedZone> zones = null;
+
+        // Instance paths, from the level root, of entities that ride along with the selection for
+        // highlighting only: a TriggerSequence's members. Paths rather than ids because a member can
+        // live any number of composites down from the one the sequence is in, so an id on its own
+        // would not say which instance of it is meant.
+        public List<List<uint>> selection_entity_paths = null;
     }
 }

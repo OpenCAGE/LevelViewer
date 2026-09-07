@@ -108,6 +108,85 @@ public static class AlienSceneMaterials
 		return material;
 	}
 
+	private static readonly Dictionary<long, ShaderMaterial> _zoneTintMaterials = new Dictionary<long, ShaderMaterial>();
+	private static readonly HashSet<Material> _zoneTintMaterialSet = new HashSet<Material>();
+	private static Shader _zoneTintShader;
+	private static Shader _zoneTintShaderDoubleSided;
+
+	/// <summary>
+	/// The flat zone colour a mesh is drawn in while Show Zones is on, shared by every mesh of that
+	/// zone. Replaces the mesh's material outright: the textures are not wanted here, and drawing the
+	/// tint as an overlay instead costs a second draw call on every mesh in the level.
+	/// </summary>
+	/// <remarks>
+	/// One material per colour and cull mode, never per mesh. A level names a few hundred zones, so
+	/// this stays a few hundred materials however much geometry they cover - and per-mesh materials on
+	/// a scene this size is what exhausted the RenderingServer's RID pool once already.
+	/// </remarks>
+	public static Material GetZoneTintMaterial(Color colour, bool doubleSided)
+	{
+		long key = ((long)colour.ToRgba32() << 1) | (doubleSided ? 1L : 0L);
+		if (_zoneTintMaterials.TryGetValue(key, out ShaderMaterial cached) && GodotObject.IsInstanceValid(cached))
+			return cached;
+
+		Shader shader = GetZoneTintShader(doubleSided);
+		if (shader == null)
+			return null;
+
+		ShaderMaterial material = new ShaderMaterial
+		{
+			ResourceName = "zone tint",
+			Shader = shader,
+		};
+		material.SetShaderParameter("zone_colour", colour);
+
+		_zoneTintMaterials[key] = material;
+		_zoneTintMaterialSet.Add(material);
+		return material;
+	}
+
+	/// <summary>Whether this is one of ours, so a restore can tell it apart from a later override.</summary>
+	public static bool IsZoneTintMaterial(Material material)
+	{
+		return material != null && _zoneTintMaterialSet.Contains(material);
+	}
+
+	private static Shader GetZoneTintShader(bool doubleSided)
+	{
+		if (doubleSided)
+		{
+			if (_zoneTintShaderDoubleSided == null)
+				_zoneTintShaderDoubleSided = GD.Load<Shader>("res://shaders/zone_tint_double_sided.gdshader");
+			if (_zoneTintShaderDoubleSided == null)
+				ViewerLog.PrintErr("[Zones] Missing zone_tint_double_sided.gdshader - the project needs exporting again.");
+			return _zoneTintShaderDoubleSided;
+		}
+
+		if (_zoneTintShader == null)
+			_zoneTintShader = GD.Load<Shader>("res://shaders/zone_tint.gdshader");
+		if (_zoneTintShader == null)
+			ViewerLog.PrintErr("[Zones] Missing zone_tint.gdshader - the project needs exporting again.");
+		return _zoneTintShader;
+	}
+
+	/// <summary>
+	/// True when a material draws both faces. Anything replacing it has to do the same, or a
+	/// single-sided sheet the level draws from both sides turns into a hole.
+	/// </summary>
+	public static bool IsDoubleSidedMaterial(Material material)
+	{
+		if (material is StandardMaterial3D standard)
+			return standard.CullMode == BaseMaterial3D.CullModeEnum.Disabled;
+
+		if (material is ShaderMaterial shaderMaterial && shaderMaterial.Shader != null)
+		{
+			string path = shaderMaterial.Shader.ResourcePath;
+			return !string.IsNullOrEmpty(path) && path.Contains("double_sided");
+		}
+
+		return false;
+	}
+
 	/// <summary>
 	/// True when a material only draws back faces (the occlusion filter). Picking and highlight
 	/// overlays have to honour this, or they act on a near surface that was never drawn.

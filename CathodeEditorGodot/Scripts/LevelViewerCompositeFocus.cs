@@ -205,6 +205,17 @@ public static class LevelViewerCompositeFocus
 			return;
 		}
 
+		/* Show Zones stands the grey-out down. Both work by replacing MaterialOverride across the whole
+		   level, and the dimmed material is a flat grey whatever it replaces - so dimming zone-coloured
+		   geometry loses the colour entirely, and the two of them saving and restoring each other's
+		   materials is how a mesh ends up stuck in a colour after the overlay is switched off. One
+		   owner at a time; AlienScene.RefreshZoneOverlay brings the dimming back when zones go off. */
+		if (PreviewVisibilitySettings.ShowZones)
+		{
+			Clear();
+			return;
+		}
+
 		PruneInvalidMeshState();
 
 		_scopeNodeEntities = nodeEntities ?? _scopeNodeEntities;

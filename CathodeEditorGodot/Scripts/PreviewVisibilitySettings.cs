@@ -12,6 +12,9 @@ public static class PreviewVisibilitySettings
 
     public static bool HighlightProxies { get; set; } = true;
 
+    /// <summary>Tint the level's geometry by the zone it belongs to ('Show Zones' on the toolbar).</summary>
+    public static bool ShowZones { get; set; }
+
     /// <summary>How the selected entity is marked. Owned by OpenCAGE, arrives on the settings packet.</summary>
     public static OpenCAGE.UnityConnection.LevelViewerHighlightMode SelectionHighlightMode { get; set; }
         = OpenCAGE.UnityConnection.LevelViewerHighlightMode.Green;

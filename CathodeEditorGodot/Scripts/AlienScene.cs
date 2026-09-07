@@ -48,6 +48,10 @@ public partial class AlienScene : Node3D
 	   _selectedEntityIds runs in step with it, so the gizmo can name the entity behind each node. */
 	private readonly List<Node3D> _selectedEntities = new List<Node3D>();
 	private readonly List<uint> _selectedEntityIds = new List<uint>();
+
+	/* Drawn as the selection but not part of it (a selected TriggerSequence's members): the selection
+	   itself first, then them. Empty unless something actually brought members along. */
+	private readonly List<Node3D> _markedWithSelection = new List<Node3D>();
 	public uint CompositeID => _loadedComposite == null ? 0 : _loadedComposite.shortGUID.AsUInt32;
 	public string CompositeIDString => _loadedComposite == null || _loadedComposite.shortGUID == ShortGuid.Invalid ? "" : _loadedComposite.shortGUID.ToByteString();
 	public int ModelReferenceMeshCount => _modelReferenceMeshes.Count;
@@ -210,6 +214,13 @@ public partial class AlienScene : Node3D
 		AdvanceLoadPipeline();
 		AdvanceLargeSceneRenderPolicyBatch();
 		AdvanceResourceSync();
+
+		if (_zoneRebuildPending)
+		{
+			_zoneRebuildPending = false;
+			RefreshZoneOverlay();
+		}
+
 		UpdateLoadPipelineProcessing();
 	}
 
@@ -217,9 +228,30 @@ public partial class AlienScene : Node3D
 	{
 		bool needsProcess = _loadStep != LoadPipelineStep.None
 			|| _largeScenePolicyRunning
-			|| IsResourceSyncBusy;
+			|| IsResourceSyncBusy
+			|| _zoneRebuildPending;
 		if (IsProcessing() != needsProcess)
 			SetProcess(needsProcess);
+	}
+
+	private bool _zoneRebuildPending;
+
+	/// <summary>
+	/// Bring the zone colouring up to date on the next frame rather than now.
+	/// </summary>
+	/// <remarks>
+	/// Two reasons to wait. A burst of changes - pasting fifty entities, a resource sync respawning
+	/// thousands of model references - becomes one rebuild instead of one each. And a respawn frees
+	/// the old meshes with QueueFree, which does not take effect until the frame ends, so next frame
+	/// is when the scene actually reads the way the rebuild wants it to.
+	/// </remarks>
+	public void RefreshZoneOverlayDeferred()
+	{
+		if (_zoneRebuildPending)
+			return;
+
+		_zoneRebuildPending = true;
+		UpdateLoadPipelineProcessing();
 	}
 
 	public void RegisterParameterVisualHandler(DataType dataType, ParameterVisualHandler handler)
@@ -417,10 +449,12 @@ public partial class AlienScene : Node3D
 		_selectedEntity = null;
 		_selectedEntities.Clear();
 		_selectedEntityIds.Clear();
+		_markedWithSelection.Clear();
 		LevelViewerSelection.Clear();
 		LevelViewerLightRadius.Clear();
 		RefreshAliasHighlights(forceRebuild: false);
 		RefreshProxyHighlights(forceRebuild: false);
+		LevelViewerZoneHighlight.SyncWithSelection();
 		OnSelectionChanged?.Invoke(null, SelectionOrigin.Remote);
 	}
 
@@ -570,6 +604,8 @@ public partial class AlienScene : Node3D
 		LevelViewerPick.ClearRegistry();
 		LevelViewerCompositeFocus.Clear();
 		LevelViewerEntityHide.ClearAll();
+		//A different level's zones say nothing about this one, so the table goes with the nodes
+		LevelViewerZoneHighlight.Reset();
 
 		if (_parentNode != null && GodotObject.IsInstanceValid(_parentNode))
 			_parentNode.QueueFree();
@@ -791,6 +827,8 @@ public partial class AlienScene : Node3D
 		//before the meshes exist, so it has to be reapplied once they do.
 		RefreshSceneGeometryFilters();
 		RefreshCompositeFocus();
+		//The zone table is normally here well before the nodes its roots name are
+		RefreshZoneOverlay();
 
 		OnLoaded?.Invoke();
 		ViewerPopulateBridge.NotifyFinished();
@@ -826,6 +864,8 @@ public partial class AlienScene : Node3D
 		PreviewVisualUtility.CleanupAllFunctionEntityPreviews(this);
 		ClearSelectedEntity();
 		LevelViewerSelection.Clear();
+		//The tint is held per mesh, and every mesh it points at is about to be freed
+		LevelViewerZoneHighlight.Clear();
 		LevelViewerPick.ClearRegistry();
 		LevelViewerCompositeFocus.Clear();
 		CancelLargeSceneRenderPolicy();
@@ -1955,6 +1995,40 @@ public partial class AlienScene : Node3D
 	{
 		RefreshProxyHighlights(forceRebuild);
 		RefreshAliasHighlights(forceRebuild);
+
+		/* Zones ride the same signal. Everything that raises this has changed which meshes exist -
+		   an entity added or removed, or a resource sync respawning every model reference that showed
+		   an edited material - and a mesh that has just been rebuilt is drawn in its own material
+		   again, not its zone's. The rebuild reconciles, so the meshes that did not change cost
+		   nothing. */
+		RefreshZoneOverlayDeferred();
+	}
+
+	/// <summary>Bring the zone colouring up to date, or take it off. Cheap when nothing has changed.</summary>
+	public void RefreshZoneOverlay()
+	{
+		//Half a scene is not worth colouring; CompletePopulate calls this again once it is all there
+		if (_isBulkPopulating)
+			return;
+
+		if (!_content.Loaded || !PreviewVisibilitySettings.ShowZones)
+		{
+			//The grey-out stood down while zones had the level; it can have it back now they are off
+			bool wasColoured = LevelViewerZoneHighlight.HasAny;
+			LevelViewerZoneHighlight.Clear();
+			if (wasColoured)
+				RefreshCompositeFocus();
+			LevelViewerSelection.ReapplyIfSelectionActive();
+			return;
+		}
+
+		/* Hand the level over before colouring it: with zones on this is the cheap path through
+		   LevelViewerCompositeFocus.Refresh, which gives every dimmed mesh its own material back so
+		   what gets saved underneath the zone colour is that and not a flat grey. */
+		RefreshCompositeFocus();
+
+		LevelViewerZoneHighlight.Rebuild(this);
+		LevelViewerSelection.ReapplyIfSelectionActive();
 	}
 
 	public void RefreshProxyHighlights(bool forceRebuild = true)
@@ -2013,7 +2087,8 @@ public partial class AlienScene : Node3D
 	/// each resolves as that path with its own id on the end. Null or one id is a plain selection.
 	/// </summary>
 	public void SelectEntity(List<uint> entityPath, List<uint> compositePath, bool entitySelected,
-		List<uint> selectionEntityIds, SelectionOrigin origin = SelectionOrigin.Remote)
+		List<uint> selectionEntityIds, SelectionOrigin origin = SelectionOrigin.Remote,
+		List<List<uint>> markedWithSelectionPaths = null)
 	{
 		if (!entitySelected || entityPath == null || entityPath.Count == 0)
 		{
@@ -2029,8 +2104,10 @@ public partial class AlienScene : Node3D
 			Node3D entityNode = TryResolveSelectionNode(entityPath, compositePath);
 			List<Node3D> selectionNodes = ResolveSelectionNodes(
 				entityNode, entityPath, compositePath, selectionEntityIds, out List<uint> selectionIds);
+			List<Node3D> markedNodes = ResolveMarkedWithSelectionNodes(selectionNodes, markedWithSelectionPaths);
 
-			if (entityNode == _selectedEntity && entityNode != null && SelectionNodesUnchanged(selectionNodes))
+			if (entityNode == _selectedEntity && entityNode != null && SelectionNodesUnchanged(selectionNodes)
+				&& MarkedNodesUnchanged(markedNodes))
 			{
 				RefreshSelectedLightRadiusVisual();
 				return;
@@ -2041,15 +2118,22 @@ public partial class AlienScene : Node3D
 			_selectedEntities.AddRange(selectionNodes);
 			_selectedEntityIds.Clear();
 			_selectedEntityIds.AddRange(selectionIds);
+			_markedWithSelection.Clear();
+			_markedWithSelection.AddRange(markedNodes);
 
-			for (int i = 0; i < selectionNodes.Count; i++)
+			/* Everything drawn as the selection - the selection itself and whatever is marked with it -
+			   gives back the overlay it is carrying, so selection green is what ends up on top. */
+			List<Node3D> highlightNodes = markedNodes.Count == 0 ? selectionNodes : markedNodes;
+			for (int i = 0; i < highlightNodes.Count; i++)
 			{
-				LevelViewerProxyHighlight.ReleaseNode(selectionNodes[i]);
-				LevelViewerAliasHighlight.ReleaseNode(selectionNodes[i]);
+				LevelViewerProxyHighlight.ReleaseNode(highlightNodes[i]);
+				LevelViewerAliasHighlight.ReleaseNode(highlightNodes[i]);
+				LevelViewerZoneHighlight.ReleaseNode(highlightNodes[i]);
 			}
 			LevelViewerProxyHighlight.ReleaseNode(entityNode);
 			LevelViewerAliasHighlight.ReleaseNode(entityNode);
-			LevelViewerSelection.Apply(selectionNodes);
+			LevelViewerZoneHighlight.ReleaseNode(entityNode);
+			LevelViewerSelection.Apply(highlightNodes);
 
 			try
 			{
@@ -2076,6 +2160,7 @@ public partial class AlienScene : Node3D
 				ViewerLog.PrintErr("[Viewer] Entity highlight failed: " + ex);
 			}
 
+			LevelViewerZoneHighlight.SyncWithSelection();
 			LevelViewerSelection.ReapplyIfSelectionActive();
 			RefreshSelectedLightRadiusVisual();
 
@@ -2215,6 +2300,45 @@ public partial class AlienScene : Node3D
 		return nodes;
 	}
 
+	/// <summary>
+	/// The selection plus whatever is marked along with it - a selected TriggerSequence's members.
+	/// </summary>
+	/// <remarks>
+	/// These are drawn as the selection but are not part of it: the gizmo moves what is in
+	/// <c>_selectedEntities</c> and Delete deletes it, and a sequence's members are neither of those
+	/// things. Selecting a sequence marks what it fires at; it does not put it in your hands.
+	/// </remarks>
+	private List<Node3D> ResolveMarkedWithSelectionNodes(List<Node3D> selectionNodes, List<List<uint>> markedPaths)
+	{
+		if (markedPaths == null || markedPaths.Count == 0)
+			return new List<Node3D>();
+
+		List<Node3D> nodes = new List<Node3D>(selectionNodes);
+		for (int i = 0; i < markedPaths.Count; i++)
+		{
+			Node3D node = TryResolveInstancePathNode(markedPaths[i]);
+			if (node == null || !GodotObject.IsInstanceValid(node) || nodes.Contains(node))
+				continue;
+
+			nodes.Add(node);
+		}
+
+		//Nothing resolved beyond the selection itself, so there is nothing extra to draw
+		return nodes.Count == selectionNodes.Count ? new List<Node3D>() : nodes;
+	}
+
+	private bool MarkedNodesUnchanged(List<Node3D> markedNodes)
+	{
+		if (markedNodes.Count != _markedWithSelection.Count)
+			return false;
+
+		for (int i = 0; i < markedNodes.Count; i++)
+			if (markedNodes[i] != _markedWithSelection[i])
+				return false;
+
+		return true;
+	}
+
 	private bool SelectionNodesUnchanged(List<Node3D> selectionNodes)
 	{
 		if (selectionNodes.Count != _selectedEntities.Count)
@@ -2296,6 +2420,32 @@ public partial class AlienScene : Node3D
 		}
 
 		return null;
+	}
+
+	/// <summary>
+	/// The node an instance path names: entity ids stepped through from whatever the scene was
+	/// populated from, which is the level root composite.
+	/// </summary>
+	/// <remarks>
+	/// Deliberately only the direct lookup, with no cached-node fallback behind it. Callers here run
+	/// this thousands of times in a row (every root of every zone), and the fallback walks the whole
+	/// entity node cache; a path that names something outside the populated composite is better
+	/// answered with nothing than with a scan per root.
+	/// </remarks>
+	public Node3D TryResolveInstancePathNode(IReadOnlyList<uint> path)
+	{
+		if (path == null || path.Count == 0 || _parentNode == null || !GodotObject.IsInstanceValid(_parentNode))
+			return null;
+
+		Node current = _parentNode;
+		for (int i = 0; i < path.Count; i++)
+		{
+			current = current?.GetNodeOrNull(path[i].ToString());
+			if (current == null)
+				return null;
+		}
+
+		return current as Node3D;
 	}
 
 	private Node3D GetEntityNode(List<uint> path, Node3D parent)
@@ -2790,6 +2940,11 @@ public partial class AlienScene : Node3D
 		ModelReferenceMaterialMapping.InvalidateRuntimeMappingCaches(_content.Level.Commands);
 		InvalidateModelRefRenderablesCache();
 		RemapExistingModelReferenceMeshes(changedMappingId);
+
+		/* That writes the remapped material straight onto meshes rather than respawning them, so with
+		   Show Zones on it lands on top of the zone colour. The rebuild takes the colour back and keeps
+		   the new material as what the mesh returns to when zones go off. */
+		RefreshZoneOverlayDeferred();
 	}
 
 	private void RemapExistingModelReferenceMeshes(uint changedMappingId)
@@ -3496,6 +3651,8 @@ public partial class AlienScene : Node3D
 		}
 
 		RefreshCompositeFocus();
+		//Anything respawned above came back in its own material
+		RefreshZoneOverlayDeferred();
 		RefreshSelectedLightRadiusVisual();
 	}
 

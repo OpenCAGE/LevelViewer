@@ -272,9 +272,9 @@ public partial class CommandsEditorConnection : Node3D
     /// "Focus on selected" reframes the camera for a selection that arrives from OpenCAGE. A viewport
     /// pick is left alone - the user is already looking at what they clicked - though "fix camera to
     /// selected" still starts following it from where the camera is. Either way the thing framed or
-    /// followed is what <see cref="AlienScene.TryResolveFocusTarget"/> says, and nothing wider than the
-    /// camera's focus range is framed at all: the environment instance is the whole level, and framing
-    /// it is the zoom-out in issue 634.
+    /// followed is what <see cref="AlienScene.TryResolveFocusTarget"/> says. A remote selection always
+    /// moves the camera to the thing; what varies is whether its bounds are fitted or the camera just
+    /// goes and stands at it, because fitting the environment instance fits the whole level (issue 634).
     /// </summary>
     private void ApplyCameraSelectionBehavior(Node3D selectedNode, AlienScene.SelectionOrigin origin)
     {
@@ -283,7 +283,7 @@ public partial class CommandsEditorConnection : Node3D
             return;
 
         if (selectedNode == null || !GodotObject.IsInstanceValid(selectedNode) || !_focusOnSelected || _scene == null
-            || !_scene.TryResolveFocusTarget(selectedNode, camera.FocusMaxDistance, out Node3D target))
+            || !_scene.TryResolveFocusTarget(selectedNode, camera.FocusMaxDistance, out Node3D target, out bool framePositionOnly))
         {
             camera.ClearSelectionFollow();
             return;
@@ -298,7 +298,7 @@ public partial class CommandsEditorConnection : Node3D
             return;
         }
 
-        camera.HandleSelectionFocus(target, _fixCameraToSelected);
+        camera.HandleSelectionFocus(target, _fixCameraToSelected, framePositionOnly);
     }
 
     private void ApplyCameraSettingsFollowState()
@@ -314,8 +314,8 @@ public partial class CommandsEditorConnection : Node3D
         }
 
         if (_scene != null && _scene.TryGetSelectedEntity(out Node3D selected)
-            && _scene.TryResolveFocusTarget(selected, camera.FocusMaxDistance, out Node3D target))
-            camera.HandleSelectionFocus(target, fixCamera: true);
+            && _scene.TryResolveFocusTarget(selected, camera.FocusMaxDistance, out Node3D target, out bool framePositionOnly))
+            camera.HandleSelectionFocus(target, fixCamera: true, framePositionOnly: framePositionOnly);
         else
             camera.ClearSelectionFollow();
     }

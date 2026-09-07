@@ -2093,17 +2093,20 @@ public partial class AlienScene : Node3D
 	/// <remarks>
 	/// The selected node is not always the thing worth framing. An alias or proxy sits on its own
 	/// reference point, often under a floor, with the geometry it stands for somewhere else - so a
-	/// pointer frames what it points at. An entity with no visual at all has nowhere to look. And a
-	/// node whose bounds are wider than the camera can back away from is not a target: a composite
-	/// instance's node holds its whole subtree, so the environment instance is the entire level, which
-	/// is how "focus on selected" turned a click on a gate into a view of the whole map (issue 634).
+	/// pointer frames what it points at. An entity with no visual at all has no bounds to fit, so the
+	/// camera goes to where it stands. And a node whose bounds are wider than the camera can back away
+	/// from is not worth fitting either: a composite instance's node holds its whole subtree, so the
+	/// environment instance is the entire level, which is how "focus on selected" turned a click on a
+	/// gate into a view of the whole map (issue 634).
 	/// A prop composite - a door package, a railing - is an instance too and frames fine, so the test
 	/// is size rather than kind: anything wider than <paramref name="maxExtent"/> (0 for no limit,
-	/// which is what the explicit focus key asks for) leaves the camera where it is.
+	/// which is what the explicit focus key asks for) is framed on its position rather than its bounds,
+	/// reported through <paramref name="framePositionOnly"/>.
 	/// </remarks>
-	public bool TryResolveFocusTarget(Node3D selectedNode, float maxExtent, out Node3D target)
+	public bool TryResolveFocusTarget(Node3D selectedNode, float maxExtent, out Node3D target, out bool framePositionOnly)
 	{
 		target = null;
+		framePositionOnly = false;
 		if (selectedNode == null || !GodotObject.IsInstanceValid(selectedNode))
 			return false;
 
@@ -2132,16 +2135,23 @@ public partial class AlienScene : Node3D
 				candidate = pointed;
 		}
 
-		if (!LevelViewerView.TryComputeGlobalAabb(candidate, out Aabb bounds))
-		{
-			return false;
-		}
-
-		if (maxExtent > 0f)
+		/* Whether there is anything to measure decides HOW to frame, not WHETHER to.
+		 *
+		 * Refusing when the bounds cannot be measured is what stopped the camera reacting at all to a
+		 * marker, a trigger volume, or any other entity that draws nothing (issue 660) - a
+		 * VentTraversalMarker has no renderable to bound, but it does have a position, and going to it
+		 * is the whole point of the setting. FrameRuntimeCameraClose already frames a metre box at the
+		 * target when it cannot measure one, so those simply pass through.
+		 *
+		 * Something too big to frame is the same story from the other end. A composite instance's node
+		 * holds its entire subtree, so framing the environment instance fits the whole level - the
+		 * zoom-out in issue 634 - but the answer to that is to go and stand at the thing, not to
+		 * ignore the selection. Those get framed on their position instead. */
+		if (maxExtent > 0f && LevelViewerView.TryComputeGlobalAabb(candidate, out Aabb bounds))
 		{
 			Vector3 size = bounds.Size;
 			if (Mathf.Max(size.X, Mathf.Max(size.Y, size.Z)) > maxExtent)
-				return false;
+				framePositionOnly = true;
 		}
 
 		target = candidate;

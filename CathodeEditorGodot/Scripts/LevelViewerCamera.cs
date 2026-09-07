@@ -327,18 +327,30 @@ public partial class LevelViewerCamera : Camera3D
         _yaw = euler.Y;
     }
 
-    public void FocusOnTarget(Node3D target)
+    /// <param name="framePositionOnly">
+    /// Go to where the target stands instead of fitting its bounds, for something too big to frame
+    /// without backing out to a view of the level.
+    /// </param>
+    public void FocusOnTarget(Node3D target, bool framePositionOnly = false)
     {
         if (target == null || !GodotObject.IsInstanceValid(target))
             return;
 
         Vector3 positionBefore = GlobalPosition;
-        LevelViewerView.FrameRuntimeCameraClose(
-            target,
-            this,
-            FocusDistanceScale,
-            FocusMinDistance,
-            FocusMaxDistance);
+        if (framePositionOnly)
+            LevelViewerView.FrameRuntimeCameraOnPoint(
+                target.GlobalPosition,
+                this,
+                distance: Mathf.Max(FocusMinDistance, 12f),
+                minDistance: FocusMinDistance,
+                maxDistance: FocusMaxDistance);
+        else
+            LevelViewerView.FrameRuntimeCameraClose(
+                target,
+                this,
+                FocusDistanceScale,
+                FocusMinDistance,
+                FocusMaxDistance);
         SyncAnglesFromTransform();
         if (ShouldShowCameraPosition())
             UpdatePositionHud(positionBefore);
@@ -348,7 +360,7 @@ public partial class LevelViewerCamera : Camera3D
     /// <summary>
     /// Frame the selection; optionally stick the camera so it tracks entity translation until the user moves it.
     /// </summary>
-    public void HandleSelectionFocus(Node3D target, bool fixCamera)
+    public void HandleSelectionFocus(Node3D target, bool fixCamera, bool framePositionOnly = false)
     {
         if (target == null || !GodotObject.IsInstanceValid(target))
         {
@@ -356,7 +368,7 @@ public partial class LevelViewerCamera : Camera3D
             return;
         }
 
-        FocusOnTarget(target);
+        FocusOnTarget(target, framePositionOnly);
         if (fixCamera)
             BeginSelectionFollow(target);
         else
@@ -421,13 +433,13 @@ public partial class LevelViewerCamera : Camera3D
         if (_alienScene == null || !_alienScene.TryGetSelectedEntity(out Node3D selected))
             return;
 
-        if (!_alienScene.TryResolveFocusTarget(selected, maxExtent: 0f, out Node3D target))
+        if (!_alienScene.TryResolveFocusTarget(selected, maxExtent: 0f, out Node3D target, out bool framePositionOnly))
             return;
 
         bool fixCamera = _commandsEditorConnection != null
             && GodotObject.IsInstanceValid(_commandsEditorConnection)
             && _commandsEditorConnection.FixCameraToSelected;
-        HandleSelectionFocus(target, fixCamera);
+        HandleSelectionFocus(target, fixCamera, framePositionOnly);
     }
 
     private void OnCompositeLoaded()

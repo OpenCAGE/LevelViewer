@@ -74,6 +74,31 @@ namespace OpenCAGE.UnityConnection
         // window never sees those keys through the WinForms chords - it has to ask.
         UNDO_REQUEST,
         REDO_REQUEST,
+
+        // OpenCAGE -> Level Viewer: the CAGEAnimation editor is in Animation Mode, and these are the
+        // parameter values its tracks hold at the time on the playhead. The animation is being edited
+        // in OpenCAGE, so only that side can evaluate it - this carries the answers, not the curves.
+        // Applied as a transient override on top of the scene: the level data is never written, and
+        // clearing it (animation_preview_active = false) puts every node it touched back.
+        // Appended, not inserted: these travel as numbers, so an existing event's value must not move.
+        ANIMATION_PREVIEW,
+    }
+
+    /// <summary>
+    /// One entity instance a CAGEAnimation drives, and the value its tracks hold for one parameter at
+    /// the previewed time. Addressed by instance path rather than by id because the same entity in two
+    /// placements of a composite is two different things to animate, and only one of them is meant.
+    /// </summary>
+    public class SyncedAnimationTarget
+    {
+        public List<uint> path = new List<uint>(); //instance path from the composite the viewer populated
+
+        public uint parameter;  //the parameter's ShortGuid
+        public uint data_type;  //DataType of the value below
+
+        //TRANSFORM: position and rotation, in the same Cathode space a position parameter is stored in
+        public float[] vector3_a;
+        public float[] vector3_b;
     }
 
     public class Packet
@@ -85,7 +110,7 @@ namespace OpenCAGE.UnityConnection
 
         //Packet metadata
         public PacketEvent packet_event;
-        public int version = 17;
+        public int version = 18;
 
         //Setup metadata
         public string level_name = "";
@@ -184,5 +209,13 @@ namespace OpenCAGE.UnityConnection
         // live any number of composites down from the one the sequence is in, so an id on its own
         // would not say which instance of it is meant.
         public List<List<uint>> selection_entity_paths = null;
+
+        // Animation Mode in the CAGEAnimation editor (ANIMATION_PREVIEW). `animation_preview_active`
+        // false clears everything the preview is holding; the list is what it holds at
+        // `animation_preview_time`, and is the WHOLE set each time rather than a delta, so a target
+        // that has stopped being animated is restored by simply no longer being in it.
+        public bool animation_preview_active = false;
+        public float animation_preview_time = 0f;
+        public List<SyncedAnimationTarget> animation_preview = null;
     }
 }

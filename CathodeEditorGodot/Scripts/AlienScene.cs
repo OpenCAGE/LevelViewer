@@ -3805,6 +3805,9 @@ public partial class AlienScene : Node3D
 	private void ClearEntityNodeCache()
 	{
 		_entityNodesByKey.Clear();
+		//The nodes an animation preview was holding are going with them - nothing to put back, and
+		//nothing was ever written to the level for it
+		AnimationPreview.Forget();
 	}
 
 	private bool TryGetCachedEntityNodes(ShortGuid compositeId, ShortGuid entityId, out List<Node3D> entityNodes)

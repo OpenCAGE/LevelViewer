@@ -773,6 +773,26 @@ public partial class CommandsEditorConnection : Node3D
             return;
         }
 
+        if (packet.packet_event == PacketEvent.ANIMATION_PREVIEW)
+        {
+            /* Nothing but the preview: it carries no path, so like the zone table it must not disturb
+               the selection. Moving nodes belongs on the main thread. */
+            bool previewActive = packet.animation_preview_active;
+            List<SyncedAnimationTarget> previewTargets = packet.animation_preview;
+            Callable.From(() =>
+            {
+                try
+                {
+                    AnimationPreview.Apply(_scene, previewActive, previewTargets);
+                }
+                catch (Exception ex)
+                {
+                    ViewerLog.PrintErr("[Viewer] Animation preview failed: " + ex);
+                }
+            }).CallDeferred();
+            return;
+        }
+
         if (packet.packet_event == PacketEvent.LEVEL_RESOURCES_MODIFIED)
         {
             _scene?.QueueResourceSync(packet);
@@ -2848,7 +2868,12 @@ public partial class CommandsEditorConnection : Node3D
         ShortGuid compositeId = new ShortGuid(pathComposites[pathComposites.Count - 1]);
         ShortGuid entityId = new ShortGuid(pathEntities[pathEntities.Count - 1]);
 
-        if (_scene != null)
+        /* Animation Mode: the drag is going to become a keyframe rather than a new position for the
+           entity, so nothing is written to the level here. The gizmo has already moved the node it
+           dragged, and the preview that comes straight back places it for the playhead - writing the
+           data as well would leave this side believing the entity had really moved, and it would still
+           be there once the mode ended. */
+        if (_scene != null && !AnimationPreview.Active)
         {
             Composite composite = _scene.Content.Level.Commands.GetComposite(compositeId);
             Entity entity = composite?.GetEntityByID(entityId);

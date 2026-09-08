@@ -1841,6 +1841,7 @@ public partial class CommandsEditorConnection : Node3D
             deep_select_mode = (int)PreviewVisibilitySettings.DeepSelectMode,
             gizmo_mode = gizmoMode,
             create_function_type = _createFunctionType,
+            selection_highlight_mode = (int)PreviewVisibilitySettings.SelectionHighlightMode,
         });
     }
 

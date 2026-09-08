@@ -3,7 +3,7 @@ using System;
 using System.Runtime.InteropServices;
 
 /// <summary>
-/// Free camera: WASD/QE move; RMB look; MMB pan; LMB select entity; Ctrl+MMB step into composite instance; - step back hierarchy; 0/8/9 set regular/deep/advanced deep select; 1-4 transform/rotate world/local, 5 none; H hide selected; Shift+H unhide all; scroll adjusts speed; Z frames selection; Ctrl+Z/Ctrl+Y undo/redo in OpenCAGE.
+/// Free camera: WASD/QE move; RMB look; MMB pan; LMB select entity; Ctrl+MMB step into composite instance; - step back hierarchy; 0/8/9 set regular/deep/advanced deep select; 1-4 transform/rotate world/local, 5 none; Alt+1-4 set the selection highlight mode; H hide selected; Shift+H unhide all; scroll adjusts speed; Z frames selection; Ctrl+Z/Ctrl+Y undo/redo in OpenCAGE.
 /// MoveSpeed is world units per second (framerate-independent via delta).
 /// </summary>
 public partial class LevelViewerCamera : Camera3D
@@ -176,6 +176,15 @@ public partial class LevelViewerCamera : Camera3D
                     && (keyEvent.Keycode == Key.Y || (keyEvent.Keycode == Key.Z && keyEvent.ShiftPressed)))
                 {
                     _commandsEditorConnection?.SendRedoRequest();
+                    GetViewport().SetInputAsHandled();
+                }
+                /* The four selection highlight modes, in the order they sit in OpenCAGE's menu. Alt and a
+                   number because the bare numbers are taken by the gizmo and selection modes, and Shift
+                   is the camera's speed modifier (issue 673). */
+                else if (keyEvent.AltPressed && !keyEvent.CtrlPressed && !keyEvent.MetaPressed
+                    && keyEvent.Keycode >= Key.Key1 && keyEvent.Keycode <= Key.Key4)
+                {
+                    SetHighlightMode((OpenCAGE.UnityConnection.LevelViewerHighlightMode)(keyEvent.Keycode - Key.Key1));
                     GetViewport().SetInputAsHandled();
                 }
                 /* Everything below is a bare key, so a chord must not fall into it. Ctrl+Z used to land
@@ -1421,6 +1430,20 @@ public partial class LevelViewerCamera : Camera3D
             HandleMouseMotion(motion);
             GetViewport().SetInputAsHandled();
         }
+    }
+
+    /// <summary>
+    /// Mark the selection a different way from the viewport. OpenCAGE owns the setting, so the change
+    /// goes back to it the way the gizmo and selection modes do - it stores it and moves its own tick.
+    /// </summary>
+    private void SetHighlightMode(OpenCAGE.UnityConnection.LevelViewerHighlightMode mode)
+    {
+        if (PreviewVisibilitySettings.SelectionHighlightMode == mode)
+            return;
+
+        //Already on the main thread here (input), so the re-marking SetMode does needs no deferral
+        LevelViewerSelection.SetMode(mode);
+        _commandsEditorConnection?.SendViewportModeToEditor();
     }
 
     private void SetDeepSelectMode(PreviewVisibilitySettings.DeepSelectModeKind mode)

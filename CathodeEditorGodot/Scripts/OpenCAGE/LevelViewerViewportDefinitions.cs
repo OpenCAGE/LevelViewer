@@ -79,6 +79,25 @@ namespace OpenCAGE.UnityConnection
             }
         }
 
+        /* Alt and a number, rather than a bare number: 1-5 and 8-0 are already the gizmo and selection
+           modes, and Shift is the camera's speed modifier, so it cannot carry a chord of its own. */
+        public static string GetHighlightModeShortcut(LevelViewerHighlightMode mode)
+        {
+            switch (mode)
+            {
+                case LevelViewerHighlightMode.Green:
+                    return "Alt+1";
+                case LevelViewerHighlightMode.Wireframe:
+                    return "Alt+2";
+                case LevelViewerHighlightMode.WireframeTransparent:
+                    return "Alt+3";
+                case LevelViewerHighlightMode.None:
+                    return "Alt+4";
+                default:
+                    return string.Empty;
+            }
+        }
+
         public static string GetSelectionModeShortcut(LevelViewerDeepSelectMode mode)
         {
             switch (mode)

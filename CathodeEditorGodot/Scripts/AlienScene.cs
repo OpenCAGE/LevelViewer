@@ -2232,6 +2232,17 @@ public partial class AlienScene : Node3D
 		 * holds its entire subtree, so framing the environment instance fits the whole level - the
 		 * zoom-out in issue 634 - but the answer to that is to go and stand at the thing, not to
 		 * ignore the selection. Those get framed on their position instead. */
+		/* Something that isn't in the world is not somewhere to go. Every entity gets a node, including
+		   composite parameters and script logic that were never placed anywhere, and a node with no
+		   transform sits at the origin - so picking one of those in the flowgraph flew the camera to
+		   0,0,0. Whether an entity is placed is a question about the entity, not about this node, so
+		   the answer is the same for the focus key as it is for a selection arriving from OpenCAGE. */
+		Entity focusEntity;
+		if (!_nodeEntities.TryGetValue(candidate, out focusEntity))
+			_nodeEntities.TryGetValue(entityNode, out focusEntity);
+		if (focusEntity != null && !IsPlacedInWorld(focusEntity))
+			return false;
+
 		if (maxExtent > 0f && LevelViewerView.TryComputeGlobalAabb(candidate, out Aabb bounds))
 		{
 			Vector3 size = bounds.Size;
@@ -2241,6 +2252,38 @@ public partial class AlienScene : Node3D
 
 		target = candidate;
 		return true;
+	}
+
+	/// <summary>
+	/// Whether this entity is something that stands somewhere in the level.
+	/// </summary>
+	/// <remarks>
+	/// A placement of a composite is: its node holds everything inside it, wherever that was put. A
+	/// function is when the viewer draws something for it, which is exactly the list the render filters
+	/// and the Create menu are built from - a marker or a trigger volume draws nothing solid but is
+	/// placed, and going to it is the point (issue 660). Everything else - composite parameters, script
+	/// logic, an alias or proxy whose target could not be resolved to a node - is not somewhere the
+	/// camera can usefully go.
+	/// </remarks>
+	private static bool IsPlacedInWorld(Entity entity)
+	{
+		switch (entity?.variant)
+		{
+			case EntityVariant.FUNCTION:
+				FunctionEntity function = (FunctionEntity)entity;
+				if (!function.function.IsFunctionType)
+					return true;
+				return RenderFilterDefinitions.IsSupported(function.function.AsFunctionType);
+
+			//Resolved to what they point at above; only an unresolvable one arrives here, and refusing
+			//to move for something we simply could not follow would be a guess in the wrong direction
+			case EntityVariant.ALIAS:
+			case EntityVariant.PROXY:
+				return true;
+
+			default:
+				return false;
+		}
 	}
 
 	private void RequestFrameView(Node3D target, bool focusEditor)

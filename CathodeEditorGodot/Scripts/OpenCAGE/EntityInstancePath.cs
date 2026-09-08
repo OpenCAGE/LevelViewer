@@ -31,7 +31,24 @@ namespace OpenCAGE
             EntityPath stored,
             out List<uint> instancePath)
         {
+            return TryResolve(commands, composite, drillPath, stored, out instancePath, out bool _);
+        }
+
+        /// <param name="relativeToHere">
+        /// Which reading resolved it: relative to the composite holding it, or absolute from the level
+        /// root. A caller working from somewhere other than the root can only use the relative ones -
+        /// an absolute path is written from a place it cannot see.
+        /// </param>
+        public static bool TryResolve(
+            Commands commands,
+            Composite composite,
+            IReadOnlyList<uint> drillPath,
+            EntityPath stored,
+            out List<uint> instancePath,
+            out bool relativeToHere)
+        {
             instancePath = null;
+            relativeToHere = false;
             if (commands == null || composite == null)
                 return false;
 
@@ -39,7 +56,7 @@ namespace OpenCAGE
             if (resolved == null || resolved.Count == 0)
                 return false;
 
-            bool relativeToHere = resolved[0].Item1 == composite;
+            relativeToHere = resolved[0].Item1 == composite;
             int prefix = relativeToHere && drillPath != null ? drillPath.Count : 0;
 
             instancePath = new List<uint>(prefix + resolved.Count);

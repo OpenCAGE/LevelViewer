@@ -37,27 +37,49 @@ namespace OpenCAGE
         /// </summary>
         public static List<SyncedZone> Calculate(Level level)
         {
-            List<SyncedZone> zones = new List<SyncedZone>();
-
             Commands commands = level?.Commands;
             Composite root = commands?.EntryPoints != null && commands.EntryPoints.Length != 0
                 ? commands.EntryPoints[0]
                 : null;
-            if (root == null)
+            return CalculateFrom(level, root);
+        }
+
+        /// <summary>
+        /// The same walk, but starting from one composite rather than the level root: the paths it
+        /// returns run from <paramref name="from"/>, which is what someone standing in that composite
+        /// can address.
+        /// </summary>
+        /// <remarks>
+        /// A zone naming its contents by an absolute path from the level root is left out when starting
+        /// anywhere else, because where this composite sits under the root is not knowable from here -
+        /// it may be instanced many times over, or not at all, and each placement would answer
+        /// differently. Only what the composite can reach on its own is reported.
+        /// </remarks>
+        public static List<SyncedZone> CalculateFrom(Level level, Composite from)
+        {
+            List<SyncedZone> zones = new List<SyncedZone>();
+
+            Commands commands = level?.Commands;
+            if (commands == null || from == null)
                 return zones;
 
             HashSet<ShortGuid> worthDescending = FindCompositesReachingAZone(commands);
             if (worthDescending.Count == 0)
                 return zones;
 
+            Composite root = commands.EntryPoints != null && commands.EntryPoints.Length != 0
+                ? commands.EntryPoints[0]
+                : null;
+
             Walk(
                 commands,
-                root,
-                new List<Composite>() { root },
+                from,
+                new List<Composite>() { from },
                 new List<uint>(),
                 new HashSet<ShortGuid>(),
                 worthDescending,
-                zones);
+                zones,
+                relativePathsOnly: from != root);
             return zones;
         }
 
@@ -132,7 +154,8 @@ namespace OpenCAGE
             List<uint> path,
             HashSet<ShortGuid> onStack,
             HashSet<ShortGuid> worthDescending,
-            List<SyncedZone> zones)
+            List<SyncedZone> zones,
+            bool relativePathsOnly)
         {
             //A composite that (however indirectly) instances itself would otherwise walk forever
             if (!onStack.Add(composite.shortGUID))
@@ -143,7 +166,7 @@ namespace OpenCAGE
                 if (function.function.IsFunctionType)
                 {
                     if (function.function.AsFunctionType == FunctionType.Zone)
-                        EmitZone(commands, composite, compositeStack, path, function, zones);
+                        EmitZone(commands, composite, compositeStack, path, function, zones, relativePathsOnly);
                     continue;
                 }
 
@@ -156,7 +179,7 @@ namespace OpenCAGE
 
                 path.Add(function.shortGUID.AsUInt32);
                 compositeStack.Add(nested);
-                Walk(commands, nested, compositeStack, path, onStack, worthDescending, zones);
+                Walk(commands, nested, compositeStack, path, onStack, worthDescending, zones, relativePathsOnly);
                 compositeStack.RemoveAt(compositeStack.Count - 1);
                 path.RemoveAt(path.Count - 1);
             }
@@ -170,13 +193,15 @@ namespace OpenCAGE
             List<Composite> compositeStack,
             List<uint> path,
             FunctionEntity zone,
-            List<SyncedZone> zones)
+            List<SyncedZone> zones,
+            bool relativePathsOnly)
         {
             SyncedZone synced = new SyncedZone()
             {
                 zone_entity = zone.shortGUID.AsUInt32,
                 zone_composite = composite.shortGUID.AsUInt32,
                 name = commands.Utils.GetEntityName(composite, zone),
+                zone_path = new List<uint>(path),
             };
             ZoneDefinitions.GetColour(
                 ColourKey(zone, path), out synced.colour_r, out synced.colour_g, out synced.colour_b);
@@ -194,8 +219,16 @@ namespace OpenCAGE
                 {
                     foreach (TriggerSequence.SequenceEntry entry in sequence.sequence)
                     {
-                        if (EntityInstancePath.TryResolve(commands, composite, path, entry.connectedEntity, out List<uint> full))
-                            synced.roots.Add(full);
+                        if (!EntityInstancePath.TryResolve(commands, composite, path, entry.connectedEntity,
+                                out List<uint> full, out bool relativeToHere))
+                            continue;
+
+                        //Walking from a composite that isn't the level root: a path written from the
+                        //root names somewhere this walk cannot place, so it is not ours to claim
+                        if (relativePathsOnly && !relativeToHere)
+                            continue;
+
+                        synced.roots.Add(full);
                     }
                 }
                 else if (linked is VariableEntity pin)

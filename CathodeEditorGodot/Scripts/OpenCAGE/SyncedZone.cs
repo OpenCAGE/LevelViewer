@@ -21,6 +21,13 @@ namespace OpenCAGE.UnityConnection
         public uint zone_composite;
         public string name = "";
 
+        /// <summary>
+        /// The entity ids stepped through to reach the zone itself, from wherever the walk started.
+        /// A zone is per placement, not per entity, so this is the other half of which zone this is -
+        /// and it is the way back to it through the hierarchy rather than by opening its composite bare.
+        /// </summary>
+        public List<uint> zone_path = new List<uint>();
+
         //Picked from the zone's id, so a zone is the same colour every time the level is opened
         public float colour_r;
         public float colour_g;

@@ -98,7 +98,9 @@ public partial class CommandsEditorConnection : Node3D
     private readonly Dictionary<ParameterSyncKey, PendingParameterSync> _pendingParameterSyncs = new Dictionary<ParameterSyncKey, PendingParameterSync>();
     private readonly ConcurrentQueue<string> _incomingMessages = new ConcurrentQueue<string>();
 
-    private Tuple<ShortGuid, ShortGuid> _addedEntity = null;
+    //A queue, not one slot: a whole message batch is drained before this is consumed, so a multi-entity
+    //add (a multi-selection duplicate, or a multi-entity viewport paste) would otherwise spawn only the last.
+    private readonly Queue<Tuple<ShortGuid, ShortGuid>> _addedEntities = new Queue<Tuple<ShortGuid, ShortGuid>>();
     private Tuple<ShortGuid, ShortGuid> _removedEntity = null;
     private ShortGuid _removedComposite = ShortGuid.Invalid;
 
@@ -254,6 +256,8 @@ public partial class CommandsEditorConnection : Node3D
         _transformGizmo.Name = "TransformGizmo";
         _transformGizmo.OnTransformChanged = OnGizmoTransformChanged;
         _transformGizmo.OnDragCommitted = OnGizmoDragCommitted;
+        _transformGizmo.OnDuplicateRequested = SendEntityDuplicateRequest;
+        _transformGizmo.VertexSnapProvider = ProvideNearestVertex;
         GetTree().CurrentScene?.AddChild(_transformGizmo);
     }
 
@@ -285,6 +289,12 @@ public partial class CommandsEditorConnection : Node3D
     {
         LevelViewerCamera camera = FindCamera() as LevelViewerCamera;
         if (camera == null)
+            return;
+
+        //Mid drag - including a shift-clone's copies being selected in and handed the drag - the user
+        //is already looking at what they are moving; do not fly the camera off to it.
+        if (_transformGizmo != null && GodotObject.IsInstanceValid(_transformGizmo)
+            && (_transformGizmo.IsDragging || _transformGizmo.IsHandoverArmed))
             return;
 
         if (selectedNode == null || !GodotObject.IsInstanceValid(selectedNode) || !_focusOnSelected || _scene == null
@@ -452,7 +462,7 @@ public partial class CommandsEditorConnection : Node3D
             return true;
         if (_levelName != "" && _didLoadLevel)
             return true;
-        if (_addedEntity != null || _removedEntity != null || _removedComposite != ShortGuid.Invalid)
+        if (_addedEntities.Count > 0 || _removedEntity != null || _removedComposite != ShortGuid.Invalid)
             return true;
         if (_forceSelectionApply || _currentEntityGOID != _currentEntity)
             return true;
@@ -468,6 +478,7 @@ public partial class CommandsEditorConnection : Node3D
 
     private void PhysicsProcessInternal()
     {
+
         if (LevelViewerRenderIdleThrottle.IsSuspended && _incomingMessages.IsEmpty)
             return;
 
@@ -486,11 +497,14 @@ public partial class CommandsEditorConnection : Node3D
                 Callable.From(() => _scene.QueueLoadLevel(level, pathToAi)).CallDeferred();
         }
 
-        if (_addedEntity != null)
+        if (_addedEntities.Count > 0)
         {
-            ViewerLog.Print("Adding entity: " + _addedEntity.Item2.AsUInt32);
-            _scene.AddEntity(_addedEntity.Item1, _addedEntity.Item2);
-            _addedEntity = null;
+            while (_addedEntities.Count > 0)
+            {
+                Tuple<ShortGuid, ShortGuid> added = _addedEntities.Dequeue();
+                ViewerLog.Print("Adding entity: " + added.Item2.AsUInt32);
+                _scene.AddEntity(added.Item1, added.Item2);
+            }
             _scene.RefreshEntityHighlights();
         }
 
@@ -968,7 +982,7 @@ public partial class CommandsEditorConnection : Node3D
                         }
                     }
 
-                    _addedEntity = new Tuple<ShortGuid, ShortGuid>(new ShortGuid(packet.composite), new ShortGuid(packet.entity));
+                    _addedEntities.Enqueue(new Tuple<ShortGuid, ShortGuid>(new ShortGuid(packet.composite), new ShortGuid(packet.entity)));
                 }
                 break;
             }
@@ -1276,6 +1290,7 @@ public partial class CommandsEditorConnection : Node3D
 
         LevelViewerTransformSnap.GridSize = packet.transform_grid_snap > 0f ? packet.transform_grid_snap : 0f;
         LevelViewerTransformSnap.RotationDegrees = packet.rotation_snap_degrees > 0f ? packet.rotation_snap_degrees : 0f;
+        LevelViewerTransformSnap.VertexAlways = packet.transform_vertex_snap;
 
         //Marking the selection builds nodes, so it belongs on the main thread - this runs on the socket's
         LevelViewerHighlightMode highlightMode =
@@ -1384,6 +1399,127 @@ public partial class CommandsEditorConnection : Node3D
     /// Delete in the viewport: ask OpenCAGE to delete what is selected - everything selected, not
     /// just the one the gizmo is on. It owns the level data, and answers with ENTITY_DELETED.
     /// </summary>
+    /// <summary>
+    /// Shift was held on a gizmo handle: ask OpenCAGE to duplicate the selection. It clones in place,
+    /// selects the copies, and that selection reaches the gizmo as the ordinary ENTITY_SELECTED - which
+    /// is what the armed handover picks the drag up on. Payload matches a delete request.
+    /// </summary>
+    public void SendEntityDuplicateRequest()
+    {
+        uint compositeId;
+        uint entityId;
+        bool entitySelected;
+        List<uint> selection;
+        lock (_lock)
+        {
+            compositeId = _currentComposite;
+            entityId = _currentEntity;
+            entitySelected = _entitySelected;
+            selection = new List<uint>(_selectionEntities);
+        }
+
+        if (!entitySelected || entityId == 0 || compositeId == 0)
+            return;
+
+        Packet packet = new Packet(PacketEvent.ENTITY_DUPLICATE_REQUEST)
+        {
+            composite = compositeId,
+            entity = entityId,
+        };
+        if (selection.Count > 1)
+            packet.selection_entities = selection;
+
+        TryFillEntityMetadata(packet);
+        SendMessage(packet);
+    }
+
+    /// <summary>Nearest scene vertex to the cursor, for the gizmo's vertex snap. The dragged targets are excluded.</summary>
+    private Vector3? ProvideNearestVertex(Vector2 mousePos, IReadOnlyList<Node3D> dragTargets)
+    {
+        if (_scene?.Content?.Level == null)
+            return null;
+
+        Camera3D camera = FindCamera();
+        if (camera == null || !GodotObject.IsInstanceValid(camera))
+            return null;
+
+        bool ExcludeOwner(Node3D owner)
+        {
+            if (owner == null || dragTargets == null)
+                return false;
+            for (int i = 0; i < dragTargets.Count; i++)
+            {
+                Node3D target = dragTargets[i];
+                if (target == null || !GodotObject.IsInstanceValid(target))
+                    continue;
+                if (owner == target || target.IsAncestorOf(owner))
+                    return true;
+                if (target is EntityOverride entityOverride && entityOverride.PointedEntity != null
+                    && (owner == entityOverride.PointedEntity || entityOverride.PointedEntity.IsAncestorOf(owner)))
+                    return true;
+            }
+            return false;
+        }
+
+        if (LevelViewerPick.TryPickNearestVertex(camera, mousePos, _scene.ParentNode,
+                _scene.Content.Level.Commands, ExcludeOwner, out Vector3 worldVertex))
+            return worldVertex;
+        return null;
+    }
+
+    /// <summary>
+    /// Shift+End: rest every selected entity on the nearest floor. Built exactly as
+    /// <see cref="SyncTransformGizmoToSelection"/> builds its targets, so the entity ids line up with
+    /// what <see cref="OnGizmoTransformChanged"/> writes; the move goes out the ordinary gizmo path, so
+    /// it is undoable, hits every instance, and becomes a keyframe under Animation Mode like any drag.
+    /// </summary>
+    public void SnapSelectionToFloor()
+    {
+        if (_scene == null || CreateModeActive)
+            return;
+        if (_transformGizmo != null && _transformGizmo.IsDragging)
+            return;
+
+        List<Node3D> targets = new List<Node3D>();
+        List<uint> targetEntityIds = new List<uint>();
+        _scene.GetSelectedEntities(targets, targetEntityIds);
+        for (int i = targets.Count - 1; i >= 0; i--)
+        {
+            if (_scene.SupportsTransformGizmo(targets[i]))
+                continue;
+            targets.RemoveAt(i);
+            targetEntityIds.RemoveAt(i);
+        }
+        if (targets.Count == 0)
+            return;
+
+        _gizmoTargetEntityIds = targetEntityIds;
+        Commands commands = _scene.Content.Level?.Commands;
+
+        LevelViewerPick.BeginBatchPickBoundsInvalidation();
+        try
+        {
+            for (int i = 0; i < targets.Count; i++)
+            {
+                Node3D target = targets[i];
+                if (target == null || !GodotObject.IsInstanceValid(target))
+                    continue;
+                if (!LevelViewerPick.TrySnapToFloor(target, _scene.ParentNode, commands, out Vector3 global))
+                    continue;
+
+                target.GlobalPosition = global;
+                OnGizmoTransformChanged(i, target.Position, target.RotationDegrees);
+                OnGizmoDragCommitted(target);
+            }
+        }
+        finally
+        {
+            LevelViewerPick.EndBatchPickBoundsInvalidation();
+        }
+
+        SyncTransformGizmoToSelection();
+    }
+
     public void SendEntityDeleteRequest()
     {
         uint compositeId;

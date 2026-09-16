@@ -187,6 +187,15 @@ public partial class LevelViewerCamera : Camera3D
                     SetHighlightMode((OpenCAGE.UnityConnection.LevelViewerHighlightMode)(keyEvent.Keycode - Key.Key1));
                     GetViewport().SetInputAsHandled();
                 }
+                /* Shift+End rests the selected entities on the floor (Unreal's End). A Shift-only chord,
+                   so it sits above the bare-key guard - Shift is the camera speed modifier, not a lone
+                   binding, so it never collides with one. */
+                else if (keyEvent.Keycode == Key.End && keyEvent.ShiftPressed
+                    && !keyEvent.CtrlPressed && !keyEvent.AltPressed && !keyEvent.MetaPressed)
+                {
+                    _commandsEditorConnection?.SnapSelectionToFloor();
+                    GetViewport().SetInputAsHandled();
+                }
                 /* Everything below is a bare key, so a chord must not fall into it. Ctrl+Z used to land
                    on Z and fly the camera at the selection instead of undoing (issue 667), and the same
                    trap sits under Ctrl+Delete and the rest of them. */
@@ -601,6 +610,18 @@ public partial class LevelViewerCamera : Camera3D
         }
     }
 
+    /// <summary>
+    /// V held for vertex snapping. Polled like the movement keys: while embedded, Godot never sees a
+    /// key whose event went to the WinForms host, so Win32 GetAsyncKeyState is the reliable source.
+    /// </summary>
+    private bool IsVertexSnapKeyDown()
+    {
+        if (!EmbeddedInOpenCage)
+            return Input.IsKeyPressed(Key.V);
+
+        return ShouldAcceptEmbeddedKeyboardInput() && Win32Input.IsKeyDown(Win32Input.VK_V);
+    }
+
     private bool IsMovementKeyDown(Key key)
     {
         if (!EmbeddedInOpenCage)
@@ -666,8 +687,12 @@ public partial class LevelViewerCamera : Camera3D
                     GetViewport().SetInputAsHandled();
                     break;
                 }
-                // Let the gizmo consume LMB before the pick/select logic.
-                if (TryGizmoMouseDown(mouseButton.Position))
+                // Let the gizmo consume LMB before the pick/select logic. Shift on a handle means
+                // shift-clone (duplicate then drag the copy) - except in Animation Mode, where a drag
+                // is a keyframe and Shift stays a plain drag.
+                bool duplicateDrag = mouseButton.ShiftPressed && !mouseButton.CtrlPressed
+                    && !mouseButton.AltPressed && !AnimationPreview.Active;
+                if (TryGizmoMouseDown(mouseButton.Position, duplicateDrag))
                 {
                     GetViewport().SetInputAsHandled();
                     break;
@@ -1219,6 +1244,7 @@ public partial class LevelViewerCamera : Camera3D
         public const int VK_D = 0x44;
         public const int VK_E = 0x45;
         public const int VK_Q = 0x51;
+        public const int VK_V = 0x56;
 
         [StructLayout(LayoutKind.Sequential)]
         public struct Rect
@@ -1392,12 +1418,13 @@ public partial class LevelViewerCamera : Camera3D
         _commandsEditorConnection?.SendViewportModeToEditor();
     }
 
-    private bool TryGizmoMouseDown(Vector2 pos)
+    private bool TryGizmoMouseDown(Vector2 pos, bool duplicate)
     {
         LevelViewerTransformGizmo gizmo = GetGizmo();
         if (gizmo == null || !gizmo.Visible)
             return false;
-        return gizmo.HandleMouseButtonDown(pos);
+        gizmo.VertexSnapActive = LevelViewerTransformSnap.VertexAlways || IsVertexSnapKeyDown();
+        return gizmo.HandleMouseButtonDown(pos, duplicate);
     }
 
     private bool TryGizmoMouseUp(Vector2 pos)
@@ -1415,6 +1442,7 @@ public partial class LevelViewerCamera : Camera3D
         bool gizmoConsumed = false;
         if (gizmo != null && gizmo.Visible)
         {
+            gizmo.VertexSnapActive = LevelViewerTransformSnap.VertexAlways || IsVertexSnapKeyDown();
             gizmoConsumed = gizmo.HandleMouseMotion(motion.Position);
         }
 

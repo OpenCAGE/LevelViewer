@@ -82,6 +82,12 @@ namespace OpenCAGE.UnityConnection
         // clearing it (animation_preview_active = false) puts every node it touched back.
         // Appended, not inserted: these travel as numbers, so an existing event's value must not move.
         ANIMATION_PREVIEW,
+
+        // Level Viewer -> OpenCAGE: Shift was held when a gizmo drag began, so the drag is meant for a
+        // COPY of what is selected (3ds Max's shift-clone). The level data lives on the OpenCAGE side,
+        // so it makes the copies - in place, undoable as one step - and selects them, which reaches
+        // the viewer as the usual ENTITY_ADDED + ENTITY_SELECTED and is what hands the drag over.
+        ENTITY_DUPLICATE_REQUEST,
     }
 
     /// <summary>
@@ -110,7 +116,7 @@ namespace OpenCAGE.UnityConnection
 
         //Packet metadata
         public PacketEvent packet_event;
-        public int version = 18;
+        public int version = 19;
 
         //Setup metadata
         public string level_name = "";
@@ -178,6 +184,9 @@ namespace OpenCAGE.UnityConnection
         public bool highlight_proxies = true;
         public float transform_grid_snap = 0f;
         public float rotation_snap_degrees = 0f;
+        // Vertex snapping kept on from the Transform Snap menu ('Vertex'); holding V during a drag is
+        // the momentary form and never travels - the viewer reads the key itself.
+        public bool transform_vertex_snap = false;
         public int deep_select_mode = 0;
         public int gizmo_mode = 0;
         // Entity creation mode: FunctionType (uint) to place on viewport click, 0 = creation mode off.

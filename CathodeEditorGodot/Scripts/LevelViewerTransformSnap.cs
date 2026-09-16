@@ -9,6 +9,9 @@ public static class LevelViewerTransformSnap
 
 	public static float RotationDegrees { get; set; }
 
+	/// <summary>Vertex snapping kept on from the editor's Transform Snap menu, as opposed to held on with V.</summary>
+	public static bool VertexAlways { get; set; }
+
 	public static float SnapValue(float value, float step)
 	{
 		if (step <= 0f)

@@ -62,6 +62,9 @@ public static class LevelViewerPick
 
 		public Node HitNode { get; }
 		public float Distance { get; }
+
+		/// <summary>The point of impact, along the ray at <see cref="Distance"/>. Filled by the ray helpers.</summary>
+		public Vector3 Position { get; init; }
 	}
 
 	public readonly struct SelectionTarget
@@ -548,7 +551,8 @@ public static class LevelViewerPick
 		Camera3D camera,
 		Vector3 origin,
 		Vector3 direction,
-		ref PickHit? best)
+		ref PickHit? best,
+		bool forceDoubleSided = false)
 	{
 		if (!_pickablesByOwner.TryGetValue(owner, out List<MeshInstance3D> meshes) || meshes.Count == 0)
 			return false;
@@ -567,17 +571,53 @@ public static class LevelViewerPick
 			if (meshInstance == null || !GodotObject.IsInstanceValid(meshInstance))
 				continue;
 
-			if (!TryRayIntersectMeshInstance(meshInstance, camera, origin, direction, out float distance))
+			if (!TryRayIntersectMeshInstance(meshInstance, camera, origin, direction, forceDoubleSided, out float distance))
 				continue;
 
 			if (best.HasValue && distance >= best.Value.Distance)
 				continue;
 
-			best = new PickHit(meshInstance, distance);
+			best = new PickHit(meshInstance, distance) { Position = origin + direction * distance };
 			anyHit = true;
 		}
 
 		return anyHit;
+	}
+
+	/// <summary>
+	/// Cast an arbitrary world ray through the level's pickable geometry - the same triangle test the
+	/// screen pick uses, but from any origin/direction. Owners for which <paramref name="excludeOwner"/>
+	/// returns true are skipped (a dragged or self entity), and <paramref name="forceDoubleSided"/>
+	/// lets a ray hit the back of a surface (an upward ray meeting a floor from below).
+	/// </summary>
+	public static PickHit? RaycastClosest(
+		Vector3 origin,
+		Vector3 direction,
+		Camera3D camera,
+		Node contentRoot,
+		Commands commands,
+		System.Func<Node3D, bool> excludeOwner = null,
+		bool forceDoubleSided = false)
+	{
+		if (direction.LengthSquared() < 0.0001f)
+			return null;
+		direction = direction.Normalized();
+
+		if (LevelViewerCompositeFocus.HasActiveComposite && commands != null)
+			LevelViewerCompositeFocus.RebuildScopeCache(commands);
+
+		EnsureScopedPickOwners(contentRoot, commands);
+
+		PickHit? best = null;
+		for (int i = 0; i < _scopedPickOwners.Count; i++)
+		{
+			Node3D owner = _scopedPickOwners[i];
+			if (excludeOwner != null && owner != null && excludeOwner(owner))
+				continue;
+			TryPickOwner(owner, camera, origin, direction, ref best, forceDoubleSided);
+		}
+
+		return best;
 	}
 
 	public static PickHit? PickClosest(
@@ -607,6 +647,171 @@ public static class LevelViewerPick
 			TryPickOwner(_scopedPickOwners[i], camera, origin, direction, ref best);
 
 		return best;
+	}
+
+	/// <summary>
+	/// The nearest mesh vertex to the cursor, for vertex snapping. Rays the scene, then walks only the
+	/// hit mesh's cached vertices and keeps the one closest to the hit point. Owners in
+	/// <paramref name="excludeOwners"/> (the dragged entity's own nodes) are skipped, or the object
+	/// would snap to itself. Returns false when the ray misses everything - deliberately no whole-level
+	/// vertex scan, which would be O(every vertex) on a real level.
+	/// </summary>
+	public static bool TryPickNearestVertex(
+		Camera3D camera,
+		Vector2 screenPosition,
+		Node contentRoot,
+		Commands commands,
+		System.Func<Node3D, bool> excludeOwner,
+		out Vector3 worldVertex)
+	{
+		worldVertex = Vector3.Zero;
+		if (camera == null || !GodotObject.IsInstanceValid(camera))
+			return false;
+
+		Vector3 origin = camera.ProjectRayOrigin(screenPosition);
+		Vector3 direction = camera.ProjectRayNormal(screenPosition);
+		PickHit? hit = RaycastClosest(origin, direction, camera, contentRoot, commands, excludeOwner);
+		if (hit == null || hit.Value.HitNode is not MeshInstance3D meshInstance || !GodotObject.IsInstanceValid(meshInstance))
+			return false;
+
+		Mesh mesh = meshInstance.Mesh;
+		if (mesh == null || mesh.GetSurfaceCount() == 0)
+			return false;
+
+		//No meaningful vertices on a camera-facing icon quad - snap to its origin instead
+		Material material = meshInstance.MaterialOverride ?? meshInstance.GetActiveMaterial(0);
+		if (PreviewVisualUtility.IsIconBillboardMaterial(material))
+		{
+			worldVertex = meshInstance.GlobalPosition;
+			return true;
+		}
+
+		Transform3D xf = meshInstance.GlobalTransform;
+		Vector3 localHit = xf.AffineInverse() * hit.Value.Position;
+
+		CachedMeshSurface[] surfaces = GetCachedMeshSurfaces(mesh);
+		float bestDistSq = float.MaxValue;
+		Vector3 bestLocal = Vector3.Zero;
+		bool found = false;
+		for (int s = 0; s < surfaces.Length; s++)
+		{
+			Vector3[] vertices = surfaces[s].Vertices;
+			for (int v = 0; v < vertices.Length; v++)
+			{
+				float distSq = vertices[v].DistanceSquaredTo(localHit);
+				if (distSq >= bestDistSq)
+					continue;
+				bestDistSq = distSq;
+				bestLocal = vertices[v];
+				found = true;
+			}
+		}
+
+		if (!found)
+			return false;
+
+		worldVertex = xf * bestLocal;
+		return true;
+	}
+
+	/// <summary>
+	/// The world-space bounds of an entity's own rendered geometry, from the pick registry. Not
+	/// <see cref="LevelViewerView.TryComputeGlobalAabb"/>, which also swallows preview icons and the
+	/// selected-light radius sphere. An alias/proxy draws through the node it points at, so that is
+	/// merged in too. Falls back to a zero-size box at the entity's origin (icon-only entities rest
+	/// their pivot on the floor).
+	/// </summary>
+	public static bool TryGetEntityPickBounds(Node3D entityNode, out Aabb bounds)
+	{
+		bounds = new Aabb();
+		if (entityNode == null || !GodotObject.IsInstanceValid(entityNode))
+			return false;
+
+		List<MeshInstance3D> meshes = new List<MeshInstance3D>();
+		CollectPickMeshesForEntitySubtree(entityNode, meshes);
+		if (entityNode is EntityOverride entityOverride && entityOverride.PointedEntity != null
+			&& GodotObject.IsInstanceValid(entityOverride.PointedEntity))
+		{
+			CollectPickMeshesForEntitySubtree(entityOverride.PointedEntity, meshes);
+		}
+
+		bool hasBounds = false;
+		for (int i = 0; i < meshes.Count; i++)
+		{
+			MeshInstance3D mesh = meshes[i];
+			if (mesh == null || !GodotObject.IsInstanceValid(mesh))
+				continue;
+
+			Material material = mesh.MaterialOverride ?? mesh.GetActiveMaterial(0);
+			if (PreviewVisualUtility.IsIconBillboardMaterial(material))
+				continue;
+
+			Aabb local = mesh.GetAabb();
+			if (local.Size.LengthSquared() <= RayEpsilon)
+				continue;
+
+			Aabb global = mesh.GlobalTransform * local;
+			bounds = hasBounds ? bounds.Merge(global) : global;
+			hasBounds = true;
+		}
+
+		if (!hasBounds)
+			bounds = new Aabb(entityNode.GlobalPosition, Vector3.Zero);
+		return true;
+	}
+
+	/// <summary>
+	/// Rest an entity on the floor: how far it has to move so the bottom of its geometry sits on the
+	/// nearest surface below it (or above, if there is nothing below). Excludes the entity's own nodes.
+	/// </summary>
+	public static bool TrySnapToFloor(Node3D entityNode, Node contentRoot, Commands commands, out Vector3 newGlobalPosition)
+	{
+		newGlobalPosition = Vector3.Zero;
+		if (entityNode == null || !GodotObject.IsInstanceValid(entityNode))
+			return false;
+
+		if (!TryGetEntityPickBounds(entityNode, out Aabb bounds))
+			return false;
+
+		System.Func<Node3D, bool> exclude = owner => IsSelfOrPointedBy(entityNode, owner);
+		Vector3 pos = entityNode.GlobalPosition;
+		float bottomY = bounds.Position.Y;
+		float topY = bounds.Position.Y + bounds.Size.Y;
+
+		//Down from the top of the entity, so a partly-sunk one still finds the floor beneath it. A
+		//floor's front face points up, so the ordinary front-only test is right for a downward ray.
+		Vector3 down = new Vector3(pos.X, topY + 0.001f, pos.Z);
+		PickHit? hit = RaycastClosest(down, Vector3.Down, null, contentRoot, commands, exclude);
+
+		//Nothing below: try upward. The floor's back face meets an upward ray, which front-only culls,
+		//so this pass allows either side.
+		if (hit == null)
+		{
+			Vector3 up = new Vector3(pos.X, bottomY - 0.001f, pos.Z);
+			hit = RaycastClosest(up, Vector3.Up, null, contentRoot, commands, exclude, forceDoubleSided: true);
+		}
+
+		if (hit == null)
+			return false;
+
+		newGlobalPosition = pos + Vector3.Up * (hit.Value.Position.Y - bottomY);
+		return true;
+	}
+
+	/// <summary>True if <paramref name="owner"/> is the entity, sits under it, or is what it points at.</summary>
+	private static bool IsSelfOrPointedBy(Node3D entityNode, Node3D owner)
+	{
+		if (owner == null)
+			return false;
+		if (owner == entityNode || entityNode.IsAncestorOf(owner))
+			return true;
+		if (entityNode is EntityOverride entityOverride && entityOverride.PointedEntity != null)
+		{
+			Node3D pointed = entityOverride.PointedEntity;
+			if (owner == pointed || pointed.IsAncestorOf(owner))
+				return true;
+		}
+		return false;
 	}
 
 	/// <summary>
@@ -1403,6 +1608,7 @@ public static class LevelViewerPick
 		Camera3D camera,
 		Vector3 origin,
 		Vector3 direction,
+		bool forceDoubleSided,
 		out float distance)
 	{
 		distance = 0f;
@@ -1411,7 +1617,13 @@ public static class LevelViewerPick
 
 		Material material = meshInstance.MaterialOverride ?? meshInstance.GetActiveMaterial(0);
 		if (PreviewVisualUtility.IsIconBillboardMaterial(material))
+		{
+			//A billboard is a camera-facing quad, so it can only be tested against a camera ray. An
+			//arbitrary world ray (floor snapping) has no camera and simply does not hit one.
+			if (camera == null || !GodotObject.IsInstanceValid(camera))
+				return false;
 			return PreviewVisualUtility.TryRayIntersectIconBillboard(meshInstance, camera, origin, direction, out distance);
+		}
 
 		Mesh mesh = meshInstance.Mesh;
 		if (mesh == null || mesh.GetSurfaceCount() == 0)
@@ -1427,7 +1639,7 @@ public static class LevelViewerPick
 
 		float closestLocalT = float.MaxValue;
 		bool anyHit = false;
-		PickFaceMode faceMode = GetMeshFaceMode(meshInstance);
+		PickFaceMode faceMode = forceDoubleSided ? PickFaceMode.DoubleSided : GetMeshFaceMode(meshInstance);
 		CachedMeshSurface[] surfaces = GetCachedMeshSurfaces(mesh);
 
 		for (int surfaceIndex = 0; surfaceIndex < surfaces.Length; surfaceIndex++)

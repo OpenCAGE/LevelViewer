@@ -21,6 +21,24 @@ public partial class LevelViewerTransformGizmo : Node3D
     /// <summary>Fired once when a drag ends — use for pick-cache invalidation (not every mouse-move frame).</summary>
     public Action<Node3D> OnDragCommitted;
 
+    /// <summary>
+    /// Shift was held when a handle was pressed: the caller should duplicate the selection and let the
+    /// copies replace the drag targets (3ds Max shift-clone). Fired instead of beginning a real drag.
+    /// </summary>
+    public Action OnDuplicateRequested;
+
+    /// <summary>
+    /// Nearest mesh vertex to the cursor for vertex snapping: (mousePos, current targets) -> world
+    /// point, or null when the ray misses. Set by the connection, which owns the scene and pick data.
+    /// </summary>
+    public Func<Vector2, IReadOnlyList<Node3D>, Vector3?> VertexSnapProvider;
+
+    /// <summary>Vertex snapping is on for this drag (V held, or the persistent toolbar option).</summary>
+    public bool VertexSnapActive { get; set; }
+
+    /// <summary>Waiting for a shift-clone's copies to arrive so the drag can move them instead.</summary>
+    public bool IsHandoverArmed => _handoverArmed;
+
     // ── visual constants ──────────────────────────────────────────────────────
     private const float GizmoScreenSize  = 0.10f;  // desired fraction of viewport height
     private const float ArrowLength      = 1.0f;
@@ -75,6 +93,17 @@ public partial class LevelViewerTransformGizmo : Node3D
     private Quaternion _dragStartGlobalQuat;
     private Vector3    _dragRotRefDir;
     private float      _dragAccumAngleRad;
+
+    // last motion the gizmo saw, so a handover can jump the copies to where the cursor is now
+    private Vector2 _lastMousePos;
+    private bool    _vertexSnappedThisMove;
+
+    // shift-clone handover: armed at the shift-press, disarmed once the copies replace the targets
+    private bool          _handoverArmed;
+    private Vector2       _handoverPressPos;
+    private ulong         _handoverArmedMs;
+    private readonly List<Node3D> _handoverOriginals = new List<Node3D>();
+    private const ulong HandoverTimeoutMs = 2000;
 
     // mesh children
     private StandardMaterial3D[] _axisMats;  // 0=X 1=Y 2=Z  (shared by shaft+head)
@@ -147,6 +176,56 @@ public partial class LevelViewerTransformGizmo : Node3D
 
         GlobalPosition = GetTargetsCentre();
         RefreshVisibility();
+
+        TryBeginHandover();
+    }
+
+    /// <summary>
+    /// A shift-clone's copies have just been selected (this is what SetTargets is handing us). If the
+    /// left button is still down, pick the drag up on them from where it was pressed and jump to where
+    /// the cursor is now, so the copies follow the cursor as one continuous gesture.
+    /// </summary>
+    private void TryBeginHandover()
+    {
+        if (!_handoverArmed)
+            return;
+
+        //Timed out (the editor refused the duplicate, say): fall back to a normal drag on whatever is
+        //now selected so the gizmo is never left stuck swallowing motion.
+        if (Time.GetTicksMsec() - _handoverArmedMs > HandoverTimeoutMs)
+        {
+            _handoverArmed = false;
+            return;
+        }
+
+        //Still the originals (an unrelated re-selection, or the ENTITY_ADDED echo): keep waiting.
+        if (SharesAnyNode(_targets, _handoverOriginals))
+            return;
+
+        if (!Input.IsMouseButtonPressed(MouseButton.Left))
+        {
+            _handoverArmed = false;
+            return;
+        }
+
+        _handoverArmed = false;
+        _dragAxis   = _dragAxis == DragAxis.None ? _hovAxis : _dragAxis;
+        if (_dragAxis == DragAxis.None)
+            return;
+
+        _isDragging = true;
+        ApplyHighlight();
+        BeginDrag(_handoverPressPos);
+        DragUpdate(_lastMousePos);
+    }
+
+    private static bool SharesAnyNode(List<Node3D> a, List<Node3D> b)
+    {
+        for (int i = 0; i < a.Count; i++)
+            for (int j = 0; j < b.Count; j++)
+                if (a[i] == b[j])
+                    return true;
+        return false;
     }
 
     public void ClearTarget()
@@ -157,6 +236,7 @@ public partial class LevelViewerTransformGizmo : Node3D
         _target = null;
         _targets.Clear();
         _isDragging = false;
+        _handoverArmed = false;
         Visible = false;
     }
 
@@ -231,6 +311,12 @@ public partial class LevelViewerTransformGizmo : Node3D
         if (_mode == GizmoMode.None || !Visible)
             return false;
 
+        _lastMousePos = mousePos;
+
+        //Waiting on a shift-clone's copies: hold the gesture, but move nothing until they arrive.
+        if (_handoverArmed)
+            return true;
+
         if (_isDragging)
         {
             DragUpdate(mousePos);
@@ -246,7 +332,9 @@ public partial class LevelViewerTransformGizmo : Node3D
         return false;
     }
 
-    public bool HandleMouseButtonDown(Vector2 mousePos)
+    public bool HandleMouseButtonDown(Vector2 mousePos) => HandleMouseButtonDown(mousePos, duplicate: false);
+
+    public bool HandleMouseButtonDown(Vector2 mousePos, bool duplicate)
     {
         if (_mode == GizmoMode.None || !Visible || _target == null)
             return false;
@@ -257,14 +345,36 @@ public partial class LevelViewerTransformGizmo : Node3D
 
         _dragAxis   = hit;
         _hovAxis    = hit;
-        _isDragging = true;
+        _lastMousePos = mousePos;
         ApplyHighlight();
+
+        //Shift-clone (translate only): don't touch the originals - arm the handover, ask the caller to
+        //duplicate, and pick the drag up on the copies once they are selected in.
+        if (duplicate && IsTranslateMode)
+        {
+            _handoverArmed = true;
+            _handoverPressPos = mousePos;
+            _handoverArmedMs = Time.GetTicksMsec();
+            _handoverOriginals.Clear();
+            _handoverOriginals.AddRange(_targets);
+            OnDuplicateRequested?.Invoke();
+            return true;
+        }
+
+        _isDragging = true;
         BeginDrag(mousePos);
         return true;
     }
 
     public bool HandleMouseButtonUp(Vector2 mousePos)
     {
+        //Released before the copies arrived: cancel the clone drag; the copies stay where they spawned.
+        if (_handoverArmed)
+        {
+            _handoverArmed = false;
+            return true;
+        }
+
         if (!_isDragging)
             return false;
 
@@ -356,6 +466,22 @@ public partial class LevelViewerTransformGizmo : Node3D
                 ? worldDelta
                 : _dragAxisDir * worldDelta.Dot(_dragAxisDir);
 
+            //Vertex snap: put the anchor's pivot on the nearest vertex under the cursor, still held to
+            //the handle's axis or plane so the gizmo behaves as it looks. The others keep their offset.
+            _vertexSnappedThisMove = false;
+            if (VertexSnapActive && VertexSnapProvider != null)
+            {
+                Vector3? vertex = VertexSnapProvider(mousePos, _targets);
+                if (vertex.HasValue)
+                {
+                    Vector3 want = vertex.Value - _dragStartPositions[0];
+                    delta = IsPlane(_dragAxis)
+                        ? want - _dragPlaneNormal * want.Dot(_dragPlaneNormal)
+                        : _dragAxisDir * want.Dot(_dragAxisDir);
+                    _vertexSnappedThisMove = true;
+                }
+            }
+
             for (int i = 0; i < _targets.Count; i++)
             {
                 if (GodotObject.IsInstanceValid(_targets[i]))
@@ -434,7 +560,8 @@ public partial class LevelViewerTransformGizmo : Node3D
         if (_target == null || !GodotObject.IsInstanceValid(_target))
             return;
 
-        float grid = LevelViewerTransformSnap.GridSize;
+        //A vertex-snapped move is already exactly where it should be; the grid would pull it back off.
+        float grid = _vertexSnappedThisMove ? 0f : LevelViewerTransformSnap.GridSize;
         if (grid > 0f && IsTranslateMode)
         {
             Vector3 before = _target.GlobalPosition;

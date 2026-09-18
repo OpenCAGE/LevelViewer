@@ -13,7 +13,14 @@ public partial class EntityOverride : Node3D
 
     public Node3D PointedEntity
     {
-        get => _pointedEntity;
+        get
+        {
+            //The target may have been freed since it was wired - its entity deleted in the editor, which
+            //leaves this proxy dead. A freed node is no target, and reading it as one throws.
+            if (_pointedEntity != null && !GodotObject.IsInstanceValid(_pointedEntity))
+                PointedEntity = null;
+            return _pointedEntity;
+        }
         set
         {
             if (ReferenceEquals(_pointedEntity, value))

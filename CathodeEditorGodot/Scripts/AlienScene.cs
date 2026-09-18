@@ -198,6 +198,7 @@ public partial class AlienScene : Node3D
 	private string _queuedLevelName = "";
 	private string _queuedLevelPath = "";
 	private ShortGuid _queuedCompositeGuid = ShortGuid.Invalid;
+	private ShortGuid _forcedRepopulate = ShortGuid.Invalid;
 	private Composite _queuedComposite;
 	private int _contentGeneration;
 
@@ -678,9 +679,29 @@ public partial class AlienScene : Node3D
 	}
 
 	/// <summary>Shows the loading overlay, waits for UI redraw, then builds the composite scene.</summary>
-	public void QueuePopulateComposite(ShortGuid guid)
+	public void QueuePopulateComposite(ShortGuid guid) => QueuePopulateComposite(guid, false);
+
+	/// <param name="force">Populate even when this is the composite already on screen. OpenCAGE asks
+	/// for that after it has sent the contents of a composite it opened while still empty - one it
+	/// had just imported - since the entities that arrived one at a time since then do not put a
+	/// nested instance's own contents on screen the way a populate does.</param>
+	/// <summary>Build the composite on screen again from the script as it stands now.</summary>
+	public void RebuildLoadedComposite()
+	{
+		if (_loadedComposite == null || _loadedComposite.shortGUID == ShortGuid.Invalid)
+			return;
+		QueuePopulateComposite(_loadedComposite.shortGUID, true);
+	}
+
+	public void QueuePopulateComposite(ShortGuid guid, bool force)
 	{
 		_queuedCompositeGuid = guid;
+		/* A forced request that lands while a populate is on its way (the wait-UI frames before it
+		   runs) would otherwise be dropped - the pending populate goes ahead with whatever the script
+		   held when it was asked for, which is exactly the state the request was sent to replace. So
+		   it is remembered, and CompletePopulate re-issues it once the pending one is done. */
+		if (force)
+			_forcedRepopulate = guid;
 
 		if (_loadStep == LoadPipelineStep.WaitUiBeforeLevelLoad || _loadStep == LoadPipelineStep.LoadLevel)
 			return;
@@ -690,8 +711,11 @@ public partial class AlienScene : Node3D
 
 		Composite comp = _content.Level.Commands.GetComposite(guid);
 		if (comp == null)
+		{
+			_forcedRepopulate = ShortGuid.Invalid;
 			return;
-		if (_loadedComposite != null && _loadedComposite.shortGUID == guid)
+		}
+		if (!force && _loadedComposite != null && _loadedComposite.shortGUID == guid)
 		{
 			ViewerPopulateBridge.NotifySkipped();
 			return;
@@ -699,6 +723,7 @@ public partial class AlienScene : Node3D
 		if (_loadStep != LoadPipelineStep.None)
 			return;
 
+		_forcedRepopulate = ShortGuid.Invalid; //this is that populate
 		string compositeLabel = string.IsNullOrWhiteSpace(comp.name) ? "composite" : comp.name;
 		BeginWaitUiBeforeCompositePopulate("Loading " + compositeLabel + "...", comp);
 	}
@@ -812,6 +837,15 @@ public partial class AlienScene : Node3D
 		_loadStep = LoadPipelineStep.None;
 		UpdateLoadPipelineProcessing();
 		CompletePopulate();
+
+		//A forced populate that arrived while this one was on its way: now that this one is done and
+		//reported, build the composite again from what the script holds now (see QueuePopulateComposite)
+		if (_forcedRepopulate != ShortGuid.Invalid)
+		{
+			ShortGuid again = _forcedRepopulate;
+			_forcedRepopulate = ShortGuid.Invalid;
+			Callable.From(() => QueuePopulateComposite(again, true)).CallDeferred();
+		}
 	}
 
 	private void CompletePopulate()
@@ -2240,7 +2274,7 @@ public partial class AlienScene : Node3D
 		Entity focusEntity;
 		if (!_nodeEntities.TryGetValue(candidate, out focusEntity))
 			_nodeEntities.TryGetValue(entityNode, out focusEntity);
-		if (focusEntity != null && !IsPlacedInWorld(focusEntity))
+		if (focusEntity != null && !IsPlacedInWorld(focusEntity, commands))
 			return false;
 
 		if (maxExtent > 0f && LevelViewerView.TryComputeGlobalAabb(candidate, out Aabb bounds))
@@ -2265,7 +2299,7 @@ public partial class AlienScene : Node3D
 	/// logic, an alias or proxy whose target could not be resolved to a node - is not somewhere the
 	/// camera can usefully go.
 	/// </remarks>
-	private static bool IsPlacedInWorld(Entity entity)
+	private static bool IsPlacedInWorld(Entity entity, Commands commands)
 	{
 		switch (entity?.variant)
 		{
@@ -2278,7 +2312,14 @@ public partial class AlienScene : Node3D
 			//Resolved to what they point at above; only an unresolvable one arrives here, and refusing
 			//to move for something we simply could not follow would be a guess in the wrong direction
 			case EntityVariant.ALIAS:
+				return true;
+
+			//Likewise - except a dead proxy (its target is not in the level at all, see
+			//CommandsUtils.IsDeadProxy) stands nowhere unless it carries a position of its own: its node
+			//sits at its composite's origin, which for a mission script is the world origin
 			case EntityVariant.PROXY:
+				if (entity is ProxyEntity proxy && commands?.Utils != null && commands.Utils.IsDeadProxy(proxy))
+					return proxy.GetParameter("position") != null;
 				return true;
 
 			default:

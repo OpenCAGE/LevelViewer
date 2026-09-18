@@ -98,11 +98,38 @@ public partial class CommandsEditorConnection : Node3D
     private readonly Dictionary<ParameterSyncKey, PendingParameterSync> _pendingParameterSyncs = new Dictionary<ParameterSyncKey, PendingParameterSync>();
     private readonly ConcurrentQueue<string> _incomingMessages = new ConcurrentQueue<string>();
 
-    //A queue, not one slot: a whole message batch is drained before this is consumed, so a multi-entity
-    //add (a multi-selection duplicate, or a multi-entity viewport paste) would otherwise spawn only the last.
-    private readonly Queue<Tuple<ShortGuid, ShortGuid>> _addedEntities = new Queue<Tuple<ShortGuid, ShortGuid>>();
-    private Tuple<ShortGuid, ShortGuid> _removedEntity = null;
-    private ShortGuid _removedComposite = ShortGuid.Invalid;
+    /* Entity adds and removals, in the order they arrived. One queue, not one slot and not two queues:
+       a whole message batch is drained before this is consumed, so a multi-entity add (a multi-selection
+       duplicate, a multi-entity viewport paste) needs a queue, and a removal and an add of the SAME id in
+       one batch - a proxy re-pointed in OpenCAGE arrives as ENTITY_DELETED then ENTITY_ADDED - has to be
+       applied as sent, or the add spawns a second node and the removal then takes one of the pair. */
+    private struct EntityOp
+    {
+        public bool Add;
+        public ShortGuid Composite;
+        public ShortGuid Entity;
+    }
+    private readonly Queue<EntityOp> _entityOps = new Queue<EntityOp>();
+    //Every composite deleted since the last pump, not just the last one: a port replacing nested composites deletes a run of them at once
+    private readonly Queue<ShortGuid> _removedComposites = new Queue<ShortGuid>();
+
+    /* Inside a scene batch (an import) the script copy is kept up to date and the scene is left alone:
+       the COMPOSITE_RELOADED the batch ends with rebuilds it whole. Should the batch end without one,
+       the scene is rebuilt then, so nothing deleted or added in it is ever shown stale. */
+    private int _sceneBatchDepth;
+    private bool _sceneBatchTouched;
+    private bool _sceneBatchRebuildQueued;
+    private bool InSceneBatch => _sceneBatchDepth > 0;
+
+    /* A batch whose end was never seen (the socket dropped in it) would leave the scene never touched again. Call under _lock. */
+    private void ResetSceneBatch(string why)
+    {
+        if (_sceneBatchDepth != 0)
+            ViewerLog.Print("Scene batch left open (" + why + "): closed");
+        _sceneBatchDepth = 0;
+        _sceneBatchTouched = false;
+        _sceneBatchRebuildQueued = false;
+    }
 
 	public bool ShowCameraPosition => _showCameraPosition;
 	public bool FocusOnSelected => _focusOnSelected;
@@ -183,6 +210,7 @@ public partial class CommandsEditorConnection : Node3D
         SetPhysicsProcess(false);
         Interlocked.Exchange(ref _lastConnectedTicks, DateTime.UtcNow.Ticks);
         StartEditorWatchdog();
+        GetTree().Root.FilesDropped += OnViewportFilesDropped;
         _ = ReconnectLoopAsync(_connectionCts.Token);
     }
 
@@ -462,7 +490,7 @@ public partial class CommandsEditorConnection : Node3D
             return true;
         if (_levelName != "" && _didLoadLevel)
             return true;
-        if (_addedEntities.Count > 0 || _removedEntity != null || _removedComposite != ShortGuid.Invalid)
+        if (_entityOps.Count > 0 || _removedComposites.Count > 0)
             return true;
         if (_forceSelectionApply || _currentEntityGOID != _currentEntity)
             return true;
@@ -497,29 +525,38 @@ public partial class CommandsEditorConnection : Node3D
                 Callable.From(() => _scene.QueueLoadLevel(level, pathToAi)).CallDeferred();
         }
 
-        if (_addedEntities.Count > 0)
+        if (_entityOps.Count > 0)
         {
-            while (_addedEntities.Count > 0)
+            //One line for a batch of adds (a whole composite's contents), not one per entity
+            int adds = 0;
+            foreach (EntityOp op in _entityOps)
+                if (op.Add) adds++;
+            if (adds > 1)
+                ViewerLog.Print("Adding " + adds + " entities");
+            while (_entityOps.Count > 0)
             {
-                Tuple<ShortGuid, ShortGuid> added = _addedEntities.Dequeue();
-                ViewerLog.Print("Adding entity: " + added.Item2.AsUInt32);
-                _scene.AddEntity(added.Item1, added.Item2);
+                EntityOp op = _entityOps.Dequeue();
+                if (op.Add)
+                {
+                    if (adds == 1)
+                        ViewerLog.Print("Adding entity: " + op.Entity.AsUInt32);
+                    _scene.AddEntity(op.Composite, op.Entity);
+                }
+                else
+                {
+                    ViewerLog.Print("Removing entity: " + op.Entity.AsUInt32);
+                    _scene.RemoveEntity(op.Composite, op.Entity);
+                }
             }
-            _scene.RefreshEntityHighlights();
+            if (adds > 0)
+                _scene.RefreshEntityHighlights();
         }
 
-        if (_removedEntity != null)
+        while (_removedComposites.Count > 0)
         {
-            ViewerLog.Print("Removing entity: " + _removedEntity.Item2.AsUInt32);
-            _scene.RemoveEntity(_removedEntity.Item1, _removedEntity.Item2);
-            _removedEntity = null;
-        }
-
-        if (_removedComposite != ShortGuid.Invalid)
-        {
-            ViewerLog.Print("Removing composite: " + _removedComposite.AsUInt32);
-            _scene.RemoveComposite(_removedComposite);
-            _removedComposite = ShortGuid.Invalid;
+            ShortGuid removed = _removedComposites.Dequeue();
+            ViewerLog.Print("Removing composite: " + removed.AsUInt32);
+            _scene.RemoveComposite(removed);
         }
 
         bool sceneFiltersDirty = false;
@@ -873,7 +910,17 @@ public partial class CommandsEditorConnection : Node3D
 
             _showCameraPosition = packet.show_camera_position;
             bool hideNestedChanged = ApplyViewerSettings(packet);
-            ApplyActiveComposite(packet);
+            /* On these packets `composite` names the composite the packet is ABOUT, not the one the
+               editor has open; with nothing open in the editor (an import closes its tabs first) that
+               id would otherwise be taken for a navigation, and every one of them costs a focus refresh
+               over the whole scene. */
+            bool subjectPacket = packet.packet_event == PacketEvent.COMPOSITE_ADDED
+                || packet.packet_event == PacketEvent.COMPOSITE_DELETED
+                || packet.packet_event == PacketEvent.COMPOSITE_CONTENTS
+                || packet.packet_event == PacketEvent.ENTITY_ADDED
+                || packet.packet_event == PacketEvent.ENTITY_DELETED;
+            if (!subjectPacket)
+                ApplyActiveComposite(packet);
 
             bool activeCompositeChanged = previousActiveCompositeId != PreviewVisibilitySettings.ActiveCompositeId;
             bool instancePathChanged = !PreviewVisibilitySettings.InstancePathsEqual(
@@ -927,9 +974,17 @@ public partial class CommandsEditorConnection : Node3D
                 MarkNestedVisibilityDirty(previousActiveCompositeId);
         }
 
+        //Inside a scene batch the scene is rebuilt at the end: a focus refresh over the old scene now is thrown away
         if (refreshCompositeFocusNow)
-            ApplyCompositeFocusNow();
+        {
+            if (InSceneBatch) MarkCompositeFocusDirty();
+            else ApplyCompositeFocusNow();
+        }
+        HandleEvent(packet);
+    }
 
+    private void HandleEvent(Packet packet)
+    {
         switch (packet.packet_event)
         {
             case PacketEvent.ENTITY_ADDED:
@@ -938,51 +993,70 @@ public partial class CommandsEditorConnection : Node3D
                 {
                     Composite composite = _scene.Content.Level?.Commands.Entries.FirstOrDefault(o => o.shortGUID.AsUInt32 == packet.composite);
                     if (composite != null)
+                        AddEntityToComposite(composite, packet.entity, packet.entity_variant, packet.entity_function, packet.entity_pointed, packet.parameters);
+                    if (InSceneBatch)
+                        _sceneBatchTouched = true;
+                    else
+                        _entityOps.Enqueue(new EntityOp() { Add = true, Composite = new ShortGuid(packet.composite), Entity = new ShortGuid(packet.entity) });
+                }
+                break;
+            }
+            case PacketEvent.SCENE_BATCH_BEGIN:
+                lock (_lock)
+                {
+                    if (_sceneBatchDepth++ == 0)
                     {
-                        ShortGuid entityId = new ShortGuid(packet.entity);
-                        if (composite.GetEntityByID(entityId) == null)
-                        {
-                            switch (packet.entity_variant)
-                            {
-                                case EntityVariant.FUNCTION:
-                                {
-                                    FunctionEntity functionEntity = new FunctionEntity() { shortGUID = entityId, function = new ShortGuid(packet.entity_function) };
-                                    composite.AddFunction(functionEntity);
-                                    ApplyEntityAddedParameters(functionEntity, packet);
-                                    break;
-                                }
-                                case EntityVariant.VARIABLE:
-                                {
-                                    VariableEntity variableEntity = new VariableEntity() { shortGUID = entityId };
-                                    composite.AddVariable(variableEntity);
-                                    ApplyEntityAddedParameters(variableEntity, packet);
-                                    break;
-                                }
-                                case EntityVariant.ALIAS:
-                                {
-                                    EntityPath aliasPath = new EntityPath() { path = new ShortGuid[packet.entity_pointed.Count] };
-                                    for (int i = 0; i < packet.entity_pointed.Count; i++)
-                                        aliasPath.path[i] = new ShortGuid(packet.entity_pointed[i]);
-                                    AliasEntity aliasEntity = new AliasEntity() { shortGUID = entityId, alias = aliasPath };
-                                    composite.AddAlias(aliasEntity);
-                                    ApplyEntityAddedParameters(aliasEntity, packet);
-                                    break;
-                                }
-                                case EntityVariant.PROXY:
-                                {
-                                    EntityPath proxy = new EntityPath() { path = new ShortGuid[packet.entity_pointed.Count] };
-                                    for (int i = 0; i < packet.entity_pointed.Count; i++)
-                                        proxy.path[i] = new ShortGuid(packet.entity_pointed[i]);
-                                    ProxyEntity proxyEntity = new ProxyEntity() { shortGUID = entityId, proxy = proxy };
-                                    composite.AddProxy(proxyEntity);
-                                    ApplyEntityAddedParameters(proxyEntity, packet);
-                                    break;
-                                }
-                            }
-                        }
+                        _sceneBatchTouched = false;
+                        _sceneBatchRebuildQueued = false;
                     }
-
-                    _addedEntities.Enqueue(new Tuple<ShortGuid, ShortGuid>(new ShortGuid(packet.composite), new ShortGuid(packet.entity)));
+                }
+                break;
+            case PacketEvent.SCENE_BATCH_END:
+            {
+                bool rebuild = false;
+                lock (_lock)
+                {
+                    if (_sceneBatchDepth > 0 && --_sceneBatchDepth == 0)
+                        rebuild = _sceneBatchTouched && !_sceneBatchRebuildQueued;
+                }
+                /* The editor is on a different composite from the one on screen: its selection (or the
+                   reload the import ends with, held behind a resource sync) is on its way and rebuilds
+                   the scene as that composite - rebuilding the old one first would be thrown away. */
+                if (rebuild && packet.composite != 0 && _scene != null && _scene.CompositeID != 0 && packet.composite != _scene.CompositeID)
+                    rebuild = false;
+                if (rebuild)
+                {
+                    ViewerLog.Print("Scene batch ended without a rebuild: rebuilding the composite on screen");
+                    Callable.From(() => _scene?.RebuildLoadedComposite()).CallDeferred();
+                }
+                break;
+            }
+            case PacketEvent.COMPOSITE_CONTENTS:
+            {
+                /* A composite that arrived populated (an import): all of it at once, where ENTITY_ADDED
+                   is one entity at a time. Nothing is on screen for it yet - a COMPOSITE_RELOADED follows
+                   when it is the one open - so this only fills in the script's copy. */
+                lock (_lock)
+                {
+                    Composite composite = _scene.Content.Level?.Commands.Entries.FirstOrDefault(o => o.shortGUID.AsUInt32 == packet.composite);
+                    if (composite != null)
+                    {
+                        if (string.IsNullOrEmpty(composite.name) && !string.IsNullOrEmpty(packet.composite_name))
+                            composite.name = packet.composite_name;
+                        int added = 0;
+                        foreach (EntityRecord record in packet.composite_entities ?? new List<EntityRecord>())
+                        {
+                            if (record == null)
+                                continue;
+                            if (AddEntityToComposite(composite, record.entity, record.entity_variant, record.entity_function, record.entity_pointed, record.parameters))
+                                added++;
+                            if (!InSceneBatch)
+                                _entityOps.Enqueue(new EntityOp() { Add = true, Composite = new ShortGuid(packet.composite), Entity = new ShortGuid(record.entity) });
+                        }
+                        if (InSceneBatch)
+                            _sceneBatchTouched = true;
+                        ViewerLog.Print("Added " + added + " entities to composite " + (string.IsNullOrEmpty(composite.name) ? composite.shortGUID.ToByteString() : composite.name));
+                    }
                 }
                 break;
             }
@@ -993,7 +1067,7 @@ public partial class CommandsEditorConnection : Node3D
             {
                 lock (_lock)
                 {
-                    _scene.Content.Level?.Commands.Entries.Add(new Composite() { shortGUID = new ShortGuid(packet.composite) });
+                    _scene.Content.Level?.Commands.Entries.Add(new Composite() { shortGUID = new ShortGuid(packet.composite), name = packet.composite_name ?? "" });
                 }
                 break;
             }
@@ -1002,7 +1076,10 @@ public partial class CommandsEditorConnection : Node3D
                 lock (_lock)
                 {
                     _scene.Content.Level?.Commands.Entries.RemoveAll(o => o.shortGUID == new ShortGuid(packet.composite));
-                    _removedComposite = new ShortGuid(packet.composite);
+                    if (InSceneBatch)
+                        _sceneBatchTouched = true;
+                    else
+                        _removedComposites.Enqueue(new ShortGuid(packet.composite));
                 }
                 break;
             }
@@ -1018,6 +1095,7 @@ public partial class CommandsEditorConnection : Node3D
                         _viewerOriginatedEntityAdds.Clear();
                         _releasedEphemeralAliases.Clear();
                     }
+                    ResetSceneBatch("level loaded");
                 }
 
                 if (skipReload)
@@ -1031,6 +1109,7 @@ public partial class CommandsEditorConnection : Node3D
                 break;
             }
             case PacketEvent.COMPOSITE_SELECTED:
+                NameComposite(packet);
                 if (ShouldQueueScenePopulate(packet))
                 {
                     uint compositeId = packet.composite;
@@ -1038,8 +1117,21 @@ public partial class CommandsEditorConnection : Node3D
                 }
                 break;
             case PacketEvent.COMPOSITE_RELOADED:
-                // Legacy: hierarchy navigation now uses GENERIC_DATA_SYNC from OpenCAGE.
+            {
+                /* OpenCAGE asks for the composite on screen to be built again from what it has now sent.
+                   It does this after an import: the composite was opened (and populated here, empty) before
+                   its contents could go, and the entities that then arrived one by one leave a nested
+                   instance's own contents off screen - only a populate walks them. Hierarchy navigation
+                   never comes this way (that is GENERIC_DATA_SYNC), so a root switch is all this can be. */
+                NameComposite(packet);
+                if (packet.composite != 0 && (packet.path_composites == null || packet.path_composites.Count <= 1))
+                {
+                    uint compositeId = packet.composite;
+                    lock (_lock) { if (InSceneBatch) _sceneBatchRebuildQueued = true; }
+                    Callable.From(() => _scene?.QueuePopulateComposite(new ShortGuid(compositeId), true)).CallDeferred();
+                }
                 break;
+            }
         }
     }
 
@@ -1433,6 +1525,19 @@ public partial class CommandsEditorConnection : Node3D
         SendMessage(packet);
     }
 
+    /// <summary>
+    /// Files dropped on the viewport window. This window is Godot's own OLE drop target, so a drop
+    /// here never reaches the WinForms host; OpenCAGE opens what it recognises (its package files).
+    /// </summary>
+    private void OnViewportFilesDropped(string[] files)
+    {
+        if (files == null || files.Length == 0)
+            return;
+        Packet packet = new Packet(PacketEvent.FILES_DROPPED);
+        packet.dropped_files = new List<string>(files);
+        SendMessage(packet);
+    }
+
     /// <summary>Nearest scene vertex to the cursor, for the gizmo's vertex snap. The dragged targets are excluded.</summary>
     private Vector3? ProvideNearestVertex(Vector2 mousePos, IReadOnlyList<Node3D> dragTargets)
     {
@@ -1818,6 +1923,7 @@ public partial class CommandsEditorConnection : Node3D
                     cancellationToken);
                 ViewerLog.Print("Connected to Commands Editor!");
                 ViewerLogBridge.NotifyConnected();
+                lock (_lock) { ResetSceneBatch("connected"); }
 
                 Interlocked.Exchange(ref _lastConnectedTicks, DateTime.UtcNow.Ticks);
 
@@ -1865,6 +1971,9 @@ public partial class CommandsEditorConnection : Node3D
     {
         byte[] buffer = new byte[8192];
         StringBuilder messageBuilder = new StringBuilder();
+        //A message arrives in chunks, and a multi-byte character can straddle two: the decoder keeps the partial character between calls
+        Decoder decoder = Encoding.UTF8.GetDecoder();
+        char[] chars = new char[Encoding.UTF8.GetMaxCharCount(buffer.Length)];
 
         while (client.State == WebSocketState.Open && !cancellationToken.IsCancellationRequested)
         {
@@ -1873,7 +1982,8 @@ public partial class CommandsEditorConnection : Node3D
             if (result.MessageType == WebSocketMessageType.Close)
                 return true;
 
-            messageBuilder.Append(Encoding.UTF8.GetString(buffer, 0, result.Count));
+            int decoded = decoder.GetChars(buffer, 0, result.Count, chars, 0, result.EndOfMessage);
+            messageBuilder.Append(chars, 0, decoded);
 
             if (result.EndOfMessage)
             {
@@ -2936,7 +3046,11 @@ public partial class CommandsEditorConnection : Node3D
             }
 
             ClearEphemeralDeepSelectAliasTrackingIfMatch(packet.composite, packet.entity);
-            _removedEntity = new Tuple<ShortGuid, ShortGuid>(new ShortGuid(packet.composite), new ShortGuid(packet.entity));
+            //Inside a scene batch the rebuild at its end covers the scene, as for adds
+            if (InSceneBatch)
+                _sceneBatchTouched = true;
+            else
+                _entityOps.Enqueue(new EntityOp() { Add = false, Composite = new ShortGuid(packet.composite), Entity = new ShortGuid(packet.entity) });
         }
     }
 
@@ -3469,13 +3583,76 @@ public partial class CommandsEditorConnection : Node3D
         };
     }
 
-    private void ApplyEntityAddedParameters(Entity entity, Packet packet)
+    private void ApplyEntityAddedParameters(Entity entity, List<SyncedParameter> parameters)
     {
-        if (entity == null || packet?.parameters == null || packet.parameters.Count == 0 || _scene?.Content == null)
+        if (entity == null || parameters == null || parameters.Count == 0 || _scene?.Content == null)
             return;
 
-        foreach (SyncedParameter sync in packet.parameters)
+        foreach (SyncedParameter sync in parameters)
             ParameterSync.ApplyToEntity(entity, sync, _scene.Content);
+    }
+
+    /* A composite this viewer only knows by id (added this session) takes its name from the first packet that carries one */
+    private void NameComposite(Packet packet)
+    {
+        if (packet == null || packet.composite == 0 || string.IsNullOrEmpty(packet.composite_name))
+            return;
+        lock (_lock)
+        {
+            Composite composite = _scene?.Content?.Level?.Commands?.Entries.FirstOrDefault(o => o.shortGUID.AsUInt32 == packet.composite);
+            if (composite != null && string.IsNullOrEmpty(composite.name))
+                composite.name = packet.composite_name;
+        }
+    }
+
+    /* The script's copy of an entity, as ENTITY_ADDED (or one COMPOSITE_CONTENTS record) describes it. Call under _lock. */
+    private bool AddEntityToComposite(Composite composite, uint entityUint, EntityVariant variant, uint function, List<uint> pointed, List<SyncedParameter> parameters)
+    {
+        ShortGuid entityId = new ShortGuid(entityUint);
+        if (composite.GetEntityByID(entityId) != null)
+            return false;
+        switch (variant)
+        {
+            case EntityVariant.FUNCTION:
+            {
+                FunctionEntity functionEntity = new FunctionEntity() { shortGUID = entityId, function = new ShortGuid(function) };
+                composite.AddFunction(functionEntity);
+                ApplyEntityAddedParameters(functionEntity, parameters);
+                return true;
+            }
+            case EntityVariant.VARIABLE:
+            {
+                VariableEntity variableEntity = new VariableEntity() { shortGUID = entityId };
+                composite.AddVariable(variableEntity);
+                ApplyEntityAddedParameters(variableEntity, parameters);
+                return true;
+            }
+            case EntityVariant.ALIAS:
+            {
+                EntityPath aliasPath = new EntityPath() { path = PathOf(pointed) };
+                AliasEntity aliasEntity = new AliasEntity() { shortGUID = entityId, alias = aliasPath };
+                composite.AddAlias(aliasEntity);
+                ApplyEntityAddedParameters(aliasEntity, parameters);
+                return true;
+            }
+            case EntityVariant.PROXY:
+            {
+                EntityPath proxy = new EntityPath() { path = PathOf(pointed) };
+                ProxyEntity proxyEntity = new ProxyEntity() { shortGUID = entityId, proxy = proxy };
+                composite.AddProxy(proxyEntity);
+                ApplyEntityAddedParameters(proxyEntity, parameters);
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static ShortGuid[] PathOf(List<uint> pointed)
+    {
+        ShortGuid[] path = new ShortGuid[pointed?.Count ?? 0];
+        for (int i = 0; i < path.Length; i++)
+            path[i] = new ShortGuid(pointed[i]);
+        return path;
     }
 
     private static bool IsEmbeddedInOpenCage =>

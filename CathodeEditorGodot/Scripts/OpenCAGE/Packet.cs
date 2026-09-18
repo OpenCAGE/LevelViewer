@@ -88,6 +88,33 @@ namespace OpenCAGE.UnityConnection
         // so it makes the copies - in place, undoable as one step - and selects them, which reaches
         // the viewer as the usual ENTITY_ADDED + ENTITY_SELECTED and is what hands the drag over.
         ENTITY_DUPLICATE_REQUEST,
+
+        // Level Viewer -> OpenCAGE: files were dropped on the viewport window. Godot owns that window's
+        // drop target, so a package (.ocp / .omp) dropped there is handed to OpenCAGE to open, the
+        // same as a drop anywhere else on the editor. Carries `dropped_files`.
+        FILES_DROPPED,
+
+        // OpenCAGE -> Level Viewer: every entity of one composite (`composite`), in `composite_entities`.
+        // Sent for a composite that arrives already populated (an import), instead of one ENTITY_ADDED
+        // per entity - a mission script is a thousand of those.
+        COMPOSITE_CONTENTS,
+
+        // OpenCAGE -> Level Viewer: a run of composite/entity changes is starting (an import) that ends
+        // with the scene being rebuilt, so until SCENE_BATCH_END the viewer keeps its script copy up to
+        // date and leaves the scene alone - tearing the old nodes down one composite at a time is work
+        // the rebuild throws away, and it keeps the viewer's thread busy for seconds.
+        SCENE_BATCH_BEGIN,
+        SCENE_BATCH_END,
+    }
+
+    /// <summary>One entity of a composite, as ENTITY_ADDED would carry it, for COMPOSITE_CONTENTS.</summary>
+    public class EntityRecord
+    {
+        public uint entity;
+        public EntityVariant entity_variant;
+        public uint entity_function; //For function entities
+        public List<uint> entity_pointed; //For alias/proxy entities
+        public List<SyncedParameter> parameters = new List<SyncedParameter>();
     }
 
     /// <summary>
@@ -116,7 +143,7 @@ namespace OpenCAGE.UnityConnection
 
         //Packet metadata
         public PacketEvent packet_event;
-        public int version = 19;
+        public int version = 21;
 
         //Setup metadata
         public string level_name = "";
@@ -130,6 +157,11 @@ namespace OpenCAGE.UnityConnection
         public List<uint> path_composites = new List<uint>();
         public uint entity;
         public uint composite;
+        //With COMPOSITE_ADDED, COMPOSITE_SELECTED and COMPOSITE_RELOADED: what the composite is called, for a
+        //viewer that has only ever been told its id (a composite added this session)
+        public string composite_name = "";
+        //With COMPOSITE_CONTENTS: every entity of `composite`
+        public List<EntityRecord> composite_entities = new List<EntityRecord>();
 
         // Everything selected in `composite`, `entity` first, when more than one thing is selected.
         // Empty means the selection is just `entity` - the usual case - so a one-entity selection is
@@ -170,6 +202,9 @@ namespace OpenCAGE.UnityConnection
         public string resource_sync_models = null;
         public List<string> resource_changed_textures = new List<string>();
         public List<string> resource_changed_models = new List<string>();
+
+        //Files dropped on the viewport window (FILES_DROPPED): absolute paths, as the OS gave them
+        public List<string> dropped_files = new List<string>();
 
         //Track if things have changed
         public bool dirty = false;

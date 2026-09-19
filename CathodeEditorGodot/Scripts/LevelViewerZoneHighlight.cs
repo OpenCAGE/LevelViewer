@@ -208,7 +208,7 @@ public static class LevelViewerZoneHighlight
 		}
 
 		//The wireframe pass draws a model's edges over it; filling those in solid would erase it
-		if (mesh.IsInGroup("model_reference_wireframe_overlay"))
+		if (mesh.IsInGroup(LevelViewerPick.WireframeOverlayGroupName))
 			return false;
 
 		//A preview icon is a camera-facing sprite, not a piece of the level: flat-filling it says nothing

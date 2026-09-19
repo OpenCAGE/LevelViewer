@@ -26,6 +26,13 @@ public static class PreviewVisualUtility
     private static readonly Dictionary<Color, ShaderMaterial> _overlayLineByColour = new Dictionary<Color, ShaderMaterial>();
     private static readonly Dictionary<(Texture2D icon, Color tint), ShaderMaterial> _iconBillboardByIcon = new Dictionary<(Texture2D icon, Color tint), ShaderMaterial>();
 
+    //Shader parameter names as StringNames, made once. A literal is a temporary whose native handle the
+    //binding gives the engine with nothing keeping it alive across the icall (see LevelViewerPick).
+    private static readonly StringName AlbedoColorParam = new StringName("albedo_color");
+    private static readonly StringName AlbedoTextureParam = new StringName("albedo_texture");
+    //"." resolves to the node itself; the path is made once for the same reason.
+    private static readonly NodePath SelfPath = new NodePath(".");
+
     /* One mesh per shape, shared by every preview that draws it. Each position marker used to build its
      * own torus ArrayMesh and three CylinderMeshes, every box, sphere, pyramid and character its own
      * primitive: thousands of identical vertex buffers on a big level, each a RenderingServer mesh with
@@ -67,7 +74,7 @@ public static class PreviewVisualUtility
             Shader = shared.Shader,
             RenderPriority = shared.RenderPriority,
         };
-        material.SetShaderParameter("albedo_color", color);
+        material.SetShaderParameter(AlbedoColorParam, color);
         cache[color] = material;
         return material;
     }
@@ -384,7 +391,7 @@ public static class PreviewVisualUtility
     {
         MeshInstance3D meshInstance = node as MeshInstance3D;
         if (meshInstance == null)
-            meshInstance = node.GetNodeOrNull<MeshInstance3D>(".");
+            meshInstance = node.GetNodeOrNull<MeshInstance3D>(SelfPath);
 
         if (meshInstance != null)
         {
@@ -610,7 +617,7 @@ public static class PreviewVisualUtility
         arrays[(int)Mesh.ArrayType.Vertex] = vertices;
         arrays[(int)Mesh.ArrayType.TexUV] = uvs;
         arrays[(int)Mesh.ArrayType.Index] = triangles;
-        mesh.AddSurfaceFromArrays(Mesh.PrimitiveType.Triangles, arrays);
+        LevelViewerMeshUtil.AddSurface(mesh, Mesh.PrimitiveType.Triangles, arrays);
         return mesh;
     }
 
@@ -656,8 +663,8 @@ public static class PreviewVisualUtility
                 Shader = SharedIconBillboardMaterial.Shader,
                 RenderPriority = SharedIconBillboardMaterial.RenderPriority,
             };
-            material.SetShaderParameter("albedo_texture", icon);
-            material.SetShaderParameter("albedo_color", tint);
+            material.SetShaderParameter(AlbedoTextureParam, icon);
+            material.SetShaderParameter(AlbedoColorParam, tint);
             _iconBillboardByIcon[key] = material;
         }
         meshInstance.MaterialOverride = material;
@@ -692,7 +699,7 @@ public static class PreviewVisualUtility
         arrays[(int)Mesh.ArrayType.Vertex] = vertices;
         arrays[(int)Mesh.ArrayType.TexUV] = uvs;
         arrays[(int)Mesh.ArrayType.Index] = triangles;
-        _billboardQuadMesh.AddSurfaceFromArrays(Mesh.PrimitiveType.Triangles, arrays);
+        LevelViewerMeshUtil.AddSurface(_billboardQuadMesh, Mesh.PrimitiveType.Triangles, arrays);
         return _billboardQuadMesh;
     }
 

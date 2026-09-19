@@ -81,7 +81,7 @@ public sealed class ParsedMeshSurface
 		if (Uvs != null)
 			arrays[(int)Mesh.ArrayType.TexUV] = Uvs;
 
-		mesh.AddSurfaceFromArrays(Mesh.PrimitiveType.Triangles, arrays);
+		LevelViewerMeshUtil.AddSurface(mesh, Mesh.PrimitiveType.Triangles, arrays);
 		return mesh;
 	}
 }

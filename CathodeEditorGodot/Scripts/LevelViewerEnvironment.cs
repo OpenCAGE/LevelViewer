@@ -5,13 +5,17 @@ using Godot;
 /// </summary>
 public static class LevelViewerEnvironment
 {
+	//A NodePath literal is a temporary whose native handle the binding gives the engine with nothing
+	//keeping it alive (see LevelViewerPick); made once.
+	private static readonly NodePath WorldEnvironmentPath = new NodePath("WorldEnvironment");
+
 	public static void EnsureViewerEnvironment(Node fromNode)
 	{
 		if (fromNode == null)
 			return;
 
-		WorldEnvironment worldEnvironment = fromNode.GetNodeOrNull<WorldEnvironment>("WorldEnvironment")
-			?? fromNode.GetParent()?.GetNodeOrNull<WorldEnvironment>("WorldEnvironment");
+		WorldEnvironment worldEnvironment = fromNode.GetNodeOrNull<WorldEnvironment>(WorldEnvironmentPath)
+			?? fromNode.GetParent()?.GetNodeOrNull<WorldEnvironment>(WorldEnvironmentPath);
 
 		if (worldEnvironment?.Environment == null)
 			return;

@@ -10,7 +10,12 @@ using System.Collections.Generic;
 /// </summary>
 public static class LevelViewerCompositeFocus
 {
-	private const string WireframeOverlayGroup = "model_reference_wireframe_overlay";
+	//Shader parameter names as StringNames, made once: a literal is a temporary whose native handle the
+	//binding gives the engine with nothing keeping it alive - see LevelViewerPick. Group names likewise.
+	private static readonly StringName BaseGreyParam = new StringName("base_grey");
+	private static readonly StringName OpacityParam = new StringName("opacity");
+	private static readonly StringName AlbedoColorParam = new StringName("albedo_color");
+	private static readonly StringName DiffuseTintParam = new StringName("diffuse_tint");
 	private static readonly Color DimBaseGrey = new(0.09f, 0.09f, 0.10f, 1f);
 	private const int TransparentRenderPriority = 1;
 	private static Shader _dimmedShader;
@@ -486,7 +491,7 @@ public static class LevelViewerCompositeFocus
 		for (int i = 0; i < meshes.Count; i++)
 		{
 			MeshInstance3D mesh = meshes[i];
-			if (mesh == null || !GodotObject.IsInstanceValid(mesh) || mesh.IsInGroup(WireframeOverlayGroup))
+			if (mesh == null || !GodotObject.IsInstanceValid(mesh) || mesh.IsInGroup(LevelViewerPick.WireframeOverlayGroupName))
 				continue;
 
 			switch (ApplyMeshFocusState(mesh, shouldDim))
@@ -535,7 +540,7 @@ public static class LevelViewerCompositeFocus
 	{
 		//Scene-filter geometry answers to its own filter, not to focus. Greying out an occlusion hull
 		//would hide the very thing the filter was switched on to show.
-		if (mesh != null && mesh.IsInGroup(LevelViewerPick.SceneFilterGroup))
+		if (mesh != null && mesh.IsInGroup(LevelViewerPick.SceneFilterGroupName))
 			return;
 
 		if (dimmed)
@@ -640,10 +645,10 @@ public static class LevelViewerCompositeFocus
 		{
 			Shader = shader,
 		};
-		material.SetShaderParameter("base_grey", DimBaseGrey);
+		material.SetShaderParameter(BaseGreyParam, DimBaseGrey);
 		if (transparent)
 		{
-			material.SetShaderParameter("opacity", 0.24f);
+			material.SetShaderParameter(OpacityParam, 0.24f);
 			material.RenderPriority = TransparentRenderPriority;
 		}
 
@@ -690,22 +695,22 @@ public static class LevelViewerCompositeFocus
 
 		if (path.Contains("preview_transparent") || path.Contains("preview_icon_billboard"))
 		{
-			opacity = TryGetShaderColorAlpha(shaderMaterial, "albedo_color", 0.24f);
+			opacity = TryGetShaderColorAlpha(shaderMaterial, AlbedoColorParam, 0.24f);
 			return true;
 		}
 
 		if (path.Contains("transparent") || path.Contains("wireframe_transparent"))
 		{
-			opacity = TryGetShaderColorAlpha(shaderMaterial, "diffuse_tint", 1f);
+			opacity = TryGetShaderColorAlpha(shaderMaterial, DiffuseTintParam, 1f);
 			if (opacity >= 0.999f)
-				opacity = TryGetShaderColorAlpha(shaderMaterial, "albedo_color", opacity);
+				opacity = TryGetShaderColorAlpha(shaderMaterial, AlbedoColorParam, opacity);
 			return true;
 		}
 
 		return false;
 	}
 
-	private static float TryGetShaderColorAlpha(ShaderMaterial material, string parameterName, float fallback)
+	private static float TryGetShaderColorAlpha(ShaderMaterial material, StringName parameterName, float fallback)
 	{
 		if (material == null)
 			return fallback;
@@ -735,7 +740,7 @@ public static class LevelViewerCompositeFocus
 	{
 		foreach (Node child in solidMesh.GetChildren())
 		{
-			if (child is Node3D node3D && child.IsInGroup(WireframeOverlayGroup))
+			if (child is Node3D node3D && child.IsInGroup(LevelViewerPick.WireframeOverlayGroupName))
 				node3D.Visible = visible;
 		}
 	}

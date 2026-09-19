@@ -333,14 +333,16 @@ public partial class CollisionMeshOverlay : Node3D
 		//array by value with no GC.KeepAlive, so once the wrapper has no further use the collector may finalize it
 		//mid-call, and Array's finalizer destroys the native array while the engine is still reading it: "Condition
 		//!success at Array::_ref" followed by an access violation, which killed the viewer building this overlay for
-		//SCI_Hub in the 3 Sep 2026 soak. Every other AddSurfaceFromArrays site does the same.
+		//SCI_Hub in the 3 Sep 2026 soak. Every other AddSurfaceFromArrays site does the same, and all of them call
+		//through LevelViewerMeshUtil.AddSurface, which does the same for the blendShapes/lods defaults the binding
+		//would otherwise make unrooted (the engine reads lods last, so that window is the widest of the lot).
 		using Godot.Collections.Array surface = new Godot.Collections.Array();
 		surface.Resize((int)Mesh.ArrayType.Max);
 		surface[(int)Mesh.ArrayType.Vertex] = positions;
 		surface[(int)Mesh.ArrayType.Normal] = normals;
 
 		ArrayMesh mesh = new ArrayMesh();
-		mesh.AddSurfaceFromArrays(Mesh.PrimitiveType.Triangles, surface);
+		LevelViewerMeshUtil.AddSurface(mesh, Mesh.PrimitiveType.Triangles, surface);
 		return mesh;
 	}
 

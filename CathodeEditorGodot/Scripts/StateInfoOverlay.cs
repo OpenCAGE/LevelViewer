@@ -265,7 +265,7 @@ public partial class StateInfoOverlay : Node3D
 		surface[(int)Mesh.ArrayType.Index] = indices.ToArray();
 
 		ArrayMesh mesh = new ArrayMesh();
-		mesh.AddSurfaceFromArrays(Mesh.PrimitiveType.Triangles, surface);
+		LevelViewerMeshUtil.AddSurface(mesh, Mesh.PrimitiveType.Triangles, surface);
 		return mesh;
 	}
 
@@ -286,7 +286,7 @@ public partial class StateInfoOverlay : Node3D
 		surface[(int)Mesh.ArrayType.Index] = lines.ToArray();
 
 		ArrayMesh mesh = new ArrayMesh();
-		mesh.AddSurfaceFromArrays(Mesh.PrimitiveType.Lines, surface);
+		LevelViewerMeshUtil.AddSurface(mesh, Mesh.PrimitiveType.Lines, surface);
 		return mesh;
 	}
 

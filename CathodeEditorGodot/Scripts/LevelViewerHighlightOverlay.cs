@@ -19,6 +19,12 @@ public static class LevelViewerHighlightOverlay
     private const string BackFacesShaderPath = "res://shaders/selection_highlight_overlay_backfaces.gdshader";
     private const string WireframeShaderPath = "res://shaders/selection_wireframe.gdshader";
 
+    //Shader parameter names as StringNames, made once: a literal here would be a temporary whose
+    //native handle the binding gives the engine with nothing keeping it alive - see LevelViewerPick.
+    private static readonly StringName HighlightColorParam = new StringName("highlight_color");
+    private static readonly StringName HighlightStrengthParam = new StringName("highlight_strength");
+    private static readonly StringName WireframeColorParam = new StringName("wireframe_color");
+
 
     private static ShaderMaterial _selectionWireframe;
 
@@ -90,7 +96,7 @@ public static class LevelViewerHighlightOverlay
         if (meshInstance == null || !GodotObject.IsInstanceValid(meshInstance))
             return false;
 
-        if (meshInstance.IsInGroup("model_reference_wireframe_overlay"))
+        if (meshInstance.IsInGroup(LevelViewerPick.WireframeOverlayGroupName))
             return false;
 
         if (savedOverlays.ContainsKey(meshInstance))
@@ -111,7 +117,7 @@ public static class LevelViewerHighlightOverlay
         if (meshInstance == null || !GodotObject.IsInstanceValid(meshInstance))
             return false;
 
-        if (meshInstance.IsInGroup("model_reference_wireframe_overlay"))
+        if (meshInstance.IsInGroup(LevelViewerPick.WireframeOverlayGroupName))
             return false;
 
         if (savedOverrides.ContainsKey(meshInstance))
@@ -160,7 +166,7 @@ public static class LevelViewerHighlightOverlay
                 return null;
             }
             _selectionWireframe = new ShaderMaterial { Shader = shader };
-            _selectionWireframe.SetShaderParameter("wireframe_color", LevelViewerSelection.HighlightGreen);
+            _selectionWireframe.SetShaderParameter(WireframeColorParam, LevelViewerSelection.HighlightGreen);
             _selectionWireframe.RenderPriority = RenderPriority;
         }
 
@@ -176,7 +182,7 @@ public static class LevelViewerHighlightOverlay
         if (meshInstance == null || !GodotObject.IsInstanceValid(meshInstance))
             return false;
 
-        if (meshInstance.IsInGroup("model_reference_wireframe_overlay"))
+        if (meshInstance.IsInGroup(LevelViewerPick.WireframeOverlayGroupName))
             return false;
 
         if (savedOverlays.ContainsKey(meshInstance))
@@ -210,8 +216,8 @@ public static class LevelViewerHighlightOverlay
             {
                 Shader = GD.Load<Shader>(shaderPath),
             };
-            cache.SetShaderParameter("highlight_color", highlightColor);
-            cache.SetShaderParameter("highlight_strength", DefaultStrength);
+            cache.SetShaderParameter(HighlightColorParam, highlightColor);
+            cache.SetShaderParameter(HighlightStrengthParam, DefaultStrength);
             cache.RenderPriority = RenderPriority;
         }
 

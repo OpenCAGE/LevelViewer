@@ -2327,6 +2327,10 @@ public partial class AlienScene : Node3D
 		}
 	}
 
+	//A NodePath literal is a temporary whose native handle the binding gives the engine with nothing
+	//keeping it alive - see LevelViewerPick. Made once.
+	private static readonly NodePath ConnectionCameraPath = new NodePath("Connection/Camera3D");
+
 	private void RequestFrameView(Node3D target, bool focusEditor)
 	{
 		if (target == null || !GodotObject.IsInstanceValid(target))
@@ -2334,7 +2338,7 @@ public partial class AlienScene : Node3D
 
 		RecenterContentOrigin();
 
-		Camera3D camera = GetTree().Root.GetNodeOrNull<Camera3D>("Connection/Camera3D");
+		Camera3D camera = GetTree().Root.GetNodeOrNull<Camera3D>(ConnectionCameraPath);
 		if (focusEditor)
 			LevelViewerView.FrameAll(ParentNode ?? target, camera, focusEditor: true);
 		else
@@ -4113,7 +4117,7 @@ public partial class AlienScene : Node3D
 
 		LevelViewerMeshUtil.ConfigureMeshInstance(meshInstance);
 		//Keeps the subtree walk off it: whether it's pickable follows the filter, not the entity
-		meshInstance.AddToGroup(LevelViewerPick.SceneFilterGroup);
+		meshInstance.AddToGroup(LevelViewerPick.SceneFilterGroupName);
 		_sceneFilterMeshes[meshInstance] = new SceneFilterMesh(kind, parent);
 		parent.AddChild(meshInstance);
 		ApplySceneFilterMeshState(meshInstance, kind, parent);
@@ -4686,6 +4690,10 @@ public partial class AlienScene : Node3D
 	}
 
 	private const string WireframeOverlayNodeName = "WireframeOverlay";
+	//The same name as the engine wants it, made once - a string here would be a temporary StringName or
+	//NodePath per call with nothing keeping it alive across the icall (see LevelViewerPick).
+	private static readonly StringName WireframeOverlayNodeStringName = new StringName(WireframeOverlayNodeName);
+	private static readonly NodePath WireframeOverlayNodePath = new NodePath(WireframeOverlayNodeName);
 	private const string LegacyWireframeOverlaySuffix = " WireframeOverlay";
 
 	private void ApplyModelReferenceMaterial(
@@ -4759,7 +4767,7 @@ public partial class AlienScene : Node3D
 		if (solidMesh == null || !GodotObject.IsInstanceValid(solidMesh))
 			return null;
 
-		return solidMesh.GetNodeOrNull<MeshInstance3D>(WireframeOverlayNodeName);
+		return solidMesh.GetNodeOrNull<MeshInstance3D>(WireframeOverlayNodePath);
 	}
 
 	private void RemoveLegacySiblingWireframeOverlay(MeshInstance3D solidMesh)
@@ -4785,13 +4793,13 @@ public partial class AlienScene : Node3D
 
 		MeshInstance3D overlay = new MeshInstance3D
 		{
-			Name = WireframeOverlayNodeName,
+			Name = WireframeOverlayNodeStringName,
 			Mesh = solidMesh.Mesh,
 			CastShadow = GeometryInstance3D.ShadowCastingSetting.Off,
 			Visible = true,
 		};
 		LevelViewerMeshUtil.ConfigureMeshInstance(overlay);
-		overlay.AddToGroup("model_reference_wireframe_overlay");
+		overlay.AddToGroup(LevelViewerPick.WireframeOverlayGroupName);
 		solidMesh.AddChild(overlay);
 		return overlay;
 	}
@@ -4801,7 +4809,7 @@ public partial class AlienScene : Node3D
 		SceneTree tree = GetTree();
 		if (tree != null)
 		{
-			foreach (Node node in tree.GetNodesInGroup("model_reference_wireframe_overlay"))
+			foreach (Node node in tree.GetNodesInGroup(LevelViewerPick.WireframeOverlayGroupName))
 			{
 				if (node is Node3D node3D && GodotObject.IsInstanceValid(node3D))
 					node3D.QueueFree();

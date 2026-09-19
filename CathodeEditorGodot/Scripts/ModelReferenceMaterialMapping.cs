@@ -15,6 +15,9 @@ public static class ModelReferenceMaterialMapping
 {
 	public const string MappingParameterName = "mapping";
 	public const string InstanceMappingMetaKey = "instance_material_mapping";
+	//The key as the engine wants it, made once. A const string here is a temporary StringName per call
+	//whose native handle the binding gives the engine with nothing keeping it alive - see LevelViewerPick.
+	private static readonly StringName InstanceMappingMetaKeyName = new StringName(InstanceMappingMetaKey);
 	/// <summary>Original ModelReference material write index before instance mapping is applied.</summary>
 	public const string SourceMaterialWriteIndexMetaKey = "source_material_write_index";
 	/// <summary>MODELS write index for the spawned submesh.</summary>
@@ -232,12 +235,12 @@ public static class ModelReferenceMaterialMapping
 	{
 		if (level?.MaterialMappings?.Entries == null
 			|| scopeInstanceNode == null
-			|| !scopeInstanceNode.HasMeta(InstanceMappingMetaKey))
+			|| !scopeInstanceNode.HasMeta(InstanceMappingMetaKeyName))
 		{
 			return null;
 		}
 
-		uint mappingId = scopeInstanceNode.GetMeta(InstanceMappingMetaKey).AsUInt32();
+		uint mappingId = scopeInstanceNode.GetMeta(InstanceMappingMetaKeyName).AsUInt32();
 		if (mappingId == 0)
 			return null;
 
@@ -753,7 +756,7 @@ public static class ModelReferenceMaterialMapping
 			return;
 		}
 
-		pointedNode.SetMeta(InstanceMappingMetaKey, mapping.shortGUID.AsUInt32);
+		pointedNode.SetMeta(InstanceMappingMetaKeyName, mapping.shortGUID.AsUInt32);
 	}
 
 	public static void ClearAliasInstanceMappingMeta(Node3D pointedNode)
@@ -761,8 +764,8 @@ public static class ModelReferenceMaterialMapping
 		if (pointedNode == null || !GodotObject.IsInstanceValid(pointedNode))
 			return;
 
-		if (pointedNode.HasMeta(InstanceMappingMetaKey))
-			pointedNode.RemoveMeta(InstanceMappingMetaKey);
+		if (pointedNode.HasMeta(InstanceMappingMetaKeyName))
+			pointedNode.RemoveMeta(InstanceMappingMetaKeyName);
 	}
 
 	private static Composite FindOwningComposite(Entity entity, Commands commands)

@@ -19,6 +19,12 @@ public partial class CommandsEditorConnection : Node3D
 
     private ClientWebSocket _client;
     private AlienScene _scene;
+    //Sibling nodes in main.tscn. The paths are NodePaths made once rather than literals: a literal is a
+    //temporary whose native handle the binding gives the engine with nothing keeping it alive (see
+    //LevelViewerPick). The camera itself is cached too - FindCamera runs on every selection sync.
+    private static readonly NodePath SiblingScenePath = new NodePath("../AlienScene");
+    private static readonly NodePath SiblingCameraPath = new NodePath("../Camera3D");
+    private Camera3D _camera;
     private CancellationTokenSource _connectionCts;
     private readonly int _webSocketPort = ResolveWebSocketPort();
 
@@ -200,7 +206,7 @@ public partial class CommandsEditorConnection : Node3D
         ViewerLog.InstallGlobalExceptionHandlers();
         LevelViewerEmbeddedFocus.ConfigureEmbeddedStartup();
         ViewerLog.Print("Level Viewer starting. Viewer log: " + (ViewerLog.LogFilePath ?? "<unavailable>"));
-        _scene = GetNode<AlienScene>("../AlienScene");
+        _scene = GetNode<AlienScene>(SiblingScenePath);
         _connectionCts = new CancellationTokenSource();
         ViewerLogBridge.RegisterConnection(this);
         ViewerPopulateBridge.RegisterConnection(this);
@@ -291,9 +297,13 @@ public partial class CommandsEditorConnection : Node3D
 
     private Camera3D FindCamera()
     {
+        if (_camera != null && GodotObject.IsInstanceValid(_camera))
+            return _camera;
+
         // Node is named "Camera3D" in the main scene (see main.tscn).
-        return GetNodeOrNull<Camera3D>("../Camera3D")
+        _camera = GetNodeOrNull<Camera3D>(SiblingCameraPath)
             ?? GetTree()?.Root?.FindChild("Camera3D", true, false) as Camera3D;
+        return _camera;
     }
 
     private void OnSceneSelectionChanged(Node3D selectedNode, AlienScene.SelectionOrigin origin)

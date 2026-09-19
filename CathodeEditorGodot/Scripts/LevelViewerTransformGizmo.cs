@@ -939,7 +939,7 @@ public partial class LevelViewerTransformGizmo : Node3D
         arrays[(int)Mesh.ArrayType.Index]  = idxs.ToArray();
 
         var mesh = new ArrayMesh();
-        mesh.AddSurfaceFromArrays(Mesh.PrimitiveType.Triangles, arrays);
+        LevelViewerMeshUtil.AddSurface(mesh, Mesh.PrimitiveType.Triangles, arrays);
         return mesh;
     }
 

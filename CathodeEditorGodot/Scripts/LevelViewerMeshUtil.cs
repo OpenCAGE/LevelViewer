@@ -1,12 +1,45 @@
 using Godot;
 
 /// <summary>
-/// Frustum / occlusion culling tweaks for dynamically spawned level meshes.
+/// Frustum / occlusion culling tweaks for dynamically spawned level meshes, and the one safe way to
+/// hand a surface to an ArrayMesh.
 /// </summary>
 public static class LevelViewerMeshUtil
 {
 	private const float DefaultExtraCullMarginMin = 32f;
 	private const float LargeSceneExtraCullMarginCap = 96f;
+
+	/// <summary>
+	/// The only AddSurfaceFromArrays the viewer calls. Every site goes through here, and passes an
+	/// <paramref name="arrays"/> it is itself holding alive (a `using` local) - see CollisionMeshOverlay.BuildMesh.
+	/// </summary>
+	/// <remarks>
+	/// Calling the two-argument overload is not enough. The binding fills the omitted blendShapes and lods
+	/// arguments in with `new Array&lt;Array&gt;()` and `new Dictionary()` of its own, hands the engine their
+	/// native handles, and holds no managed reference to either across the icall. The engine reads the lods
+	/// dictionary at the very END of the surface build - after the slow vertex/index work - so the collector
+	/// has the whole build to notice the wrappers are unreachable, finalize them, and free the natives the
+	/// engine is about to walk: an access violation with no backtrace, mid-populate or on the next selection
+	/// (release 0.18.0.35). Making the defaults ourselves as locals rooted to the end of the call closes
+	/// that, and the KeepAlives make it explicit rather than a property of the current codegen.
+	///
+	/// Array&lt;T&gt; is not IDisposable in this binding; the untyped Array underneath it is, and the explicit
+	/// conversion hands back that same object (shared, not copied), so that is what gets disposed. The typed
+	/// wrapper is still what is passed, so the engine sees exactly the typed empty array the default would be.
+	/// </remarks>
+	public static void AddSurface(ArrayMesh mesh, Mesh.PrimitiveType primitive, Godot.Collections.Array arrays)
+	{
+		var blendShapes = new Godot.Collections.Array<Godot.Collections.Array>();
+		using (var blendShapesNative = (Godot.Collections.Array)blendShapes)
+		using (var lods = new Godot.Collections.Dictionary())
+		{
+			mesh.AddSurfaceFromArrays(primitive, arrays, blendShapes, lods);
+			System.GC.KeepAlive(arrays);
+			System.GC.KeepAlive(blendShapes);
+			System.GC.KeepAlive(blendShapesNative);
+			System.GC.KeepAlive(lods);
+		}
+	}
 
 	public static void ConfigureMeshInstance(MeshInstance3D meshInstance, Vector3[] sourceVertices = null)
 	{

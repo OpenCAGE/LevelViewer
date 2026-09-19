@@ -7,7 +7,9 @@ using System;
 /// </summary>
 public static class LevelViewerView
 {
-	public const string ContentGroup = "level_viewer_content";
+	//A StringName, not a string: only ever handed to AddToGroup, and a string there is a temporary the
+	//binding passes to the engine with nothing keeping it alive (see LevelViewerPick).
+	public static readonly StringName ContentGroup = new StringName("level_viewer_content");
 
 	public static bool TryComputeGlobalAabb(Node3D root, out Aabb bounds)
 	{

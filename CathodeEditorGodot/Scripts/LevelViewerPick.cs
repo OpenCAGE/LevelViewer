@@ -12,16 +12,21 @@ public static class LevelViewerPick
 	public const string PickableGroup = "level_viewer_pickable";
 	//Every IsInGroup/AddToGroup taking a string interns a fresh StringName, and registering a
 	//level's meshes does that hundreds of thousands of times. These are the same names, converted once.
-	private static readonly StringName PickableGroupName = new StringName("level_viewer_pickable");
+	//They are also the safe form: the binding passes a temporary StringName's native handle to the
+	//engine with nothing keeping the wrapper alive, so the collector may finalize it mid-call and free
+	//the name the engine is still hashing. A static field is never a temporary. Nothing in the viewer
+	//should hand these methods a string literal or a const string.
+	internal static readonly StringName PickableGroupName = new StringName(PickableGroup);
 
 	/// <summary>
 	/// Scene-filter geometry (occlusion hulls). Registered and unregistered by the filter that draws
 	/// it rather than by a subtree walk, so a switched-off hull never becomes clickable.
 	/// </summary>
 	public const string SceneFilterGroup = "scene_filter_renderable";
+	internal static readonly StringName SceneFilterGroupName = new StringName(SceneFilterGroup);
 
 	private const string WireframeOverlayGroup = "model_reference_wireframe_overlay";
-	private static readonly StringName WireframeOverlayGroupName = new StringName("model_reference_wireframe_overlay");
+	internal static readonly StringName WireframeOverlayGroupName = new StringName(WireframeOverlayGroup);
 	private const float RayEpsilon = 0.000001f;
 
 	private enum PickFaceMode
@@ -410,7 +415,7 @@ public static class LevelViewerPick
 
 	private static void RegisterPickableRecursive(Node node, Node3D ownerEntityNode)
 	{
-		if (node.IsInGroup(WireframeOverlayGroup) || node.IsInGroup(SceneFilterGroup))
+		if (node.IsInGroup(WireframeOverlayGroupName) || node.IsInGroup(SceneFilterGroupName))
 			goto children;
 
 		if (node is MeshInstance3D meshInstance)
@@ -436,15 +441,15 @@ public static class LevelViewerPick
 
 	private static void RegisterPickableVisual(VisualInstance3D visual, Node3D ownerEntityNode)
 	{
-		if (visual == null || visual.IsInGroup(WireframeOverlayGroup))
+		if (visual == null || visual.IsInGroup(WireframeOverlayGroupName))
 			return;
 
 		Aabb bounds = visual.GetAabb();
 		if (bounds.Size.LengthSquared() <= RayEpsilon)
 			return;
 
-		if (!visual.IsInGroup(PickableGroup))
-			visual.AddToGroup(PickableGroup);
+		if (!visual.IsInGroup(PickableGroupName))
+			visual.AddToGroup(PickableGroupName);
 		_pickOwners[visual] = ownerEntityNode;
 	}
 
@@ -453,8 +458,8 @@ public static class LevelViewerPick
 		if (visual == null || !GodotObject.IsInstanceValid(visual))
 			return;
 
-		if (visual.IsInGroup(PickableGroup))
-			visual.RemoveFromGroup(PickableGroup);
+		if (visual.IsInGroup(PickableGroupName))
+			visual.RemoveFromGroup(PickableGroupName);
 		_pickOwners.Remove(visual);
 	}
 
@@ -463,8 +468,8 @@ public static class LevelViewerPick
 		if (meshInstance == null || !GodotObject.IsInstanceValid(meshInstance))
 			return;
 
-		if (meshInstance.IsInGroup(PickableGroup))
-			meshInstance.RemoveFromGroup(PickableGroup);
+		if (meshInstance.IsInGroup(PickableGroupName))
+			meshInstance.RemoveFromGroup(PickableGroupName);
 		_pickOwners.Remove(meshInstance);
 		_registeredPickables.Remove(meshInstance);
 

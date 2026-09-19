@@ -13,6 +13,24 @@ public static class AlienSceneMaterials
 	private const int TransparentRenderPriority = 1;
 	private const int TransparentWireframeRenderPriority = 2;
 
+	//Shader parameter names as StringNames, made once. A literal is a temporary whose native handle the
+	//binding gives the engine with nothing keeping it alive across the icall (see LevelViewerPick), and a
+	//level builds thousands of materials.
+	private static readonly StringName FilterColourParam = new StringName("filter_colour");
+	private static readonly StringName ZoneColourParam = new StringName("zone_colour");
+	private static readonly StringName DiffuseTintParam = new StringName("diffuse_tint");
+	private static readonly StringName VertexColourTintParam = new StringName("vertex_colour_tint");
+	private static readonly StringName DiffuseUvMultParam = new StringName("diffuse_uv_mult");
+	private static readonly StringName UseDiffuseMapParam = new StringName("use_diffuse_map");
+	private static readonly StringName DiffuseMapParam = new StringName("diffuse_map");
+	private static readonly StringName UseSeparateAlphaMapParam = new StringName("use_separate_alpha_map");
+	private static readonly StringName SeparateAlphaFromGreenParam = new StringName("separate_alpha_from_green");
+	private static readonly StringName SeparateAlphaUvMultParam = new StringName("separate_alpha_uv_mult");
+	private static readonly StringName SeparateAlphaMapParam = new StringName("separate_alpha_map");
+	private static readonly StringName AlphaFromLuminanceParam = new StringName("alpha_from_luminance");
+	private static readonly StringName AlphaCutoutParam = new StringName("alpha_cutout");
+	private static readonly StringName AlphaCutoutThresholdParam = new StringName("alpha_cutout_threshold");
+
 	private static Shader _shadedShader;
 	private static Shader _shadedShaderDoubleSided;
 	private static Shader _shadedShaderTransparent;
@@ -86,7 +104,7 @@ public static class AlienSceneMaterials
 				ResourceName = kind + " filter",
 				Shader = shader,
 			};
-			shaded.SetShaderParameter("filter_colour", colour);
+			shaded.SetShaderParameter(FilterColourParam, colour);
 			material = shaded;
 		}
 		else
@@ -138,7 +156,7 @@ public static class AlienSceneMaterials
 			ResourceName = "zone tint",
 			Shader = shader,
 		};
-		material.SetShaderParameter("zone_colour", colour);
+		material.SetShaderParameter(ZoneColourParam, colour);
 
 		_zoneTintMaterials[key] = material;
 		_zoneTintMaterialSet.Add(material);
@@ -396,22 +414,22 @@ public static class AlienSceneMaterials
 			vertexColourTint = new Color(scalars.Vertex.X, scalars.Vertex.Y, scalars.Vertex.Z, scalars.Vertex.W);
 		}
 
-		godotMaterial.SetShaderParameter("diffuse_tint", diffuseTint);
-		godotMaterial.SetShaderParameter("vertex_colour_tint", vertexColourTint);
-		godotMaterial.SetShaderParameter("diffuse_uv_mult", AlienSceneShaderParams.GetUvScale(material, shader, shaderParams));
+		godotMaterial.SetShaderParameter(DiffuseTintParam, diffuseTint);
+		godotMaterial.SetShaderParameter(VertexColourTintParam, vertexColourTint);
+		godotMaterial.SetShaderParameter(DiffuseUvMultParam, AlienSceneShaderParams.GetUvScale(material, shader, shaderParams));
 
-		godotMaterial.SetShaderParameter("use_diffuse_map", diffuse != null);
+		godotMaterial.SetShaderParameter(UseDiffuseMapParam, diffuse != null);
 		if (diffuse != null)
-			godotMaterial.SetShaderParameter("diffuse_map", diffuse);
+			godotMaterial.SetShaderParameter(DiffuseMapParam, diffuse);
 
 		bool useSeparateAlpha = separateAlphaMap != null;
-		godotMaterial.SetShaderParameter("use_separate_alpha_map", useSeparateAlpha);
+		godotMaterial.SetShaderParameter(UseSeparateAlphaMapParam, useSeparateAlpha);
 		godotMaterial.SetShaderParameter(
-			"separate_alpha_from_green",
+			SeparateAlphaFromGreenParam,
 			useSeparateAlpha && HasShaderFeature(shader, "SEPARATE_ALPHA_MAP_USE_GREEN_CHANNEL"));
-		godotMaterial.SetShaderParameter("separate_alpha_uv_mult", AlienSceneShaderParams.GetSeparateAlphaUvScale(material, shader));
+		godotMaterial.SetShaderParameter(SeparateAlphaUvMultParam, AlienSceneShaderParams.GetSeparateAlphaUvScale(material, shader));
 		if (useSeparateAlpha)
-			godotMaterial.SetShaderParameter("separate_alpha_map", separateAlphaMap);
+			godotMaterial.SetShaderParameter(SeparateAlphaMapParam, separateAlphaMap);
 
 		bool alphaFromLuminance = false;
 		if (useSeparateAlpha)
@@ -419,9 +437,9 @@ public static class AlienSceneMaterials
 		else if (useAlphaCutout && diffuse != null && !AlienSceneTextures.HasTransparency(diffuse))
 			alphaFromLuminance = true;
 
-		godotMaterial.SetShaderParameter("alpha_from_luminance", alphaFromLuminance);
-		godotMaterial.SetShaderParameter("alpha_cutout", useAlphaCutout);
-		godotMaterial.SetShaderParameter("alpha_cutout_threshold", AlienSceneShaderParams.GetAlphaScissorThreshold(material, shader));
+		godotMaterial.SetShaderParameter(AlphaFromLuminanceParam, alphaFromLuminance);
+		godotMaterial.SetShaderParameter(AlphaCutoutParam, useAlphaCutout);
+		godotMaterial.SetShaderParameter(AlphaCutoutThresholdParam, AlienSceneShaderParams.GetAlphaScissorThreshold(material, shader));
 	}
 
 	/// <summary>

@@ -84,6 +84,7 @@ namespace OpenCAGE.UnityConnection
         ANIMATION_PREVIEW,
         
         SAVE_REQUEST,
+        SAVE_AND_BUILD_REQUEST,
         // Level Viewer -> OpenCAGE: Shift was held when a gizmo drag began, so the drag is meant for a
         // COPY of what is selected (3ds Max's shift-clone). The level data lives on the OpenCAGE side,
         // so it makes the copies - in place, undoable as one step - and selects them, which reaches

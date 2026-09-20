@@ -173,6 +173,12 @@ public partial class LevelViewerCamera : Camera3D
                     GetViewport().SetInputAsHandled();
                 }
                 else if (keyEvent.CtrlPressed && !keyEvent.AltPressed
+                    && keyEvent.Keycode == Key.S && keyEvent.ShiftPressed)
+                {
+                    _commandsEditorConnection?.SendSaveAndBuildRequest();
+                    GetViewport().SetInputAsHandled();
+                }
+                else if (keyEvent.CtrlPressed && !keyEvent.AltPressed
                     && keyEvent.Keycode == Key.Z && !keyEvent.ShiftPressed)
                 {
                     _commandsEditorConnection?.SendUndoRequest();

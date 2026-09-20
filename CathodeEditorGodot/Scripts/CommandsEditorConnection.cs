@@ -1731,6 +1731,11 @@ public partial class CommandsEditorConnection : Node3D
         SendMessage(new Packet(PacketEvent.SAVE_REQUEST));
     }
 
+    public void SendSaveAndBuildRequest()
+    {
+        SendMessage(new Packet(PacketEvent.SAVE_AND_BUILD_REQUEST));
+    }
+
     /// <summary>Ask OpenCAGE to redo - Ctrl+Y, or Ctrl+Shift+Z.</summary>
     public void SendRedoRequest()
     {

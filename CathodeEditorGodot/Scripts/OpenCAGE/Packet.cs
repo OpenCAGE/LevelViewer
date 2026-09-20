@@ -82,7 +82,8 @@ namespace OpenCAGE.UnityConnection
         // clearing it (animation_preview_active = false) puts every node it touched back.
         // Appended, not inserted: these travel as numbers, so an existing event's value must not move.
         ANIMATION_PREVIEW,
-
+        
+        SAVE_REQUEST,
         // Level Viewer -> OpenCAGE: Shift was held when a gizmo drag began, so the drag is meant for a
         // COPY of what is selected (3ds Max's shift-clone). The level data lives on the OpenCAGE side,
         // so it makes the copies - in place, undoable as one step - and selects them, which reaches

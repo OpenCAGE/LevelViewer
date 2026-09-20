@@ -3930,11 +3930,19 @@ public partial class AlienScene : Node3D
 
 		if (context.Sync.removed)
 		{
-			GetEntityTransform(context.Entity, out Vector3 position, out Vector3 rotation);
+			Entity baseEntity = context.Entity;
+			if ((context.FromPointer || entityOverride != null) && _nodeEntities.TryGetValue(target, out Entity targetEntity))
+				baseEntity = targetEntity;
+
+			GetEntityTransform(baseEntity, out Vector3 position, out Vector3 rotation);
 			target.Position = position;
 			target.RotationDegrees = rotation;
 			EntityNodeUtil.SetPointed(target, false);
 			LevelViewerPick.InvalidatePickBounds(target);
+			
+			if (context.FromPointer || entityOverride != null)
+				ReapplyAliasOverridesPointingAt(new HashSet<Node3D> { target });
+			
 			return;
 		}
 

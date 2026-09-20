@@ -167,6 +167,12 @@ public partial class LevelViewerCamera : Camera3D
                 /* Same chords, and the same Alt exclusion, as OpenCAGE.Undo.UndoKeys - a step undone from
                    the viewport and one undone from a panel should take the same keys. */
                 else if (keyEvent.CtrlPressed && !keyEvent.AltPressed
+                    && keyEvent.Keycode == Key.S && !keyEvent.ShiftPressed)
+                {
+                    _commandsEditorConnection?.SendSaveRequest();
+                    GetViewport().SetInputAsHandled();
+                }
+                else if (keyEvent.CtrlPressed && !keyEvent.AltPressed
                     && keyEvent.Keycode == Key.Z && !keyEvent.ShiftPressed)
                 {
                     _commandsEditorConnection?.SendUndoRequest();
@@ -580,6 +586,9 @@ public partial class LevelViewerCamera : Camera3D
 
     private void ApplyKeyboardMovement(float deltaSeconds)
     {
+        bool ctrlDown = EmbeddedInOpenCage ? Win32Input.IsKeyDown(Win32Input.VK_CONTROL) : Input.IsKeyPressed(Key.Ctrl);
+        if (ctrlDown) return;
+
         float speed = MoveSpeed * deltaSeconds;
         if (IsMovementKeyDown(Key.Shift))
             speed *= FastMoveMultiplier;

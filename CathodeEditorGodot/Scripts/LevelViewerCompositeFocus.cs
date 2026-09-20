@@ -104,6 +104,19 @@ public static class LevelViewerCompositeFocus
 		}
 	}
 
+	/// <summary>
+	/// The composite tree under the active composite has changed - an instance of a composite that
+	/// was not there before (dropped from the browser, pasted, undone back) - so which composites are
+	/// in scope is worked out again on the next ask. Without this, everything the new instance
+	/// spawned was judged out of scope, and nothing in it could be picked.
+	/// </summary>
+	public static void InvalidateScopeCache()
+	{
+		_compositesInScope.Clear();
+		//Both, so every reader rebuilds: RebuildScopeCache goes by the set being empty, IsOwnerCompositeInScope by the id
+		_scopeCacheActiveCompositeId = 0;
+	}
+
 	public static bool IsOwnerCompositeInScope(uint ownerCompositeId, Commands commands)
 	{
 		if (!HasActiveComposite)

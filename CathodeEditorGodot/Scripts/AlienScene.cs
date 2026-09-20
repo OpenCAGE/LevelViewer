@@ -596,6 +596,7 @@ public partial class AlienScene : Node3D
 		_contentGeneration++;
 		PreviewVisibilitySettings.LevelRootCompositeId = 0;
 		_isBulkPopulating = false;
+		FunctionEntityPreview.DeferVisualRefresh = false;
 		_loadStep = LoadPipelineStep.None;
 		LevelViewerRenderIdleThrottle.SetLoadActive(false);
 
@@ -832,7 +833,16 @@ public partial class AlienScene : Node3D
 		_isBulkPopulating = true;
 		_deferMeshTreeActivation = true;
 		FunctionEntityPreview.DeferVisualRefresh = true;
-		PopulateCompositeInternal(comp);
+		try
+		{
+			PopulateCompositeInternal(comp);
+		}
+		catch (Exception e)
+		{
+			//Logged and carried on to CompletePopulate, which takes the flags above off again: left on,
+			//everything spawned afterwards would skip its preview refresh and never show
+			ViewerLog.PrintErr("[Viewer] Populating " + GetPopulateDisplayLabel(comp) + " failed: " + e);
+		}
 
 		_loadStep = LoadPipelineStep.None;
 		UpdateLoadPipelineProcessing();
@@ -1571,6 +1581,8 @@ public partial class AlienScene : Node3D
 						addedPreview = true;
 						if (_isBulkPopulating)
 							TrackBulkPopulatePreview(entityNode, function);
+						else
+							TrackMaterializedFunctionEntityPreview(entityNode);
 					}
 
 					if (!_isBulkPopulating)
@@ -1667,6 +1679,7 @@ public partial class AlienScene : Node3D
 			{
 				if (compositeInstance != null && GodotObject.IsInstanceValid(compositeInstance))
 				{
+					UntrackFunctionEntityPreviews(compositeInstance);
 					compositeInstance.QueueFree();
 					_nodeEntities.Remove(compositeInstance);
 					_nodeOwnerComposites.Remove(compositeInstance);
@@ -1687,10 +1700,18 @@ public partial class AlienScene : Node3D
 				return;
 
 			PrewarmForIncrementalSpawn(c, e);
-			foreach (Node3D compositeInstance in _compositeNodes[composite])
+			foreach (Node3D compositeInstance in _compositeNodes[composite].ToArray())
 			{
 				if (compositeInstance != null && GodotObject.IsInstanceValid(compositeInstance))
 					AddEntity(c, e, compositeInstance);
+			}
+
+			//A new composite instance may bring a composite the focus scope has never seen; the
+			//pick list is built from that scope, so it is worked out again before the next pick
+			if (e is FunctionEntity function && !function.function.IsFunctionType)
+			{
+				LevelViewerCompositeFocus.InvalidateScopeCache();
+				LevelViewerPick.InvalidateScopedPickables();
 			}
 		}
 	}
@@ -3340,6 +3361,11 @@ public partial class AlienScene : Node3D
 		return true;
 	}
 
+	/* The populate registers every preview it makes (TrackBulkPopulatePreview) and the preview cache
+	   rebuilds from that list rather than walking the scene, so a preview made after the populate -
+	   a lazy one for a filter switched on, or an entity created in the viewport - has to join it
+	   too. One that didn't was never reached by RefreshRenderFilters: it stayed on screen with its
+	   filter off, and hide-nested passed it by. */
 	private void TrackMaterializedFunctionEntityPreview(Node3D entityNode)
 	{
 		_functionEntityPreviewsCacheDirty = true;
@@ -3352,6 +3378,24 @@ public partial class AlienScene : Node3D
 
 			_bulkPopulatePreviews.Add(preview);
 		}
+	}
+
+	/* And a node leaving the scene takes its previews (a composite instance's, all the way down)
+	   out of that list, or the next filter change rebuilt the cache over freed objects and threw
+	   on the first of them - leaving the filters stuck for the rest of the session. */
+	private void UntrackFunctionEntityPreviews(Node3D root)
+	{
+		if (root == null || _bulkPopulatePreviews.Count == 0)
+			return;
+
+		FunctionEntityPreview[] gone = EntityNodeUtil.FindAllPreviews(root);
+		if (gone.Length == 0)
+			return;
+
+		HashSet<FunctionEntityPreview> going = new HashSet<FunctionEntityPreview>(gone);
+		_bulkPopulatePreviews.RemoveAll(going.Contains);
+		_bulkModelReferencePreviews.RemoveAll(going.Contains);
+		_functionEntityPreviewsCacheDirty = true;
 	}
 
 	private static bool ShouldMaterializeFunctionPreview(
@@ -3617,6 +3661,8 @@ public partial class AlienScene : Node3D
 		if (!_functionEntityPreviewsCacheDirty)
 			return;
 
+		//Freed behind the registry's back (a subtree QueueFree'd by something other than RemoveEntity)
+		_bulkPopulatePreviews.RemoveAll(preview => preview == null || !GodotObject.IsInstanceValid(preview));
 		if (_bulkPopulatePreviews.Count > 0)
 			_cachedFunctionEntityPreviews = _bulkPopulatePreviews.ToArray();
 		else if (_parentNode == null)
@@ -3669,8 +3715,12 @@ public partial class AlienScene : Node3D
 		for (int i = 0; i < previews.Count; i++)
 		{
 			FunctionEntityPreview preview = previews[i];
-			if (preview != null)
-				preview.RefreshVisibility();
+			if (preview == null || !GodotObject.IsInstanceValid(preview))
+			{
+				_functionEntityPreviewsCacheDirty = true;
+				continue;
+			}
+			preview.RefreshVisibility();
 		}
 	}
 
@@ -3717,7 +3767,7 @@ public partial class AlienScene : Node3D
 		for (int i = 0; i < _cachedFunctionEntityPreviews.Length; i++)
 		{
 			FunctionEntityPreview preview = _cachedFunctionEntityPreviews[i];
-			if (preview == null)
+			if (preview == null || !GodotObject.IsInstanceValid(preview))
 			{
 				_functionEntityPreviewsCacheDirty = true;
 				continue;
@@ -4056,10 +4106,10 @@ public partial class AlienScene : Node3D
 						}
 
 						UntrackEntityNode(composite, entity, entityNode);
+						UntrackFunctionEntityPreviews(entityNode);
 						entityNode.QueueFree();
 						_nodeEntities.Remove(entityNode);
 						_nodeOwnerComposites.Remove(entityNode);
-						_functionEntityPreviewsCacheDirty = true;
 						removed = true;
 						instancesProcessed++;
 					}

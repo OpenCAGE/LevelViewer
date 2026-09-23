@@ -14,9 +14,10 @@ public partial class LevelViewerTransformGizmo : Node3D
 
     /// <summary>
     /// Fired for each target when a drag ends. Args: its index in the selection (0 = the anchor the
-    /// gizmo takes its orientation from), local position, local euler rotation degrees.
+    /// gizmo takes its orientation from), local position, local euler rotation degrees, and the
+    /// gesture the drag belongs to (<see cref="NextGesture"/>) - the same for every target it moved.
     /// </summary>
-    public Action<int, Vector3, Vector3> OnTransformChanged;
+    public Action<int, Vector3, Vector3, uint> OnTransformChanged;
 
     /// <summary>Fired once when a drag ends — use for pick-cache invalidation (not every mouse-move frame).</summary>
     public Action<Node3D> OnDragCommitted;
@@ -24,8 +25,10 @@ public partial class LevelViewerTransformGizmo : Node3D
     /// <summary>
     /// Shift was held when a handle was pressed: the caller should duplicate the selection and let the
     /// copies replace the drag targets (3ds Max shift-clone). Fired instead of beginning a real drag.
+    /// Carries the gesture the drag that picks the copies up will commit under, so the copies and
+    /// their move are one gesture.
     /// </summary>
-    public Action OnDuplicateRequested;
+    public Action<uint> OnDuplicateRequested;
 
     /// <summary>
     /// Nearest mesh vertex to the cursor for vertex snapping: (mousePos, current targets) -> world
@@ -104,6 +107,26 @@ public partial class LevelViewerTransformGizmo : Node3D
     private ulong         _handoverArmedMs;
     private readonly List<Node3D> _handoverOriginals = new List<Node3D>();
     private const ulong HandoverTimeoutMs = 2000;
+
+    /* The gesture the drag being made (or armed, for a shift-clone) belongs to. Taken at the press, so a
+       shift-clone's duplicate request and the drag that carries its copies share it. */
+    private uint _gesture;
+
+    /* Seeded at random, so a viewer restarted mid-session does not hand out an id that is still on top
+       of the editor's history from before. */
+    private static uint _lastGesture = (uint)Random.Shared.Next(1, int.MaxValue);
+
+    /// <summary>
+    /// An id for one gesture. Everything a single drag sends goes out under it - a packet per entity it
+    /// moved - which is what lets the editor undo the whole of it as one step. Never 0.
+    /// </summary>
+    public static uint NextGesture()
+    {
+        _lastGesture = unchecked(_lastGesture + 1);
+        if (_lastGesture == 0)
+            _lastGesture = 1;
+        return _lastGesture;
+    }
 
     // mesh children
     private StandardMaterial3D[] _axisMats;  // 0=X 1=Y 2=Z  (shared by shaft+head)
@@ -346,6 +369,7 @@ public partial class LevelViewerTransformGizmo : Node3D
         _dragAxis   = hit;
         _hovAxis    = hit;
         _lastMousePos = mousePos;
+        _gesture    = NextGesture();
         ApplyHighlight();
 
         //Shift-clone (translate only): don't touch the originals - arm the handover, ask the caller to
@@ -357,7 +381,7 @@ public partial class LevelViewerTransformGizmo : Node3D
             _handoverArmedMs = Time.GetTicksMsec();
             _handoverOriginals.Clear();
             _handoverOriginals.AddRange(_targets);
-            OnDuplicateRequested?.Invoke();
+            OnDuplicateRequested?.Invoke(_gesture);
             return true;
         }
 
@@ -667,7 +691,7 @@ public partial class LevelViewerTransformGizmo : Node3D
             if (target == null || !GodotObject.IsInstanceValid(target))
                 continue;
 
-            OnTransformChanged?.Invoke(i, target.Position, target.RotationDegrees);
+            OnTransformChanged?.Invoke(i, target.Position, target.RotationDegrees, _gesture);
             OnDragCommitted?.Invoke(target);
         }
     }

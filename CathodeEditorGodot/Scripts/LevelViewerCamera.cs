@@ -3,7 +3,7 @@ using System;
 using System.Runtime.InteropServices;
 
 /// <summary>
-/// Free camera: WASD/QE move; RMB look; MMB pan; LMB select entity; Ctrl+MMB step into composite instance; - step back hierarchy; 0/8/9 set regular/deep/advanced deep select; 1-4 transform/rotate world/local, 5 none; Alt+1-4 set the selection highlight mode; H hide selected; Shift+H unhide all; scroll adjusts speed; Z frames selection; Ctrl+Z/Ctrl+Y undo/redo in OpenCAGE.
+/// Free camera: WASD/QE move; RMB drag look, RMB click context menu; MMB pan; LMB select entity, LMB drag box-select (Ctrl adds, Shift toggles); Ctrl+MMB step into composite instance; - step back hierarchy; 0/8/9 set regular/deep/advanced deep select; 1-4 transform/rotate world/local, 5 none; Alt+1-4 set the selection highlight mode; H hide selected; Shift+H unhide all; scroll adjusts speed; Z frames selection; Ctrl+D duplicates the selection; Ctrl+Z/Ctrl+Y undo/redo in OpenCAGE.
 /// MoveSpeed is world units per second (framerate-independent via delta).
 /// </summary>
 public partial class LevelViewerCamera : Camera3D
@@ -80,6 +80,21 @@ public partial class LevelViewerCamera : Camera3D
     private Vector3 _followLastTargetPosition;
     private bool _followActive;
 
+    //Left press off the gizmo: a click, or a box once the mouse moves far enough (issue 703)
+    private readonly LevelViewerBoxSelect _boxSelect = new LevelViewerBoxSelect();
+
+    /* Right press: a click opens the context menu, a drag looks about (issue 704). The look waits until the
+       mouse has moved DragThresholdPixels from the press, or the camera has flown, so a click never turns
+       the view - and embedded, never hides the cursor and throws it to the middle of the window either.
+       The menu itself is OpenCAGE's, drawn over this window (CommandsEditorConnection.IsEditorContextMenuUp):
+       this side says where and what for, and while it is up hands its next click or key to it. */
+    private bool _rightPressed;       //this window saw the right button go down, and not yet come up
+    private bool _rightClickPending;  //and letting it go opens the context menu: no look, no other button since
+    private bool _rightDragStarted;   //the right button held has moved or flown far enough to be a look
+    private Vector2 _rightPressPosition;
+    private Vector2? _rightDownScreen; //embedded: the cursor on screen when the right button went down, for the polled look
+    private Vector2 _contextMenuPosition; //where the menu was asked for: Step Into Composite drills there
+
     public override void _Ready()
     {
         Current = true;
@@ -151,6 +166,19 @@ public partial class LevelViewerCamera : Camera3D
             return;
         }
 
+        /* OpenCAGE's context menu is up over this window, and this is the click or key that closes it - the
+           menu itself never sees input that lands here. It does nothing else: no select, no box, no look, no
+           shortcut, and no second menu for a right click. (A right press held and dragged from here still
+           becomes a look: embedded, the polled look waits for the drag on its own.) */
+        if (IsEditorContextMenuUp
+            && ((@event is InputEventKey menuKey && menuKey.Pressed && !menuKey.Echo)
+                || (@event is InputEventMouseButton menuButton && menuButton.Pressed && !IsScrollWheelButton(menuButton.ButtonIndex))))
+        {
+            _commandsEditorConnection?.DismissEditorContextMenu();
+            GetViewport().SetInputAsHandled();
+            return;
+        }
+
         switch (@event)
         {
             case InputEventKey keyEvent when keyEvent.Pressed && !keyEvent.Echo:
@@ -162,6 +190,15 @@ public partial class LevelViewerCamera : Camera3D
                 else if (keyEvent.Keycode == Key.V && keyEvent.CtrlPressed)
                 {
                     _commandsEditorConnection?.SendEntityClipboardPaste();
+                    GetViewport().SetInputAsHandled();
+                }
+                /* Duplicate in place, as the context menu's Duplicate does: the copies land on the originals and
+                   come back selected, for the gizmo to move (a Shift-drag on a handle is this with the drag
+                   already under way). D is a movement key, but flying stops while Ctrl is held. */
+                else if (keyEvent.Keycode == Key.D && keyEvent.CtrlPressed
+                    && !keyEvent.AltPressed && !keyEvent.ShiftPressed)
+                {
+                    _commandsEditorConnection?.SendEntityDuplicateRequest();
                     GetViewport().SetInputAsHandled();
                 }
                 /* Same chords, and the same Alt exclusion, as OpenCAGE.Undo.UndoKeys - a step undone from
@@ -267,8 +304,11 @@ public partial class LevelViewerCamera : Camera3D
                 }
                 else if (keyEvent.Keycode == Key.Escape)
                 {
-                    // Escape leaves creation mode; with no mode to leave, it clears the selection.
-                    if (ExitCreateModeIfActive())
+                    // Escape leaves creation mode; with no mode to leave, it clears the selection. Mid-press
+                    // (a box being drawn, or a click not yet let go) it abandons the press instead.
+                    if (_boxSelect.IsArmed)
+                        _boxSelect.End();
+                    else if (ExitCreateModeIfActive())
                         _commandsEditorConnection?.SendViewportModeToEditor();
                     else
                         TryClearEntitySelection();
@@ -283,9 +323,9 @@ public partial class LevelViewerCamera : Camera3D
                 else if (keyEvent.Keycode == Key.H)
                 {
                     if (keyEvent.ShiftPressed)
-                        _alienScene?.ClearCompositeScopedHides();
-                    else if (_alienScene != null && _alienScene.TryHideSelectedEntity())
-                        _commandsEditorConnection?.TryClearEntitySelection();
+                        UnhideAllEntities();
+                    else
+                        HideSelectedEntity();
 
                     GetViewport().SetInputAsHandled();
                 }
@@ -339,6 +379,12 @@ public partial class LevelViewerCamera : Camera3D
 
     private void ProcessInternal(double delta)
     {
+        /* An open context menu is the user busy in the viewport, though the menu has the mouse rather than
+           this. Left to idle, the embedded viewer would hand keyboard focus back to OpenCAGE, and the key
+           that is meant to close the menu would land there instead. */
+        if (IsEditorContextMenuUp)
+            LevelViewerRenderIdleThrottle.NotifyUserActivity();
+
         LevelViewerRenderIdleThrottle.Update();
         if (LevelViewerRenderIdleThrottle.IsSuspended)
         {
@@ -495,9 +541,9 @@ public partial class LevelViewerCamera : Camera3D
 
     private void OnCompositeLoaded()
     {
-        Viewport viewport = GetViewport();
-        if (viewport != null)
-            viewport.UseOcclusionCulling = ModelReferenceRenderSettings.UseDistanceCulling;
+        // Occlusion culling stays off (set in _Ready): the scene has no OccluderInstance3D, so turning it on for a big
+        // level could hide nothing and only paid for the CPU depth pyramid - which is where the engine crashed
+        // (crash dashboard 0.18.0.41 #405, HZBuffer::update_mips on a 62k-mesh level). Distance culling is separate.
 
         FrameLoadedContentWhenReadyAsync();
     }
@@ -595,6 +641,9 @@ public partial class LevelViewerCamera : Camera3D
         bool ctrlDown = EmbeddedInOpenCage ? Win32Input.IsKeyDown(Win32Input.VK_CONTROL) : Input.IsKeyPressed(Key.Ctrl);
         if (ctrlDown) return;
 
+        //OpenCAGE's menu is up: the next key closes it, it doesn't fly
+        if (IsEditorContextMenuUp) return;
+
         float speed = MoveSpeed * deltaSeconds;
         if (IsMovementKeyDown(Key.Shift))
             speed *= FastMoveMultiplier;
@@ -619,6 +668,10 @@ public partial class LevelViewerCamera : Camera3D
 
         if (move.LengthSquared() > 0f)
         {
+            //Flying with the right button held makes it a look: letting go opens no menu
+            if (_rightPressed || (EmbeddedInOpenCage && Win32Input.IsKeyDown(Win32Input.VK_RBUTTON)))
+                StartRightDrag();
+
             LevelViewerRenderIdleThrottle.NotifyUserActivity();
             ReleaseFollowOnUserCameraMove();
             GlobalPosition += move.Normalized() * speed;
@@ -689,6 +742,10 @@ public partial class LevelViewerCamera : Camera3D
     {
         EnsureWindowFocus();
 
+        //Another button while the right one is down: that right click was for something else, not the menu
+        if (mouseButton.ButtonIndex != MouseButton.Right)
+            _rightClickPending = false;
+
         switch (mouseButton.ButtonIndex)
         {
             case MouseButton.Left:
@@ -713,8 +770,10 @@ public partial class LevelViewerCamera : Camera3D
                     break;
                 }
                 /* Ctrl adds what you click to the selection; shift takes it back out again. Neither
-                   drills, so what they pick is always something in the composite on screen. */
-                TryPickSelect(
+                   drills, so what they pick is always something in the composite on screen. Nothing is
+                   picked yet: a drag from here is a box, so the click waits for the button to come
+                   back up (FinishBoxSelectOrClick). */
+                ArmBoxSelect(
                     mouseButton.Position,
                     mouseButton.CtrlPressed
                         ? CommandsEditorConnection.SelectionChange.Add
@@ -724,16 +783,29 @@ public partial class LevelViewerCamera : Camera3D
                 GetViewport().SetInputAsHandled();
                 break;
             case MouseButton.Right:
+            {
+                /* A click (the context menu) until the mouse moves or the camera flies; then the look it always
+                   was. Pressed while a left press is still waiting to become a click or a box, or mid gizmo
+                   drag, it is there to call that off and opens nothing. */
+                bool interrupts = _boxSelect.IsArmed
+                    || (_commandsEditorConnection != null && GodotObject.IsInstanceValid(_commandsEditorConnection)
+                        && _commandsEditorConnection.TransformGizmo != null
+                        && _commandsEditorConnection.TransformGizmo.IsDragging);
+                _boxSelect.End();
+                _rightPressed = true;
+                _rightClickPending = !interrupts;
+                _rightDragStarted = false;
+                _rightPressPosition = mouseButton.Position;
                 if (EmbeddedInOpenCage)
-                    EnsureWindowFocus();
-                else
                 {
-                    _mouseLookActive = true;
-                    CaptureMouse(this);
+                    _rightDownScreen = Win32Input.TryGetScreenCursorPosition(out Vector2 cursor) ? cursor : null;
+                    EnsureWindowFocus();
                 }
                 GetViewport().SetInputAsHandled();
                 break;
+            }
             case MouseButton.Middle:
+                _boxSelect.End();
                 if (mouseButton.CtrlPressed)
                 {
                     TryPickDrillIntoComposite(mouseButton.Position);
@@ -766,6 +838,161 @@ public partial class LevelViewerCamera : Camera3D
             _commandsEditorConnection = GetNodeOrNull<CommandsEditorConnection>(CommandsEditorConnectionPath);
 
         _commandsEditorConnection?.TryPickSelectAtScreen(this, screenPosition, change);
+    }
+
+    /// <summary>
+    /// The left button went down off the gizmo. Whether that is a click or the corner of a box is known
+    /// once the mouse moves far enough or the button comes back up. A press on a handle the gizmo
+    /// didn't take stays what it always was - nothing.
+    /// </summary>
+    private void ArmBoxSelect(Vector2 screenPosition, CommandsEditorConnection.SelectionChange change)
+    {
+        LevelViewerTransformGizmo gizmo = GetGizmo();
+        if (gizmo != null && gizmo.HitsAtScreen(screenPosition))
+            return;
+
+        _boxSelect.Arm(screenPosition, change);
+    }
+
+    /// <summary>Drag the box's far corner. False when no press is waiting to become a box.</summary>
+    private bool TryUpdateBoxSelect(InputEventMouseMotion motion)
+    {
+        if (!_boxSelect.IsArmed)
+            return false;
+
+        //The button came up somewhere this window never heard about: drop the press rather than leave a box stuck to the mouse
+        if ((motion.ButtonMask & MouseButtonMask.Left) == 0)
+        {
+            _boxSelect.End();
+            return false;
+        }
+
+        _boxSelect.Update(motion.Position, GetViewport(), _hudLayer);
+        return true;
+    }
+
+    /// <summary>The left button came back up: select what the box holds, or pick at the press if it never became one.</summary>
+    private void FinishBoxSelectOrClick(Vector2 releasePosition)
+    {
+        _boxSelect.Update(releasePosition, GetViewport(), _hudLayer);
+        bool isBox = _boxSelect.IsActive;
+        Vector2 pressPosition = _boxSelect.PressPosition;
+        CommandsEditorConnection.SelectionChange change = _boxSelect.Change;
+        Rect2 box = _boxSelect.GetBox(GetViewport());
+        _boxSelect.End();
+
+        if (!isBox)
+        {
+            TryPickSelect(pressPosition, change);
+            return;
+        }
+
+        if (_commandsEditorConnection == null || !GodotObject.IsInstanceValid(_commandsEditorConnection))
+            _commandsEditorConnection = GetNodeOrNull<CommandsEditorConnection>(CommandsEditorConnectionPath);
+
+        _commandsEditorConnection?.TryBoxSelectAtScreen(this, box, change);
+    }
+
+    /// <summary>
+    /// The right button has moved or flown far enough from its press to be a look rather than a click. Not
+    /// embedded, the look starts here; embedded, the Win32 poll starts it (<see cref="HasRightDragStarted"/>).
+    /// </summary>
+    private void StartRightDrag()
+    {
+        _rightDragStarted = true;
+        _rightClickPending = false;
+        if (!EmbeddedInOpenCage && _rightPressed && !_mouseLookActive)
+        {
+            _mouseLookActive = true;
+            CaptureMouse(this);
+        }
+    }
+
+    /// <summary>
+    /// A right click: select what it landed on (unless that is selected already), then ask OpenCAGE for the
+    /// context menu there, saying which entries have anything to act on so it can grey out the rest. The
+    /// menu is drawn on that side; what it chooses comes back through <see cref="RunViewportAction"/>, or
+    /// is done over there. With no OpenCAGE connected (the standalone viewer) there is no menu.
+    /// </summary>
+    private void RequestContextMenu(Vector2 screenPosition)
+    {
+        if (_commandsEditorConnection == null || !GodotObject.IsInstanceValid(_commandsEditorConnection))
+            _commandsEditorConnection = GetNodeOrNull<CommandsEditorConnection>(CommandsEditorConnectionPath);
+
+        CommandsEditorConnection connection = _commandsEditorConnection;
+        if (connection == null)
+            return;
+
+        connection.SelectForContextMenuAtScreen(this, screenPosition);
+
+        _contextMenuPosition = screenPosition;
+        connection.SendViewportContextMenuRequest(
+            this,
+            screenPosition,
+            canFocus: CanFocusSelectedEntity(),
+            canHide: _alienScene != null && _alienScene.CanHideSelectedEntity(),
+            canUnhideAll: LevelViewerEntityHide.HasAny);
+    }
+
+    /// <summary>OpenCAGE's context menu is up over this window: the next click or key here closes it and does nothing else.</summary>
+    private bool IsEditorContextMenuUp =>
+        _commandsEditorConnection != null
+        && GodotObject.IsInstanceValid(_commandsEditorConnection)
+        && _commandsEditorConnection.IsEditorContextMenuUp;
+
+    /// <summary>
+    /// A context menu entry chosen in OpenCAGE whose action lives here (VIEWPORT_ACTION): each runs exactly
+    /// what its shortcut runs. The entries OpenCAGE owns - Copy, Paste, Duplicate, Delete - never come here.
+    /// </summary>
+    public void RunViewportAction(OpenCAGE.UnityConnection.ViewportAction action)
+    {
+        if (_commandsEditorConnection == null || !GodotObject.IsInstanceValid(_commandsEditorConnection))
+            _commandsEditorConnection = GetNodeOrNull<CommandsEditorConnection>(CommandsEditorConnectionPath);
+
+        switch (action)
+        {
+            case OpenCAGE.UnityConnection.ViewportAction.FocusOnSelection: //Z
+                FocusSelectedEntity();
+                break;
+            case OpenCAGE.UnityConnection.ViewportAction.SnapToFloor: //Shift+End
+                _commandsEditorConnection?.SnapSelectionToFloor();
+                break;
+            case OpenCAGE.UnityConnection.ViewportAction.Hide: //H
+                HideSelectedEntity();
+                break;
+            case OpenCAGE.UnityConnection.ViewportAction.UnhideAll: //Shift+H
+                UnhideAllEntities();
+                break;
+            case OpenCAGE.UnityConnection.ViewportAction.StepIntoComposite: //Ctrl+middle click, where the right click was
+                TryPickDrillIntoComposite(_contextMenuPosition);
+                break;
+            case OpenCAGE.UnityConnection.ViewportAction.SelectParentComposite:
+                _commandsEditorConnection?.TrySelectParentComposite();
+                break;
+            case OpenCAGE.UnityConnection.ViewportAction.DeselectAll: //Escape, outside creation mode
+                TryClearEntitySelection();
+                break;
+        }
+    }
+
+    private bool CanFocusSelectedEntity()
+    {
+        return _alienScene != null
+            && _alienScene.TryGetSelectedEntity(out Node3D selected)
+            && _alienScene.TryResolveFocusTarget(selected, maxExtent: 0f, out _, out _);
+    }
+
+    /// <summary>H: hide the selected entity until Shift+H (or the composite changes), and let go of it.</summary>
+    private void HideSelectedEntity()
+    {
+        if (_alienScene != null && _alienScene.TryHideSelectedEntity())
+            _commandsEditorConnection?.TryClearEntitySelection();
+    }
+
+    /// <summary>Shift+H: bring back everything H hid.</summary>
+    private void UnhideAllEntities()
+    {
+        _alienScene?.ClearCompositeScopedHides();
     }
 
     private void TryPickDrillIntoComposite(Vector2 screenPosition)
@@ -805,10 +1032,19 @@ public partial class LevelViewerCamera : Camera3D
         switch (mouseButton.ButtonIndex)
         {
             case MouseButton.Left:
-                if (TryGizmoMouseUp(mouseButton.Position))
+                if (_boxSelect.IsArmed)
+                {
+                    FinishBoxSelectOrClick(mouseButton.Position);
+                    GetViewport().SetInputAsHandled();
+                }
+                else if (TryGizmoMouseUp(mouseButton.Position))
                     GetViewport().SetInputAsHandled();
                 break;
             case MouseButton.Right:
+            {
+                bool openMenu = _rightClickPending;
+                _rightClickPending = false;
+                _rightPressed = false;
                 if (!EmbeddedInOpenCage)
                 {
                     _mouseLookActive = false;
@@ -816,7 +1052,12 @@ public partial class LevelViewerCamera : Camera3D
                         ReleaseMouse(this);
                 }
                 GetViewport().SetInputAsHandled();
+
+                //Where it went down: the release is within a few pixels of it, and the press is what was aimed
+                if (openMenu)
+                    RequestContextMenu(_rightPressPosition);
                 break;
+            }
             case MouseButton.Middle:
                 if (!EmbeddedInOpenCage)
                 {
@@ -889,7 +1130,11 @@ public partial class LevelViewerCamera : Camera3D
         bool dragActive = rightDown || middleDown;
 
         if (!rightDown)
+        {
             EndEmbeddedMouseLook();
+            _rightDownScreen = null;
+            _rightDragStarted = false;
+        }
 
         if (!dragActive)
         {
@@ -921,6 +1166,10 @@ public partial class LevelViewerCamera : Camera3D
                 _embeddedLastScreenMousePos = null;
                 return;
             }
+
+            //Held still, the right button is a click for the context menu: no look, and no cursor thrown to the middle, yet
+            if (!HasRightDragStarted())
+                return;
 
             BeginEmbeddedMouseLook(hwnd);
             return;
@@ -975,6 +1224,32 @@ public partial class LevelViewerCamera : Camera3D
         _embeddedLastScreenMousePos = screenPos;
 
         ApplyPanRelative(relative, relative / deltaSeconds, deltaSeconds);
+    }
+
+    /// <summary>
+    /// Embedded: whether the right button held now has moved far enough from where it went down (or flown the
+    /// camera) to be a look. Measured on the polled cursor rather than on events, so a press this window's
+    /// input never saw - the one that closed the context menu - waits for a drag too.
+    /// </summary>
+    private bool HasRightDragStarted()
+    {
+        if (_rightDragStarted)
+            return true;
+
+        if (!Win32Input.TryGetScreenCursorPosition(out Vector2 cursor))
+            return true;
+
+        if (_rightDownScreen == null)
+        {
+            _rightDownScreen = cursor;
+            return false;
+        }
+
+        if (cursor.DistanceTo(_rightDownScreen.Value) < LevelViewerBoxSelect.DragThresholdPixels)
+            return false;
+
+        StartRightDrag();
+        return true;
     }
 
     private void BeginEmbeddedMouseLook(IntPtr hwnd)
@@ -1452,10 +1727,20 @@ public partial class LevelViewerCamera : Camera3D
 
     private void HandleMouseMotionWithGizmo(InputEventMouseMotion motion)
     {
+        //A right press moved far enough is a look, not a click for the context menu
+        if (_rightPressed && !_rightDragStarted && (motion.ButtonMask & MouseButtonMask.Right) != 0
+            && motion.Position.DistanceTo(_rightPressPosition) >= LevelViewerBoxSelect.DragThresholdPixels)
+        {
+            StartRightDrag();
+        }
+
+        //A left press waiting to become a box, or being one, has the motion; the gizmo's hover stays as it was
+        bool boxConsumed = TryUpdateBoxSelect(motion);
+
         // Always forward motion to the gizmo for hover highlighting (even when camera is not looking)
         LevelViewerTransformGizmo gizmo = GetGizmo();
         bool gizmoConsumed = false;
-        if (gizmo != null && gizmo.Visible)
+        if (!boxConsumed && gizmo != null && gizmo.Visible)
         {
             gizmo.VertexSnapActive = LevelViewerTransformSnap.VertexAlways || IsVertexSnapKeyDown();
             gizmoConsumed = gizmo.HandleMouseMotion(motion.Position);
@@ -1471,6 +1756,10 @@ public partial class LevelViewerCamera : Camera3D
         if (!EmbeddedInOpenCage && (_mouseLookActive || _panning))
         {
             HandleMouseMotion(motion);
+            GetViewport().SetInputAsHandled();
+        }
+        else if (boxConsumed)
+        {
             GetViewport().SetInputAsHandled();
         }
     }

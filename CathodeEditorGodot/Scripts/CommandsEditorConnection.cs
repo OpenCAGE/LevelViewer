@@ -55,9 +55,24 @@ public partial class CommandsEditorConnection : Node3D
        each moved node belongs to. */
     private List<uint> _gizmoTargetEntityIds = new List<uint>();
 
+    /* Whether OpenCAGE's entity clipboard has anything on it, as it last said. Null until it says - an
+       OpenCAGE from before ENTITY_CLIPBOARD_CHANGED never does - and the context menu's Paste then stays
+       available, as Ctrl+V always is. */
+    private bool? _entityClipboardHasContent;
+
+    /* OpenCAGE's context menu for this viewport (issue 704): asked for by a right click here, drawn over
+       there. While it is up, this window's next click or key is for closing it and nothing else. Up means
+       OpenCAGE has said so (VIEWPORT_ACTION ContextMenuOpened) - or was asked so recently that its answer
+       may still be on its way, since a menu takes a moment to open and a click can't be allowed to slip
+       in under it. An OpenCAGE from before the menu never answers, and the asking then lapses. */
+    private bool _editorContextMenuOpen;
+    private ulong _editorContextMenuRequestedMsec;
+    private const ulong EditorContextMenuPendingMsec = 500;
+
     private uint _currentEntityGOID = 0;
 
     private bool _didLoadLevel = true;
+    private bool _levelReloadForced;
 
     private struct ParameterSyncKey : IEquatable<ParameterSyncKey>
     {
@@ -530,8 +545,10 @@ public partial class CommandsEditorConnection : Node3D
             string level = _levelName;
             string pathToAi = _pathToAI;
             _didLoadLevel = false;
+            bool forced = _levelReloadForced;
+            _levelReloadForced = false;
 
-            if (!ShouldSkipLevelReload(level, pathToAi))
+            if (forced || !ShouldSkipLevelReload(level, pathToAi))
                 Callable.From(() => _scene.QueueLoadLevel(level, pathToAi)).CallDeferred();
         }
 
@@ -543,6 +560,8 @@ public partial class CommandsEditorConnection : Node3D
                 if (op.Add) adds++;
             if (adds > 1)
                 ViewerLog.Print("Adding " + adds + " entities");
+            //The highlights are rebuilt once for the whole batch, as for adds: once per removal it was 0.4 s each on Torrens
+            bool removedAny = false;
             while (_entityOps.Count > 0)
             {
                 EntityOp op = _entityOps.Dequeue();
@@ -555,10 +574,10 @@ public partial class CommandsEditorConnection : Node3D
                 else
                 {
                     ViewerLog.Print("Removing entity: " + op.Entity.AsUInt32);
-                    _scene.RemoveEntity(op.Composite, op.Entity);
+                    removedAny |= _scene.RemoveEntity(op.Composite, op.Entity, refreshHighlights: false);
                 }
             }
-            if (adds > 0)
+            if (adds > 0 || removedAny)
                 _scene.RefreshEntityHighlights();
         }
 
@@ -735,6 +754,16 @@ public partial class CommandsEditorConnection : Node3D
             return;
         }
 
+        if (packet.entity_clipboard_has_content.HasValue)
+        {
+            lock (_lock)
+                _entityClipboardHasContent = packet.entity_clipboard_has_content.Value;
+        }
+
+        //Nothing but the clipboard state, taken above: the selection it carries is only there for older viewers
+        if (packet.packet_event == PacketEvent.ENTITY_CLIPBOARD_CHANGED)
+            return;
+
         // OpenCAGE echoes ENTITY_ADDED with its current (pre-selection) drill path, which would clear our selection.
         if (packet.packet_event == PacketEvent.ENTITY_ADDED)
         {
@@ -870,6 +899,13 @@ public partial class CommandsEditorConnection : Node3D
         if (packet.packet_event == PacketEvent.VIEWPORT_DROP_REQUEST)
         {
             HandleViewportDropRequest(packet);
+            return;
+        }
+
+        if (packet.packet_event == PacketEvent.VIEWPORT_ACTION)
+        {
+            //Nothing but the action: the selection it carries is only there for older viewers
+            HandleViewportAction(packet);
             return;
         }
 
@@ -1098,10 +1134,11 @@ public partial class CommandsEditorConnection : Node3D
                 bool skipReload;
                 lock (_lock)
                 {
-                    skipReload = ShouldSkipLevelReload(packet.level_name, packet.system_folder);
+                    skipReload = !packet.level_reload && ShouldSkipLevelReload(packet.level_name, packet.system_folder);
                     if (!skipReload)
                     {
                         _didLoadLevel = true;
+                        _levelReloadForced = packet.level_reload;
                         _viewerOriginatedEntityAdds.Clear();
                         _releasedEphemeralAliases.Clear();
                     }
@@ -1400,6 +1437,14 @@ public partial class CommandsEditorConnection : Node3D
         if (PreviewVisibilitySettings.SelectionHighlightMode != highlightMode)
             Callable.From(() => LevelViewerSelection.SetMode(highlightMode)).CallDeferred();
 
+        //The sky swaps the environment's background and shows or hides a node: main thread as well
+        if (PreviewVisibilitySettings.RenderGalaxy != packet.render_galaxy)
+        {
+            bool renderGalaxy = packet.render_galaxy;
+            PreviewVisibilitySettings.RenderGalaxy = renderGalaxy;
+            Callable.From(() => LevelViewerGalaxy.SetEnabled(_scene, renderGalaxy)).CallDeferred();
+        }
+
         ApplyDeepSelectModeFromPacket(packet.deep_select_mode);
         ApplyGizmoModeFromPacket(packet.gizmo_mode);
         ApplyCreateModeFromPacket(packet.create_function_type);
@@ -1502,11 +1547,13 @@ public partial class CommandsEditorConnection : Node3D
     /// just the one the gizmo is on. It owns the level data, and answers with ENTITY_DELETED.
     /// </summary>
     /// <summary>
-    /// Shift was held on a gizmo handle: ask OpenCAGE to duplicate the selection. It clones in place,
-    /// selects the copies, and that selection reaches the gizmo as the ordinary ENTITY_SELECTED - which
-    /// is what the armed handover picks the drag up on. Payload matches a delete request.
+    /// Shift was held on a gizmo handle, or Ctrl+D / the context menu's Duplicate: ask OpenCAGE to
+    /// duplicate the selection. It clones in place, selects the copies, and that selection reaches the
+    /// gizmo as the ordinary ENTITY_SELECTED - which is what an armed shift-clone handover picks the drag
+    /// up on. <paramref name="gesture"/> is the shift-clone's drag, so the copies and their move undo as
+    /// one step; 0 for a plain duplicate. Payload matches a delete request.
     /// </summary>
-    public void SendEntityDuplicateRequest()
+    public void SendEntityDuplicateRequest(uint gesture = 0)
     {
         uint compositeId;
         uint entityId;
@@ -1527,6 +1574,7 @@ public partial class CommandsEditorConnection : Node3D
         {
             composite = compositeId,
             entity = entityId,
+            gesture = gesture,
         };
         if (selection.Count > 1)
             packet.selection_entities = selection;
@@ -1582,11 +1630,30 @@ public partial class CommandsEditorConnection : Node3D
         return null;
     }
 
+    /// <summary>Whether <see cref="SnapSelectionToFloor"/> has anything it may move.</summary>
+    public bool CanSnapSelectionToFloor()
+    {
+        if (_scene == null || CreateModeActive)
+            return false;
+        if (_transformGizmo != null && _transformGizmo.IsDragging)
+            return false;
+
+        List<Node3D> targets = new List<Node3D>();
+        _scene.GetSelectedEntities(targets, null);
+        for (int i = 0; i < targets.Count; i++)
+        {
+            if (_scene.SupportsTransformGizmo(targets[i]))
+                return true;
+        }
+        return false;
+    }
+
     /// <summary>
     /// Shift+End: rest every selected entity on the nearest floor. Built exactly as
     /// <see cref="SyncTransformGizmoToSelection"/> builds its targets, so the entity ids line up with
     /// what <see cref="OnGizmoTransformChanged"/> writes; the move goes out the ordinary gizmo path, so
-    /// it is undoable, hits every instance, and becomes a keyframe under Animation Mode like any drag.
+    /// it is undoable - as one step, like a drag - hits every instance, and becomes a keyframe under
+    /// Animation Mode like any drag.
     /// </summary>
     public void SnapSelectionToFloor()
     {
@@ -1610,6 +1677,7 @@ public partial class CommandsEditorConnection : Node3D
 
         _gizmoTargetEntityIds = targetEntityIds;
         Commands commands = _scene.Content.Level?.Commands;
+        uint gesture = LevelViewerTransformGizmo.NextGesture();
 
         LevelViewerPick.BeginBatchPickBoundsInvalidation();
         try
@@ -1623,7 +1691,7 @@ public partial class CommandsEditorConnection : Node3D
                     continue;
 
                 target.GlobalPosition = global;
-                OnGizmoTransformChanged(i, target.Position, target.RotationDegrees);
+                OnGizmoTransformChanged(i, target.Position, target.RotationDegrees, gesture);
                 OnGizmoDragCommitted(target);
             }
         }
@@ -1697,6 +1765,26 @@ public partial class CommandsEditorConnection : Node3D
         SendMessage(packet);
     }
 
+    /// <summary>Something is selected for Copy, Duplicate, Delete and Deselect All to act on - the same test each of their requests makes.</summary>
+    public bool HasEntitySelection
+    {
+        get
+        {
+            lock (_lock)
+                return _entitySelected && _currentEntity != 0 && _currentComposite != 0;
+        }
+    }
+
+    /// <summary>A paste has somewhere to go, and OpenCAGE hasn't said its clipboard is empty.</summary>
+    public bool CanPasteEntities
+    {
+        get
+        {
+            lock (_lock)
+                return _compositeLoaded && _currentComposite != 0 && _entityClipboardHasContent != false;
+        }
+    }
+
     /// <summary>Ctrl+V in the viewport: ask OpenCAGE to paste its entity clipboard into the current composite.</summary>
     public void SendEntityClipboardPaste()
     {
@@ -1715,6 +1803,115 @@ public partial class CommandsEditorConnection : Node3D
         {
             composite = compositeId,
         });
+    }
+
+    /// <summary>
+    /// A right click here wants the context menu (issue 704). OpenCAGE draws it, themed with the rest of the
+    /// editor, so this sends only what it can't know: where the click landed, and which entries have anything
+    /// to act on. False when there is no OpenCAGE to draw one - the standalone viewer has no menu.
+    /// <paramref name="canFocus"/>, <paramref name="canHide"/> and <paramref name="canUnhideAll"/> are the
+    /// camera's and the scene's to answer; the rest is answered here.
+    /// </summary>
+    public bool SendViewportContextMenuRequest(Camera3D camera, Vector2 screenPosition, bool canFocus, bool canHide, bool canUnhideAll)
+    {
+        if (!IsWebSocketConnectedSafe())
+            return false;
+
+        Vector2 size = camera?.GetViewport()?.GetVisibleRect().Size ?? Vector2.Zero;
+        if (size.X <= 0f || size.Y <= 0f)
+            return false;
+
+        //A fraction of the viewport, as a drop's position travels the other way: the two sides need not share DPI
+        Packet packet = new Packet(PacketEvent.VIEWPORT_CONTEXT_MENU)
+        {
+            context_menu_viewport_x = Mathf.Clamp(screenPosition.X / size.X, 0f, 1f),
+            context_menu_viewport_y = Mathf.Clamp(screenPosition.Y / size.Y, 0f, 1f),
+            context_menu_has_selection = HasEntitySelection,
+            context_menu_can_paste = CanPasteEntities,
+            context_menu_can_focus = canFocus,
+            context_menu_can_snap_to_floor = CanSnapSelectionToFloor(),
+            context_menu_can_hide = canHide,
+            context_menu_can_unhide_all = canUnhideAll,
+            context_menu_can_step_into = CanDrillIntoCompositeAtScreen(camera, screenPosition),
+            context_menu_can_select_parent = CanSelectParentComposite,
+        };
+
+        lock (_lock)
+        {
+            _editorContextMenuOpen = false;
+            _editorContextMenuRequestedMsec = Time.GetTicksMsec();
+        }
+        SendMessage(packet);
+        return true;
+    }
+
+    /// <summary>
+    /// OpenCAGE's context menu is up over this window - or was asked for so recently that it is about to be.
+    /// The next click or key here is for closing it (<see cref="DismissEditorContextMenu"/>), nothing else.
+    /// </summary>
+    public bool IsEditorContextMenuUp
+    {
+        get
+        {
+            lock (_lock)
+            {
+                if (_editorContextMenuOpen)
+                    return true;
+                return _editorContextMenuRequestedMsec != 0
+                    && Time.GetTicksMsec() - _editorContextMenuRequestedMsec < EditorContextMenuPendingMsec;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Input arrived here while OpenCAGE's context menu was up: a menu over another process's window never
+    /// sees that input, so ask for the menu to close. The caller swallows the input - a click that closes a
+    /// menu is only that, as it is anywhere else in the editor.
+    /// </summary>
+    public void DismissEditorContextMenu()
+    {
+        lock (_lock)
+        {
+            _editorContextMenuOpen = false;
+            _editorContextMenuRequestedMsec = 0;
+        }
+        SendMessage(new Packet(PacketEvent.VIEWPORT_CONTEXT_MENU_DISMISS));
+    }
+
+    /* OpenCAGE asks for one of this side's actions (VIEWPORT_ACTION): a context menu entry whose shortcut
+       lives here, run through the very method that shortcut runs, or word that its menu opened or closed. */
+    private void HandleViewportAction(Packet packet)
+    {
+        ViewportAction action = (ViewportAction)packet.viewport_action;
+        switch (action)
+        {
+            case ViewportAction.None:
+                return;
+            case ViewportAction.ContextMenuOpened:
+            case ViewportAction.ContextMenuClosed:
+                lock (_lock)
+                {
+                    _editorContextMenuOpen = action == ViewportAction.ContextMenuOpened;
+                    _editorContextMenuRequestedMsec = 0;
+                }
+                return;
+        }
+
+        /* Deferred, not run from inside this packet drain: the shortcut runs from input handling, between
+           frames, and the scene work these do (a drill refocuses the whole scene) belongs there too, as the
+           animation preview's does - not in the middle of the physics tick that is still applying packets. */
+        Callable.From(() =>
+        {
+            try
+            {
+                if (FindCamera() is LevelViewerCamera camera)
+                    camera.RunViewportAction(action);
+            }
+            catch (Exception ex)
+            {
+                ViewerLog.PrintErr("[Viewer] Viewport action " + action + " failed: " + ex);
+            }
+        }).CallDeferred();
     }
 
     /// <summary>
@@ -1780,13 +1977,16 @@ public partial class CommandsEditorConnection : Node3D
     }
 
     /// <summary>
-    /// A composite dragged out of OpenCAGE's browser and dropped on the viewport. OpenCAGE can only
-    /// tell us where in the viewport the drop landed - the geometry to hit is all on this side - so we
-    /// raycast it exactly as creation mode does on a click and answer with the placement.
+    /// A composite dragged out of OpenCAGE's browser and dropped on the viewport, or a function type out of
+    /// its entity palette. OpenCAGE can only tell us where in the viewport the drop landed - the geometry to
+    /// hit is all on this side - so we raycast it exactly as creation mode does on a click and answer with
+    /// the placement. What was dropped just rides along: the composite as create_composite_instance, the
+    /// function type as entity_function (and echoed as drop_function_type, so OpenCAGE can tell the answer
+    /// from a creation-mode click's - it admits different types for the two).
     /// </summary>
     private void HandleViewportDropRequest(Packet packet)
     {
-        if (packet.create_composite_instance == 0 || _scene == null || !_scene.Content.Loaded)
+        if ((packet.create_composite_instance == 0 && packet.drop_function_type == 0) || _scene == null || !_scene.Content.Loaded)
             return;
 
         uint compositeId;
@@ -1818,6 +2018,8 @@ public partial class CommandsEditorConnection : Node3D
         {
             composite = compositeId,
             create_composite_instance = packet.create_composite_instance,
+            entity_function = packet.drop_function_type,
+            drop_function_type = packet.drop_function_type,
             has_transform = true,
             position = new System.Numerics.Vector3(cathodePosition.X, cathodePosition.Y, cathodePosition.Z),
             rotation = new System.Numerics.Vector3(0f, 0f, 0f),
@@ -1943,7 +2145,13 @@ public partial class CommandsEditorConnection : Node3D
                     cancellationToken);
                 ViewerLog.Print("Connected to Commands Editor!");
                 ViewerLogBridge.NotifyConnected();
-                lock (_lock) { ResetSceneBatch("connected"); }
+                lock (_lock)
+                {
+                    ResetSceneBatch("connected");
+                    //Whatever menu the last editor had up went with it
+                    _editorContextMenuOpen = false;
+                    _editorContextMenuRequestedMsec = 0;
+                }
 
                 Interlocked.Exchange(ref _lastConnectedTicks, DateTime.UtcNow.Ticks);
 
@@ -2181,6 +2389,30 @@ public partial class CommandsEditorConnection : Node3D
         TrySendPendingEphemeralDeepSelectAliasRelease(null, null, false);
     }
 
+    /* A box in advanced deep select can make several aliases at once. Each goes over as its own
+       ENTITY_ADDED carrying the whole selection, and all but the last say more is to come
+       (selection_follows), so OpenCAGE adds each as it arrives and selects the lot once, with the last.
+       Released aliases go after, as above. */
+    private async Task SendNewAliasesToEditorAsync(
+        Composite ownerComposite,
+        List<AliasEntity> aliases,
+        List<uint> pathEntities,
+        List<uint> pathComposites,
+        List<uint> selectionEntities)
+    {
+        for (int i = 0; i < aliases.Count; i++)
+            _viewerOriginatedEntityAdds.Add(aliases[i].shortGUID.AsUInt32);
+
+        for (int i = 0; i < aliases.Count; i++)
+        {
+            Packet addPacket = BuildAliasEntityAddedPacket(ownerComposite, aliases[i], pathEntities, pathComposites, selectionEntities);
+            addPacket.selection_follows = i < aliases.Count - 1;
+            await SendMessageAsync(addPacket);
+        }
+
+        TrySendPendingEphemeralDeepSelectAliasRelease(null, null, false);
+    }
+
     private static Packet BuildSelectionPacket(List<uint> pathEntities, List<uint> pathComposites, bool entitySelected,
         List<uint> selectionEntities = null)
     {
@@ -2371,6 +2603,34 @@ public partial class CommandsEditorConnection : Node3D
         SendSelectionToEditorWithPendingEphemeralDelete(pathEntities, pathComposites, entitySelected, selectionEntities);
     }
 
+    /// <summary>
+    /// A right click is about to open the context menu here. What it lands on is selected first, the way a
+    /// click would select it - unless it is part of the selection already, which the menu then acts on as a
+    /// whole. A right click on nothing leaves the selection as it is.
+    /// </summary>
+    public void SelectForContextMenuAtScreen(Camera3D camera, Vector2 screenPosition)
+    {
+        if (_scene == null || camera == null || !_scene.Content.Loaded)
+            return;
+
+        if (!_scene.TryPickSelectionTarget(camera, screenPosition, out _, out Node3D hitEntityNode)
+            || hitEntityNode == null)
+        {
+            return;
+        }
+
+        //A selected node is what its entity draws as (an alias's is what it points at), so geometry under one is part of it
+        List<Node3D> selected = new List<Node3D>();
+        _scene.GetSelectedEntities(selected, null);
+        for (int i = 0; i < selected.Count; i++)
+        {
+            if (selected[i] == hitEntityNode || selected[i].IsAncestorOf(hitEntityNode))
+                return;
+        }
+
+        TryPickSelectAtScreen(camera, screenPosition, SelectionChange.Replace);
+    }
+
     /* Fold the entity a ctrl- or shift-click landed on into the selection already there. False when
        nothing would be left selected. The selection that comes back leads with the entity the rest of
        the viewer should follow - the one just clicked, or, if that one was clicked back out, whatever
@@ -2455,21 +2715,319 @@ public partial class CommandsEditorConnection : Node3D
         return true;
     }
 
-    public void TryPickDrillIntoCompositeAtScreen(Camera3D camera, Vector2 screenPosition)
+    /* How many aliases one box may make in advanced deep select. Each is an entity added to the
+       composite on screen, on the OpenCAGE side too, which also deletes it again once the selection
+       moves on (about 30 ms to add and 70 ms to let go of, each, measured on Torrens' environment),
+       and a box over a whole level would otherwise make thousands. The ones nearest the middle of the
+       box get them; entities past the limit that already have an alias are still taken. */
+    private const int MaxNewAliasesPerBox = 64;
+
+    /// <summary>
+    /// Select what a box drawn in the viewport holds (<see cref="LevelViewerBoxSelect"/> decides what
+    /// that is). Each entity in it is picked the way a click on it would be, deep-select aliases and all,
+    /// and together they become the selection ctrl-clicking them one by one would have left: a plain box
+    /// replaces the selection, a ctrl-box adds to it and a shift-box toggles each entity it holds.
+    /// </summary>
+    public void TryBoxSelectAtScreen(Camera3D camera, Rect2 box, SelectionChange change = SelectionChange.Replace)
     {
         if (_scene == null || camera == null || !_scene.Content.Loaded)
-            return;
-
-        if (!_scene.TryPickSelectionTarget(camera, screenPosition, out LevelViewerPick.SelectionTarget target))
             return;
 
         uint activeCompositeId = PreviewVisibilitySettings.ActiveCompositeId;
         if (activeCompositeId == 0 && _pathComposites != null && _pathComposites.Count > 0)
             activeCompositeId = _pathComposites[_pathComposites.Count - 1];
 
+        //Everything in a box is picked for the first time, as a new click would be, so progressive deep select starts over
+        ResetProgressiveDeepSelectState();
+
         Commands commands = _scene.Content.Level.Commands;
-        List<uint> pathEntities = null;
-        List<uint> pathComposites = null;
+        bool viaAliases = PreviewVisibilitySettings.DeepSelectMode == PreviewVisibilitySettings.DeepSelectModeKind.AdvancedDeepSelect;
+        ulong startedUsec = Time.GetTicksUsec();
+        List<LevelViewerBoxSelect.Hit> hits = new List<LevelViewerBoxSelect.Hit>();
+        LevelViewerBoxSelect.CollectHits(_scene, camera, box, activeCompositeId, viaAliases, hits, out int ownerCount);
+
+        /* Where each would be selected, worked out before any alias is made. Entities are only selected
+           together under one parent path, and nothing should be made for an entity that is then left
+           out. That is nearly always all of them; were the composite on screen in several places at
+           once, the place with the most of the box in it wins, and the nearest the middle on a tie. */
+        uint[] instancePath = PreviewVisibilitySettings.ActiveInstanceEntityPath ?? Array.Empty<uint>();
+        List<uint> syncedComposites = GetSyncedPathCompositesSnapshot();
+        bool[] nested = new bool[hits.Count];
+        Dictionary<string, List<int>> groups = new Dictionary<string, List<int>>();
+        for (int i = 0; i < hits.Count; i++)
+        {
+            nested[i] = viaAliases
+                && LevelViewerPick.GetDeepSelectMaxDepth(hits[i].Target, activeCompositeId, instancePath, commands) > 0;
+
+            List<uint> pathEntitiesAt;
+            List<uint> pathCompositesAt;
+            bool built = nested[i]
+                ? LevelViewerPick.TryBuildAliasSelectionPath(
+                    hits[i].Target, activeCompositeId, uint.MaxValue, syncedComposites, out pathEntitiesAt, out pathCompositesAt)
+                : LevelViewerPick.TryBuildActiveCompositeSelectionPath(
+                    hits[i].Target, activeCompositeId, out pathEntitiesAt, out pathCompositesAt);
+            if (!built)
+                continue;
+
+            string parent = string.Join(",", pathEntitiesAt.Take(pathEntitiesAt.Count - 1)) + "|" + string.Join(",", pathCompositesAt);
+            if (!groups.TryGetValue(parent, out List<int> members))
+            {
+                members = new List<int>();
+                groups.Add(parent, members);
+            }
+            members.Add(i);
+        }
+
+        //Hits come nearest the middle first, so a group's first member says how near the middle it reaches
+        List<int> winningGroup = null;
+        foreach (List<int> members in groups.Values)
+        {
+            if (winningGroup == null || members.Count > winningGroup.Count
+                || (members.Count == winningGroup.Count && members[0] < winningGroup[0]))
+            {
+                winningGroup = members;
+            }
+        }
+
+        //Now the real paths, making the aliases the entities that need one don't have yet
+        Composite activeComposite = commands.GetComposite(new ShortGuid(activeCompositeId));
+        List<uint> leaderPathEntities = null;
+        List<uint> leaderPathComposites = null;
+        List<uint> boxEntities = new List<uint>();
+        HashSet<uint> boxEntitySet = new HashSet<uint>();
+        List<AliasEntity> newAliases = new List<AliasEntity>();
+        int overAliasLimit = 0;
+        if (winningGroup != null)
+        {
+            foreach (int i in winningGroup)
+            {
+                List<uint> pathEntitiesAt;
+                List<uint> pathCompositesAt;
+                bool built;
+                if (nested[i])
+                {
+                    bool mayCreate = newAliases.Count < MaxNewAliasesPerBox;
+                    built = TryPickDeepSelectViaAlias(
+                        hits[i].Target,
+                        activeCompositeId,
+                        commands,
+                        deepSelectDepth: 0,
+                        out pathEntitiesAt,
+                        out pathCompositesAt,
+                        out bool createdNewAlias,
+                        allowCreate: mayCreate);
+                    if (!built && !mayCreate)
+                        overAliasLimit++;
+                    if (built && createdNewAlias
+                        && activeComposite?.GetEntityByID(new ShortGuid(pathEntitiesAt[pathEntitiesAt.Count - 1])) is AliasEntity alias)
+                    {
+                        newAliases.Add(alias);
+                    }
+                }
+                else
+                {
+                    built = LevelViewerPick.TryBuildActiveCompositeSelectionPath(
+                        hits[i].Target, activeCompositeId, out pathEntitiesAt, out pathCompositesAt);
+                }
+
+                if (!built || !boxEntitySet.Add(pathEntitiesAt[pathEntitiesAt.Count - 1]))
+                    continue;
+
+                boxEntities.Add(pathEntitiesAt[pathEntitiesAt.Count - 1]);
+                if (leaderPathEntities == null)
+                {
+                    leaderPathEntities = pathEntitiesAt;
+                    leaderPathComposites = pathCompositesAt;
+                }
+            }
+        }
+
+        ViewerLog.Print("Box select: " + boxEntities.Count + " entities in the box (" + ownerCount + " pick owners looked at"
+            + (viaAliases ? ", " + newAliases.Count + " aliases made" + (overAliasLimit > 0 ? ", " + overAliasLimit + " left out over the limit of " + MaxNewAliasesPerBox : "") : "")
+            + ") in " + ((Time.GetTicksUsec() - startedUsec) / 1000.0).ToString("0.0") + " ms");
+
+        if (boxEntities.Count == 0)
+        {
+            //A plain box round nothing clears the selection, as a plain click on nothing does; ctrl and shift leave it be
+            if (change == SelectionChange.Replace)
+                TryClearEntitySelection();
+            return;
+        }
+
+        List<uint> pathEntities = new List<uint>(leaderPathEntities);
+        List<uint> pathComposites = new List<uint>(leaderPathComposites);
+        List<uint> selectionEntities = boxEntities;
+        if (change != SelectionChange.Replace
+            && !TryCombineBoxWithCurrentSelection(pathEntities, pathComposites, boxEntities, change, out selectionEntities))
+        {
+            //Shift-boxed everything that was selected: nothing is any more
+            TryClearEntitySelection();
+            return;
+        }
+
+        //Whatever leads the selection is what the path has to name
+        pathEntities[pathEntities.Count - 1] = selectionEntities[0];
+
+        if (PreviewVisibilitySettings.DeepSelectMode != PreviewVisibilitySettings.DeepSelectModeKind.None
+            && !PreviewVisibilitySettings.InstancePathsEqual(
+                PreviewVisibilitySettings.CompositeFocusInstancePath,
+                PreviewVisibilitySettings.ActiveInstanceEntityPath))
+        {
+            //As for a click: the grey-out follows OpenCAGE's drill scope, not the aliases a pick makes
+            PreviewVisibilitySettings.ResetCompositeFocusToActiveInstancePath();
+            MarkCompositeFocusDirty();
+        }
+
+        ApplyLocalSelection(pathEntities, pathComposites, true, selectionEntities);
+        ApplySelectionNowAndCleanupEphemeralAlias(pathEntities, pathComposites, true);
+        UpdateEphemeralDeepSelectAliasTracking(pathComposites, selectionEntities);
+
+        //New aliases: the selection rides along with their ENTITY_ADDED, so OpenCAGE adds and selects them together
+        if (newAliases.Count > 0 && activeComposite != null)
+        {
+            _ = SendNewAliasesToEditorAsync(activeComposite, newAliases, pathEntities, pathComposites, selectionEntities);
+            return;
+        }
+
+        SendSelectionToEditorWithPendingEphemeralDelete(pathEntities, pathComposites, true, selectionEntities);
+    }
+
+    /* A ctrl- or shift-box's entities folded into the selection already there, the way ctrl- or
+       shift-clicking each in turn would have: ctrl adds every one, shift takes out the ones already
+       selected and adds the rest. What already led the selection keeps leading it while it is still
+       in it, so the gizmo and the inspector don't jump to something in the box. False when nothing
+       would be left selected. A box somewhere the current selection can't live simply replaces it,
+       as a click there would. */
+    private bool TryCombineBoxWithCurrentSelection(
+        List<uint> pathEntities,
+        List<uint> pathComposites,
+        List<uint> boxEntities,
+        SelectionChange change,
+        out List<uint> selectionEntities)
+    {
+        selectionEntities = boxEntities;
+
+        List<uint> selection;
+        List<uint> currentPathEntities;
+        List<uint> currentPathComposites;
+        bool entitySelected;
+        uint currentEntity;
+        lock (_lock)
+        {
+            selection = new List<uint>(_selectionEntities);
+            currentPathEntities = _pathEntities;
+            currentPathComposites = _pathComposites;
+            entitySelected = _entitySelected;
+            currentEntity = _currentEntity;
+        }
+
+        if (!entitySelected || currentEntity == 0
+            || !SelectionPathsShareParent(currentPathEntities, currentPathComposites, pathEntities, pathComposites))
+        {
+            return boxEntities.Count > 0; //nothing to join: the box stands on its own
+        }
+
+        if (selection.Count == 0)
+            selection.Add(currentEntity);
+
+        HashSet<uint> selected = new HashSet<uint>(selection);
+        HashSet<uint> toggledOut = new HashSet<uint>();
+        for (int i = 0; i < boxEntities.Count; i++)
+        {
+            uint entityId = boxEntities[i];
+            if (selected.Contains(entityId))
+            {
+                if (change == SelectionChange.Toggle)
+                    toggledOut.Add(entityId);
+                continue;
+            }
+
+            selected.Add(entityId);
+            selection.Add(entityId);
+        }
+
+        if (toggledOut.Count > 0)
+            selection.RemoveAll(toggledOut.Contains);
+
+        if (selection.Count == 0)
+            return false;
+
+        selectionEntities = selection;
+        return true;
+    }
+
+    public void TryPickDrillIntoCompositeAtScreen(Camera3D camera, Vector2 screenPosition)
+    {
+        if (!TryBuildDrillPathAtScreen(camera, screenPosition, out LevelViewerPick.SelectionTarget target,
+                out List<uint> pathEntities, out List<uint> pathComposites))
+        {
+            return;
+        }
+
+        Commands commands = _scene.Content.Level.Commands;
+        bool entitySelected = false;
+        if (PreviewVisibilitySettings.DeepSelectMode != PreviewVisibilitySettings.DeepSelectModeKind.None)
+        {
+            LevelViewerPick.SelectionTarget preserveTarget = target;
+            if (PreviewVisibilitySettings.DeepSelectMode == PreviewVisibilitySettings.DeepSelectModeKind.DeepSelect
+                && _progressiveDeepSelectEntityIds != null
+                && _progressiveDeepSelectCompositeIds != null
+                && _progressiveDeepSelectEntityIds.Count > 0)
+            {
+                preserveTarget = new LevelViewerPick.SelectionTarget(
+                    _progressiveDeepSelectEntityIds,
+                    _progressiveDeepSelectCompositeIds,
+                    _progressiveDeepSelectLeafId);
+            }
+
+            TryMergePreservedSelectionIntoDrillPath(
+                pathEntities,
+                pathComposites,
+                preserveTarget,
+                commands,
+                out pathEntities,
+                out pathComposites,
+                out entitySelected);
+        }
+
+        if (PreviewVisibilitySettings.DeepSelectMode == PreviewVisibilitySettings.DeepSelectModeKind.DeepSelect)
+            ResetProgressiveDeepSelectState();
+
+        UpdateCompositeFocusForDrillPath(pathEntities, pathComposites, entitySelected);
+        ApplyLocalSelection(pathEntities, pathComposites, entitySelected);
+        SendSelectionToEditorWithPendingEphemeralDelete(pathEntities, pathComposites, entitySelected);
+        ApplySelectionNowAndCleanupEphemeralAlias(pathEntities, pathComposites, entitySelected);
+        ApplyCompositeFocusNow();
+    }
+
+    /// <summary>Whether a Ctrl+middle click here would step into a composite instance - the context menu's Step Into Composite.</summary>
+    public bool CanDrillIntoCompositeAtScreen(Camera3D camera, Vector2 screenPosition)
+    {
+        return TryBuildDrillPathAtScreen(camera, screenPosition, out _, out _, out _);
+    }
+
+    /* Where a Ctrl+middle click here would step in to, worked out without changing anything. */
+    private bool TryBuildDrillPathAtScreen(
+        Camera3D camera,
+        Vector2 screenPosition,
+        out LevelViewerPick.SelectionTarget target,
+        out List<uint> pathEntities,
+        out List<uint> pathComposites)
+    {
+        target = default;
+        pathEntities = null;
+        pathComposites = null;
+        if (_scene == null || camera == null || !_scene.Content.Loaded)
+            return false;
+
+        if (!_scene.TryPickSelectionTarget(camera, screenPosition, out target))
+            return false;
+
+        uint activeCompositeId = PreviewVisibilitySettings.ActiveCompositeId;
+        if (activeCompositeId == 0 && _pathComposites != null && _pathComposites.Count > 0)
+            activeCompositeId = _pathComposites[_pathComposites.Count - 1];
+
+        Commands commands = _scene.Content.Level.Commands;
         bool built = false;
 
         switch (PreviewVisibilitySettings.DeepSelectMode)
@@ -2522,42 +3080,7 @@ public partial class CommandsEditorConnection : Node3D
                 break;
         }
 
-        if (!built)
-            return;
-
-        bool entitySelected = false;
-        if (PreviewVisibilitySettings.DeepSelectMode != PreviewVisibilitySettings.DeepSelectModeKind.None)
-        {
-            LevelViewerPick.SelectionTarget preserveTarget = target;
-            if (PreviewVisibilitySettings.DeepSelectMode == PreviewVisibilitySettings.DeepSelectModeKind.DeepSelect
-                && _progressiveDeepSelectEntityIds != null
-                && _progressiveDeepSelectCompositeIds != null
-                && _progressiveDeepSelectEntityIds.Count > 0)
-            {
-                preserveTarget = new LevelViewerPick.SelectionTarget(
-                    _progressiveDeepSelectEntityIds,
-                    _progressiveDeepSelectCompositeIds,
-                    _progressiveDeepSelectLeafId);
-            }
-
-            TryMergePreservedSelectionIntoDrillPath(
-                pathEntities,
-                pathComposites,
-                preserveTarget,
-                commands,
-                out pathEntities,
-                out pathComposites,
-                out entitySelected);
-        }
-
-        if (PreviewVisibilitySettings.DeepSelectMode == PreviewVisibilitySettings.DeepSelectModeKind.DeepSelect)
-            ResetProgressiveDeepSelectState();
-
-        UpdateCompositeFocusForDrillPath(pathEntities, pathComposites, entitySelected);
-        ApplyLocalSelection(pathEntities, pathComposites, entitySelected);
-        SendSelectionToEditorWithPendingEphemeralDelete(pathEntities, pathComposites, entitySelected);
-        ApplySelectionNowAndCleanupEphemeralAlias(pathEntities, pathComposites, entitySelected);
-        ApplyCompositeFocusNow();
+        return built;
     }
 
     private bool TryMergePreservedSelectionIntoDrillPath(
@@ -2689,6 +3212,47 @@ public partial class CommandsEditorConnection : Node3D
         ApplyLocalSelection(pathEntities, pathComposites, entitySelected);
         SendSelectionToEditorWithPendingEphemeralDelete(pathEntities, pathComposites, entitySelected);
         ApplySelectionNowAndCleanupEphemeralAlias(pathEntities, pathComposites, entitySelected);
+    }
+
+    /// <summary>The view has been stepped into a composite instance, so there is one to step back out to.</summary>
+    public bool CanSelectParentComposite
+    {
+        get
+        {
+            lock (_lock)
+                return _pathComposites != null && _pathComposites.Count > 1
+                    && _pathEntities != null && _pathEntities.Count >= _pathComposites.Count - 1;
+        }
+    }
+
+    /// <summary>
+    /// Step out of the composite instance the view has been stepped into and select that instance - where
+    /// pressing '-' until it leaves the composite lands (the first press only deselects what is selected in it).
+    /// </summary>
+    public void TrySelectParentComposite()
+    {
+        if (_scene == null || !_scene.Content.Loaded)
+            return;
+
+        List<uint> pathEntities;
+        List<uint> pathComposites;
+        lock (_lock)
+        {
+            if (_pathComposites == null || _pathComposites.Count < 2
+                || _pathEntities == null || _pathEntities.Count < _pathComposites.Count - 1)
+            {
+                return;
+            }
+
+            pathComposites = new List<uint>(_pathComposites);
+            pathComposites.RemoveAt(pathComposites.Count - 1);
+            //The entity each composite was stepped into through; the one on the end is the instance being left
+            pathEntities = _pathEntities.GetRange(0, pathComposites.Count);
+        }
+
+        ApplyLocalSelection(pathEntities, pathComposites, true);
+        SendSelectionToEditorWithPendingEphemeralDelete(pathEntities, pathComposites, true);
+        ApplySelectionNowAndCleanupEphemeralAlias(pathEntities, pathComposites, true);
     }
 
     /// <summary>Steps back one level: deselects the current entity, or pops out of a nested composite instance.</summary>
@@ -3104,8 +3668,10 @@ public partial class CommandsEditorConnection : Node3D
 
     /* One of the gizmo's targets finished being dragged. <paramref name="targetIndex"/> is its place
        in the selection, which names the entity: everything selected together shares the selected
-       entity's path, so each one's path is that path with its own id on the end. */
-    private void OnGizmoTransformChanged(int targetIndex, Vector3 godotPos, Vector3 godotRotDeg)
+       entity's path, so each one's path is that path with its own id on the end. <paramref name="gesture"/>
+       is the gesture's (a drag, a floor snap) and the same on every target's packet, which is what makes
+       it one undo step over there. */
+    private void OnGizmoTransformChanged(int targetIndex, Vector3 godotPos, Vector3 godotRotDeg, uint gesture)
     {
         List<uint> pathEntities;
         List<uint> pathComposites;
@@ -3176,16 +3742,17 @@ public partial class CommandsEditorConnection : Node3D
             }
         }
 
-        SendEntityTransform(godotPos, godotRotDeg, pathEntities, pathComposites);
+        SendEntityTransform(godotPos, godotRotDeg, pathEntities, pathComposites, gesture);
     }
 
     /// <summary>
     /// Send a position parameter update packet to OpenCAGE for the currently selected entity.
     /// <paramref name="godotPos"/> and <paramref name="godotRotDeg"/> are in Godot parent-local space
-    /// (matches the entity position parameter, not GlobalPosition).
+    /// (matches the entity position parameter, not GlobalPosition). <paramref name="gesture"/> is the
+    /// drag it came from (<see cref="LevelViewerTransformGizmo.NextGesture"/>), or 0.
     /// </summary>
     public void SendEntityTransform(Vector3 godotPos, Vector3 godotRotDeg,
-        List<uint> pathEntities, List<uint> pathComposites)
+        List<uint> pathEntities, List<uint> pathComposites, uint gesture = 0)
     {
         if (pathComposites == null || pathComposites.Count == 0 ||
             pathEntities   == null || pathEntities.Count   == 0)
@@ -3213,6 +3780,7 @@ public partial class CommandsEditorConnection : Node3D
             composite       = pathComposites[pathComposites.Count - 1],
             entity          = pathEntities[pathEntities.Count - 1],
             parameters      = new System.Collections.Generic.List<SyncedParameter>() { sync },
+            gesture         = gesture,
         };
 
         TryFillEntityMetadata(packet);
@@ -3361,7 +3929,8 @@ public partial class CommandsEditorConnection : Node3D
         int deepSelectDepth,
         out List<uint> pathEntities,
         out List<uint> pathComposites,
-        out bool createdNewAlias)
+        out bool createdNewAlias,
+        bool allowCreate = true)
     {
         pathEntities = null;
         pathComposites = null;
@@ -3392,6 +3961,10 @@ public partial class CommandsEditorConnection : Node3D
 
         if (!LevelViewerPick.TryFindAliasWithPath(ownerComposite, hierarchy, out AliasEntity alias))
         {
+            //Only one already there will do - a box that has made as many as it may
+            if (!allowCreate)
+                return false;
+
             ShortGuid aliasId = ShortGuidUtils.GenerateRandom();
             alias = new AliasEntity(aliasId, hierarchy);
             ownerComposite.AddAlias(alias);
@@ -3446,6 +4019,30 @@ public partial class CommandsEditorConnection : Node3D
            abandonment check, and the ones still selected have to stay tracked. */
         if (entity is AliasEntity alias && IsAliasParameterFree(alias))
             TrackEphemeralDeepSelectAlias(compositeId, entityId);
+    }
+
+    /* The same for a box: every alias it left selected is tracked, not only the one leading. */
+    private void UpdateEphemeralDeepSelectAliasTracking(List<uint> pathComposites, List<uint> selectionEntities)
+    {
+        if (PreviewVisibilitySettings.DeepSelectMode == PreviewVisibilitySettings.DeepSelectModeKind.None
+            || pathComposites == null
+            || pathComposites.Count == 0
+            || selectionEntities == null
+            || _scene?.Content?.Level == null)
+        {
+            return;
+        }
+
+        uint compositeId = pathComposites[pathComposites.Count - 1];
+        Composite composite = _scene.Content.Level.Commands.GetComposite(new ShortGuid(compositeId));
+        if (composite == null)
+            return;
+
+        for (int i = 0; i < selectionEntities.Count; i++)
+        {
+            if (composite.GetEntityByID(new ShortGuid(selectionEntities[i])) is AliasEntity alias && IsAliasParameterFree(alias))
+                TrackEphemeralDeepSelectAlias(compositeId, selectionEntities[i]);
+        }
     }
 
     private static bool IsAliasParameterFree(AliasEntity alias)

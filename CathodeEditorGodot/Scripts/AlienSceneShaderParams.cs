@@ -56,16 +56,77 @@ public static class AlienSceneShaderParams
 
 	public static Color GetDiffuseTint(Materials.Material material, Shaders.Shader shader, MaterialParams parameters, bool preserveAlpha = false)
 	{
-		if (parameters.DiffuseTintIndex < 0 || parameters.DiffuseTintIndex >= shader.PixelShaderParameterRemaps.Count)
-			return Colors.White;
+		if (!TryGetColour(material, shader, parameters.DiffuseTintIndex, parameters.DiffuseTintParameterName, preserveAlpha, out Color tint))
+			tint = Colors.White;
 
-		int remappedIndex = shader.PixelShaderParameterRemaps[parameters.DiffuseTintIndex];
+		//A corpse carries the colour its character was dressed in as a constant, and the shader draws that
+		//in place of the diffuse tint's rgb - the alpha is still the diffuse tint's
+		if (HasFeature(shader, "HI_LOD_CUSTOM_CHARACTER_CORPSE_CONSTANTS")
+			&& TryGetColour(material, shader, (int)CA_ENVIRONMENT.PARAMETERS.CUSTOM_TINT_COLOUR, "CUSTOM_TINT_COLOUR", false, out Color custom))
+		{
+			tint = new Color(custom.R, custom.G, custom.B, tint.A);
+		}
+
+		return tint;
+	}
+
+	/// <summary>
+	/// The secondary diffuse layer's own tint. CA_SKIN has none: its layer multiplies in untinted.
+	/// </summary>
+	public static Color GetSecondaryDiffuseTint(Materials.Material material, Shaders.Shader shader)
+	{
+		return TryGetColour(material, shader, GetSecondaryDiffuseTintIndex(shader.Ubershader), "SECONDARY_DIFFUSE_TINT", false, out Color tint)
+			? tint
+			: Colors.White;
+	}
+
+	private static int GetSecondaryDiffuseTintIndex(SHADER_LIST ubershader)
+	{
+		switch (ubershader)
+		{
+			case SHADER_LIST.CA_ENVIRONMENT:
+				return (int)CA_ENVIRONMENT.PARAMETERS.SECONDARY_DIFFUSE_TINT;
+			case SHADER_LIST.CA_DECAL_ENVIRONMENT:
+				return (int)CA_DECAL_ENVIRONMENT.PARAMETERS.SECONDARY_DIFFUSE_TINT;
+			case SHADER_LIST.CA_CHARACTER:
+				return (int)CA_CHARACTER.PARAMETERS.SECONDARY_DIFFUSE_TINT;
+			case SHADER_LIST.CA_LIGHTMAP_ENVIRONMENT:
+				return (int)CA_LIGHTMAP_ENVIRONMENT.PARAMETERS.SECONDARY_DIFFUSE_TINT;
+			case SHADER_LIST.CA_STREAMER:
+				return (int)CA_STREAMER.PARAMETERS.SECONDARY_DIFFUSE_TINT;
+			default:
+				return -1;
+		}
+	}
+
+	private static bool HasFeature(Shaders.Shader shader, string featureName)
+	{
+		int? index = ShaderUtility.GetShaderFunctionalityIndex(shader.Ubershader, ShaderIndexType.FEATURES, featureName);
+		return index.HasValue && (shader.UbershaderFeatureFlags & (1L << index.Value)) != 0;
+	}
+
+	/// <summary>
+	/// Reads a colour constant, clamped to 0-1. False when the material's shader does not carry it.
+	/// </summary>
+	private static bool TryGetColour(
+		Materials.Material material,
+		Shaders.Shader shader,
+		int parameterIndex,
+		string parameterName,
+		bool preserveAlpha,
+		out Color colour)
+	{
+		colour = Colors.White;
+		if (parameterIndex < 0 || parameterIndex >= shader.PixelShaderParameterRemaps.Count)
+			return false;
+
+		int remappedIndex = shader.PixelShaderParameterRemaps[parameterIndex];
 		if (remappedIndex == 255 || remappedIndex >= material.PixelShaderConstants.Count)
-			return Colors.White;
+			return false;
 
-		UberShaderParameterType? parameterType = ShaderUtility.GetParameterType(shader.Ubershader, parameters.DiffuseTintParameterName);
+		UberShaderParameterType? parameterType = ShaderUtility.GetParameterType(shader.Ubershader, parameterName);
 		if (!parameterType.HasValue)
-			return ReadTintVector4(material, remappedIndex, preserveAlpha);
+			return TryReadTintVector4(material, remappedIndex, preserveAlpha, out colour);
 
 		float r = 0f;
 		float g = 0f;
@@ -95,7 +156,7 @@ public static class AlienSceneShaderParams
 					a = material.PixelShaderConstants[remappedIndex + 3];
 				break;
 			default:
-				return ReadTintVector4(material, remappedIndex, preserveAlpha);
+				return TryReadTintVector4(material, remappedIndex, preserveAlpha, out colour);
 		}
 
 		r = Mathf.Clamp(r, 0f, 1f);
@@ -105,13 +166,15 @@ public static class AlienSceneShaderParams
 		if (!preserveAlpha)
 			a = 1f;
 
-		return new Color(r, g, b, a);
+		colour = new Color(r, g, b, a);
+		return true;
 	}
 
-	private static Color ReadTintVector4(Materials.Material material, int remappedIndex, bool preserveAlpha)
+	private static bool TryReadTintVector4(Materials.Material material, int remappedIndex, bool preserveAlpha, out Color colour)
 	{
+		colour = Colors.White;
 		if (remappedIndex + 3 >= material.PixelShaderConstants.Count)
-			return Colors.White;
+			return false;
 
 		float r = Mathf.Clamp(material.PixelShaderConstants[remappedIndex], 0f, 1f);
 		float g = Mathf.Clamp(material.PixelShaderConstants[remappedIndex + 1], 0f, 1f);
@@ -120,7 +183,8 @@ public static class AlienSceneShaderParams
 		if (!preserveAlpha)
 			a = 1f;
 
-		return new Color(r, g, b, a);
+		colour = new Color(r, g, b, a);
+		return true;
 	}
 
 	public static Vector2 GetUvScale(Materials.Material material, Shaders.Shader shader, MaterialParams parameters)
@@ -140,6 +204,34 @@ public static class AlienSceneShaderParams
 		{
 			case SHADER_LIST.CA_DECAL_ENVIRONMENT:
 				return (int)CA_DECAL_ENVIRONMENT.PARAMETERS.ALPHATHRESHOLD_RANGE;
+			default:
+				return -1;
+		}
+	}
+
+	/// <summary>The secondary diffuse layer's own tiling - it never shares the primary's.</summary>
+	public static Vector2 GetSecondaryDiffuseUvScale(Materials.Material material, Shaders.Shader shader)
+	{
+		float scale = GetFloat(shader, material, GetSecondaryDiffuseUvMultIndex(shader.Ubershader), 1f);
+		return new Vector2(scale, scale);
+	}
+
+	private static int GetSecondaryDiffuseUvMultIndex(SHADER_LIST ubershader)
+	{
+		switch (ubershader)
+		{
+			case SHADER_LIST.CA_ENVIRONMENT:
+				return (int)CA_ENVIRONMENT.PARAMETERS.SECONDARY_DIFFUSE_UV_MULT;
+			case SHADER_LIST.CA_DECAL_ENVIRONMENT:
+				return (int)CA_DECAL_ENVIRONMENT.PARAMETERS.SECONDARY_DIFFUSE_UV_MULT;
+			case SHADER_LIST.CA_CHARACTER:
+				return (int)CA_CHARACTER.PARAMETERS.SECONDARY_DIFFUSE_UV_MULT;
+			case SHADER_LIST.CA_SKIN:
+				return (int)CA_SKIN.PARAMETERS.SECONDARY_DIFFUSE_UV_MULT;
+			case SHADER_LIST.CA_LIGHTMAP_ENVIRONMENT:
+				return (int)CA_LIGHTMAP_ENVIRONMENT.PARAMETERS.SECONDARY_DIFFUSE_UV_MULT;
+			case SHADER_LIST.CA_STREAMER:
+				return (int)CA_STREAMER.PARAMETERS.SECONDARY_DIFFUSE_UV_MULT;
 			default:
 				return -1;
 		}

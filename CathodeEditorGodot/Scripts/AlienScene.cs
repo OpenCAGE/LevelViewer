@@ -423,6 +423,16 @@ public partial class AlienScene : Node3D
 		return true;
 	}
 
+	/// <summary>Whether <see cref="TryHideSelectedEntity"/> has something to hide: a selection in the composite on screen that isn't hidden already.</summary>
+	public bool CanHideSelectedEntity()
+	{
+		if (!_content.Loaded || !TryGetSelectedEntity(out Node3D selected))
+			return false;
+
+		return LevelViewerCompositeFocus.IsNodeInScope(selected, _parentNode, _content.Level.Commands)
+			&& !LevelViewerEntityHide.IsHidden(selected);
+	}
+
 	public void ClearCompositeScopedHides()
 	{
 		if (!LevelViewerEntityHide.HasAny)
@@ -608,6 +618,8 @@ public partial class AlienScene : Node3D
 		LevelViewerEntityHide.ClearAll();
 		//A different level's zones say nothing about this one, so the table goes with the nodes
 		LevelViewerZoneHighlight.Reset();
+		//Its stars likewise: the plain sky until the next level brings its own
+		LevelViewerGalaxy.SetGalaxy(this, null);
 
 		if (_parentNode != null && GodotObject.IsInstanceValid(_parentNode))
 			_parentNode.QueueFree();
@@ -788,6 +800,17 @@ public partial class AlienScene : Node3D
 
 		_levelName = _queuedLevelName;
 		_content.Load(_queuedLevelPath, _queuedLevelName);
+
+		/* Level.Load copies the global texture set into the level's own table (ImportFromGlobal) and points
+		   the materials at the copies, but a texture only gets a write index when its table is read from disk
+		   or saved - so those few hundred, every weapon and pickup texture among them, had none. The texture
+		   cache here is keyed by write index: each was converted, not kept, and its bytes released, so the
+		   material that asked for it next got nothing and drew flat (issue #705). Indexing them in Entries
+		   order is what a save would give them, and what OpenCAGE does before it sends a resource sync. */
+		_content.Level?.Textures?.RebuildWriteList();
+
+		//The sky: the level's galaxy, as the game draws it, or the plain sky for a level without one
+		LevelViewerGalaxy.SetGalaxy(this, _content.Level?.GalaxyItems);
 
 		LevelViewerShaderBytecode.ClearAsync(_content.Level?.Shaders?.Entries);
 		BuildSubmeshWriteIndexCache();
@@ -4057,7 +4080,13 @@ public partial class AlienScene : Node3D
 		}
 	}
 
-	public void RemoveEntity(ShortGuid composite, ShortGuid entity)
+	/// <param name="refreshHighlights">
+	/// False when the caller is removing several and refreshes the highlights once after the last: the
+	/// forced rebuild costs about 0.4 s on a big composite, the removal itself a few ms, so a run of
+	/// deletions (a box selection deleted, or a box's deep-select aliases let go) paid it per entity.
+	/// </param>
+	/// <returns>Whether anything was removed.</returns>
+	public bool RemoveEntity(ShortGuid composite, ShortGuid entity, bool refreshHighlights = true)
 	{
 		string entityNodeName = entity.AsUInt32.ToString();
 		bool removed = false;
@@ -4129,12 +4158,18 @@ public partial class AlienScene : Node3D
 			}
 		}
 
-		if (removed)
+		if (removed && refreshHighlights)
 		{
 			ViewerLog.Print("Removed entity " + entityNodeName + " x" + instancesProcessed + "; rebuilding highlights");
 			RefreshEntityHighlights(forceRebuild: true);
 			ViewerLog.Print("Removed entity " + entityNodeName + " complete");
 		}
+		else if (removed)
+		{
+			ViewerLog.Print("Removed entity " + entityNodeName + " x" + instancesProcessed);
+		}
+
+		return removed;
 	}
 
 	public void UpdateRenderable(ShortGuid composite, ShortGuid entity, List<Tuple<int, int>> renderables)
@@ -5250,11 +5285,21 @@ public partial class AlienScene : Node3D
 			{
 				string restorePath = entry.Key == TexturePtr.Source.LEVEL && _levelTexturesRestorePath != null ? _levelTexturesRestorePath : live.Filepath;
 				Textures fresh = new Textures(restorePath);
+				Dictionary<string, Textures.TEX4> globalByName = null;
 				int restored = 0;
 				foreach (int writeIndex in entry.Value)
 				{
 					Textures.TEX4 target = live.GetAtWriteIndex(writeIndex);
 					Textures.TEX4 source = fresh.GetAtWriteIndex(writeIndex);
+
+					//Past the end of the level's pak: a texture Level.Load copied in from global (see
+					//ExecuteLoadLevel), which only reaches the level's own file when the level is saved
+					if (source == null && target != null && entry.Key == TexturePtr.Source.LEVEL)
+					{
+						globalByName ??= LoadGlobalTexturesByName();
+						globalByName.TryGetValue(target.Name ?? "", out source);
+					}
+
 					if (target == null || source == null || target.Format != source.Format)
 						continue;
 
@@ -5272,6 +5317,22 @@ public partial class AlienScene : Node3D
 				ViewerLog.PrintErr("Failed to restore released " + entry.Key + " texture data: " + e.Message);
 			}
 		}
+	}
+
+	/// <summary>The global texture pak read fresh from disk, by texture name.</summary>
+	private static Dictionary<string, Textures.TEX4> LoadGlobalTexturesByName()
+	{
+		Dictionary<string, Textures.TEX4> byName = new Dictionary<string, Textures.TEX4>(StringComparer.OrdinalIgnoreCase);
+		string path = LevelContent.Global?.Textures?.Filepath;
+		if (string.IsNullOrEmpty(path))
+			return byName;
+
+		foreach (Textures.TEX4 texture in new Textures(path).Entries)
+		{
+			if (texture?.Name != null && !byName.ContainsKey(texture.Name))
+				byName[texture.Name] = texture;
+		}
+		return byName;
 	}
 
 	private void ReleaseCathodeBinarySourceData()

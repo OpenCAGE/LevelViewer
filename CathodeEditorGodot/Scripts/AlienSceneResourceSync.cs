@@ -106,6 +106,19 @@ public partial class AlienScene
 			return;
 		}
 
+		//A regenerated galaxy is half a megabyte that nothing refers to: it is shown straight away, and a
+		//snapshot carrying nothing else leaves the tables (and their write indexes) alone
+		if (!string.IsNullOrEmpty(packet.resource_sync_galaxy))
+		{
+			ApplyGalaxySnapshot(level, packet.resource_sync_galaxy);
+			if (string.IsNullOrEmpty(packet.resource_sync_textures) && string.IsNullOrEmpty(packet.resource_sync_shaders)
+				&& string.IsNullOrEmpty(packet.resource_sync_materials) && string.IsNullOrEmpty(packet.resource_sync_models))
+			{
+				PruneResourceSnapshotFolders(packet);
+				return;
+			}
+		}
+
 		_resourceSyncInFlight = true;
 		int generation = _contentGeneration;
 
@@ -307,6 +320,26 @@ public partial class AlienScene
 			+ " (" + changedMaterials.Count + " rebuilt)"
 			+ (snapshot.Models != null ? " models +" + counts.ModelsAdded + " -" + counts.ModelsRemoved + " ~" + changedSubmeshes.Count + " submeshes" : "")
 			+ "; " + refreshed + " model references respawned.");
+	}
+
+	private void ApplyGalaxySnapshot(Level level, string path)
+	{
+		try
+		{
+			GalaxyItems galaxy = new GalaxyItems(path);
+			if (!galaxy.Loaded)
+			{
+				ViewerLog.PrintErr("Resource sync: the galaxy did not load from " + path);
+				return;
+			}
+			level.GalaxyItems = galaxy;
+			LevelViewerGalaxy.SetGalaxy(this, galaxy);
+			ViewerLog.Print("Resource sync applied: galaxy (" + galaxy.Entries.Count + " stars).");
+		}
+		catch (Exception ex)
+		{
+			ViewerLog.PrintErr("[Viewer] Galaxy sync failed: " + ex);
+		}
 	}
 
 	private sealed class ReconcileCounts
@@ -1072,7 +1105,7 @@ public partial class AlienScene
 
 	private static string FirstSnapshotFolder(Packet packet)
 	{
-		foreach (string path in new[] { packet.resource_sync_textures, packet.resource_sync_shaders, packet.resource_sync_materials, packet.resource_sync_models })
+		foreach (string path in new[] { packet.resource_sync_textures, packet.resource_sync_shaders, packet.resource_sync_materials, packet.resource_sync_models, packet.resource_sync_galaxy })
 		{
 			if (!string.IsNullOrEmpty(path))
 				return Path.GetDirectoryName(path);

@@ -107,6 +107,52 @@ namespace OpenCAGE.UnityConnection
         // the rebuild throws away, and it keeps the viewer's thread busy for seconds.
         SCENE_BATCH_BEGIN,
         SCENE_BATCH_END,
+
+        // OpenCAGE -> Level Viewer: the shared entity clipboard was set or emptied (a copy made anywhere in
+        // the editor, or a level load), with `entity_clipboard_has_content` saying which. The viewport's
+        // context menu greys Paste out when there is nothing to paste. Built like OpenCAGE's other packets,
+        // with the selection on it, so a viewer from before this takes it as a re-sync of what it has.
+        ENTITY_CLIPBOARD_CHANGED,
+
+        // Level Viewer -> OpenCAGE: a right click in the viewport (pressed and let go without a drag) wants
+        // the context menu. OpenCAGE draws it - a WinForms menu, themed with the rest of the editor - so this
+        // carries only what the viewer alone knows: where the click landed (context_menu_viewport_x/y, a 0-1
+        // fraction like a drop's) and which entries have anything to act on (the context_menu_* flags). What
+        // the click landed on has been selected first, through the ordinary ENTITY_SELECTED before this.
+        VIEWPORT_CONTEXT_MENU,
+
+        // Level Viewer -> OpenCAGE: input arrived in the viewport while OpenCAGE's context menu was up - a
+        // click of any button, or a key. A menu over another process's window never sees that input, so
+        // the viewer swallows it (the click selects nothing, looks nowhere) and asks for the menu to close.
+        VIEWPORT_CONTEXT_MENU_DISMISS,
+
+        // OpenCAGE -> Level Viewer: run one of the viewport's own actions, named by `viewport_action`: a
+        // context menu entry whose implementation lives in the viewer (what its shortcut does), or the menu
+        // opening and closing, so the viewer knows to hand its next input to the menu. Built like OpenCAGE's
+        // other packets, with the selection on it, so a viewer from before this takes it as a re-sync.
+        VIEWPORT_ACTION,
+    }
+
+    /// <summary>
+    /// What a VIEWPORT_ACTION packet asks the viewer to do. Travels as a number in `viewport_action`, so
+    /// values are only ever appended.
+    /// </summary>
+    public enum ViewportAction
+    {
+        None = 0,
+
+        //Context menu entries the viewer implements: each is exactly what its shortcut does
+        FocusOnSelection,      //Z
+        SnapToFloor,           //Shift+End
+        Hide,                  //H
+        UnhideAll,             //Shift+H
+        StepIntoComposite,     //Ctrl+middle click, where the right click was
+        SelectParentComposite, //'-' out of a stepped-into composite
+        DeselectAll,           //Escape
+
+        //OpenCAGE's context menu opened for the viewer's last VIEWPORT_CONTEXT_MENU, or has closed again
+        ContextMenuOpened,
+        ContextMenuClosed,
     }
 
     /// <summary>One entity of a composite, as ENTITY_ADDED would carry it, for COMPOSITE_CONTENTS.</summary>
@@ -263,5 +309,70 @@ namespace OpenCAGE.UnityConnection
         public bool animation_preview_active = false;
         public float animation_preview_time = 0f;
         public List<SyncedAnimationTarget> animation_preview = null;
+
+        // Level Viewer -> OpenCAGE: every packet one viewport gesture sends carries the same non-zero id.
+        // A gizmo drag of several entities is an ENTITY_PARAMETER_MODIFIED per entity, a shift-clone is an
+        // ENTITY_DUPLICATE_REQUEST and then the drag that carries the copies, and Shift+End is a packet per
+        // entity it lands - OpenCAGE records all of one gesture as a single undo step. 0 = not part of one,
+        // which is also what a viewer from before this sends, so the two still talk.
+        public uint gesture = 0;
+
+        // Level Viewer -> OpenCAGE, on ENTITY_ADDED: more entities of the selection this packet carries are
+        // still to be added after it (a box in advanced deep select makes an alias for every nested entity it
+        // takes), so OpenCAGE adds this one without selecting anything yet. The last packet of the run has it
+        // false and selects the lot in one go. False is also what a viewer from before this sends.
+        public bool selection_follows = false;
+
+        // OpenCAGE -> Level Viewer: whether the shared entity clipboard has anything on it. Every packet
+        // OpenCAGE builds with its metadata says, and ENTITY_CLIPBOARD_CHANGED says when it changes. Null on
+        // a packet that doesn't say - anything the viewer sends, anything from an OpenCAGE from before this -
+        // so the viewer only takes it from one that does, and until one has Paste stays available.
+        public bool? entity_clipboard_has_content = null;
+
+        // OpenCAGE -> Level Viewer, with the rest of the settings: draw the level's galaxy (its starfield) as the
+        // sky, as the game does, rather than the plain sky (Options > Viewport > Render Galaxy). True is also what
+        // an OpenCAGE from before this means by never saying, so a viewer from after it shows the stars.
+        public bool render_galaxy = true;
+
+        // LEVEL_RESOURCES_MODIFIED: a scratch copy of GALAXY.ITEMS_BIN when the galaxy was regenerated (the Galaxy
+        // Editor), null when it wasn't. Loaded and shown like the other resource_sync_* tables.
+        public string resource_sync_galaxy = null;
+
+        // OpenCAGE -> Level Viewer, on LEVEL_LOADED: the level was read from disk again although it is the one the
+        // viewer already holds (loaded again by hand, often to throw away unsaved changes), so the viewer reads it
+        // again too rather than keeping what it has. False is what the LEVEL_LOADED a save sends means, and what an
+        // OpenCAGE from before this sends - both keep the level that is loaded.
+        public bool level_reload = false;
+
+        // Level Viewer -> OpenCAGE, on VIEWPORT_CONTEXT_MENU: where the right click landed, as a 0-1 fraction
+        // of the viewport (like drop_viewport_x/y - the two sides need not share DPI). OpenCAGE puts it through
+        // the panel the viewer is embedded in, whose coordinates are the only ones its menu can be placed in.
+        public float context_menu_viewport_x = 0f;
+        public float context_menu_viewport_y = 0f;
+
+        // With it: which entries have anything to act on, as the viewer sees it - the rest are greyed out.
+        // `has_selection` is Copy, Duplicate, Delete and Deselect All; `can_paste` says there is a composite
+        // to paste into (OpenCAGE knows for itself whether its clipboard holds anything).
+        public bool context_menu_has_selection = false;
+        public bool context_menu_can_paste = false;
+        public bool context_menu_can_focus = false;
+        public bool context_menu_can_snap_to_floor = false;
+        public bool context_menu_can_hide = false;
+        public bool context_menu_can_unhide_all = false;
+        public bool context_menu_can_step_into = false;
+        public bool context_menu_can_select_parent = false;
+
+        // OpenCAGE -> Level Viewer, on VIEWPORT_ACTION: which action (a ViewportAction). 0 = none, which is
+        // also what a packet from before this carries.
+        public int viewport_action = 0;
+
+        // OpenCAGE -> Level Viewer, on VIEWPORT_DROP_REQUEST: a function type (a FunctionType, as a number) was
+        // dropped on the viewport out of the entity palette, rather than a composite out of the browser. Placed
+        // exactly as a composite drop is, and answered with the same ENTITY_CREATE_REQUEST, carrying it as
+        // `entity_function` - and echoed here, since a palette drop admits any function that has a position
+        // where a creation-mode click admits only the types the viewer previews, and OpenCAGE has to know which
+        // it is answering. 0 = not a palette drop, which is also what a packet from before this carries; a viewer
+        // from before this finds no composite to instance and lets the drop do nothing.
+        public uint drop_function_type = 0;
     }
 }

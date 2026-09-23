@@ -655,6 +655,55 @@ public static class LevelViewerPick
 	}
 
 	/// <summary>
+	/// Every owner a click could land on right now, with its world bounds, for box selection: the same
+	/// in-scope set <see cref="PickClosest"/> walks, so what the composite focus, the render filters and
+	/// a hide leave out of a click is left out of a box too. Owners with no extent at all are skipped.
+	/// </summary>
+	public static void CollectScopedPickOwnerBounds(Node contentRoot, Commands commands, List<(Node3D Owner, Aabb Bounds)> destination)
+	{
+		if (destination == null)
+			return;
+
+		if (LevelViewerCompositeFocus.HasActiveComposite && commands != null)
+			LevelViewerCompositeFocus.RebuildScopeCache(commands);
+
+		EnsureScopedPickOwners(contentRoot, commands);
+
+		for (int i = 0; i < _scopedPickOwners.Count; i++)
+		{
+			Node3D owner = _scopedPickOwners[i];
+			if (owner == null || !GodotObject.IsInstanceValid(owner))
+				continue;
+
+			Aabb bounds = GetOwnerGlobalBounds(owner);
+			if (bounds.Size.LengthSquared() <= RayEpsilon)
+				continue;
+
+			destination.Add((owner, bounds));
+		}
+	}
+
+	/// <summary>
+	/// Whether any of the owner's pickable meshes is actually being drawn. A mesh can be registered and
+	/// still hidden (a hidden parent, a load that hasn't switched it on yet); the click's ray test
+	/// doesn't ask, but a box that takes in a whole screen's worth of entities has to.
+	/// </summary>
+	public static bool IsOwnerDrawn(Node3D owner)
+	{
+		if (owner == null || !_pickablesByOwner.TryGetValue(owner, out List<MeshInstance3D> meshes) || meshes == null)
+			return false;
+
+		for (int i = 0; i < meshes.Count; i++)
+		{
+			MeshInstance3D mesh = meshes[i];
+			if (mesh != null && GodotObject.IsInstanceValid(mesh) && mesh.IsVisibleInTree())
+				return true;
+		}
+
+		return false;
+	}
+
+	/// <summary>
 	/// The nearest mesh vertex to the cursor, for vertex snapping. Rays the scene, then walks only the
 	/// hit mesh's cached vertices and keeps the one closest to the hit point. Owners in
 	/// <paramref name="excludeOwners"/> (the dragged entity's own nodes) are skipped, or the object

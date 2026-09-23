@@ -15,6 +15,9 @@ public static class PreviewVisibilitySettings
     /// <summary>Tint the level's geometry by the zone it belongs to ('Show Zones' on the toolbar).</summary>
     public static bool ShowZones { get; set; }
 
+    /// <summary>Draw the level's galaxy as the sky, rather than the plain sky ('Render Galaxy' in OpenCAGE).</summary>
+    public static bool RenderGalaxy { get; set; } = true;
+
     /// <summary>How the selected entity is marked. Owned by OpenCAGE, arrives on the settings packet.</summary>
     public static OpenCAGE.UnityConnection.LevelViewerHighlightMode SelectionHighlightMode { get; set; }
         = OpenCAGE.UnityConnection.LevelViewerHighlightMode.Green;

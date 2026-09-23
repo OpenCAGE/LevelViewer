@@ -30,11 +30,17 @@ public static class AlienSceneMaterials
 	private static readonly StringName AlphaFromLuminanceParam = new StringName("alpha_from_luminance");
 	private static readonly StringName AlphaCutoutParam = new StringName("alpha_cutout");
 	private static readonly StringName AlphaCutoutThresholdParam = new StringName("alpha_cutout_threshold");
+	private static readonly StringName SecondaryDiffuseMapParam = new StringName("secondary_diffuse_map");
+	private static readonly StringName SecondaryDiffuseUvMultParam = new StringName("secondary_diffuse_uv_mult");
+	private static readonly StringName SecondaryDiffuseTintParam = new StringName("secondary_diffuse_tint");
+	private static readonly StringName SecondaryDiffuseMaskedParam = new StringName("secondary_diffuse_masked");
 
 	private static Shader _shadedShader;
 	private static Shader _shadedShaderDoubleSided;
 	private static Shader _shadedShaderTransparent;
 	private static Shader _shadedShaderTransparentDoubleSided;
+	//The shaded shaders with a secondary diffuse layer, built from them on first use: [transparent * 2 + doubleSided]
+	private static readonly Shader[] _shadedSecondaryDiffuseShaders = new Shader[4];
 	private static Shader _wireframeShader;
 	private static Shader _wireframeShaderDoubleSided;
 	private static Shader _wireframeShaderTransparent;
@@ -270,12 +276,13 @@ public static class AlienSceneMaterials
 	{
 		bool doubleSided = IsDoubleSided(shader);
 		ResolveMaterialTextures(material, shader, scene, diffuseSamplerIndex, out Texture2D diffuse, out Texture2D separateAlphaMap);
+		Texture2D secondaryDiffuse = TryGetSecondaryDiffuseMap(material, shader, scene);
 		bool useTransparentBlend = ShouldUseTransparentBlend(shader, separateAlphaMap);
 		bool useAlphaCutout = ShouldUseAlphaCutout(shader);
 		ShaderMaterial godotMaterial = new ShaderMaterial
 		{
 			ResourceName = name,
-			Shader = GetShadedShader(doubleSided, useTransparentBlend),
+			Shader = GetShadedShader(doubleSided, useTransparentBlend, secondaryDiffuse != null),
 			RenderPriority = useTransparentBlend ? TransparentRenderPriority : OpaqueRenderPriority,
 		};
 
@@ -288,6 +295,8 @@ public static class AlienSceneMaterials
 			diffuse,
 			separateAlphaMap,
 			environmentScalars);
+		if (secondaryDiffuse != null)
+			ApplySecondaryDiffuseParameters(godotMaterial, material, shader, secondaryDiffuse);
 		return new MaterialResult(godotMaterial, true);
 	}
 
@@ -352,15 +361,26 @@ public static class AlienSceneMaterials
 			? scene.GetSamplerTexture(material, shader, diffuseSamplerIndex)
 			: null;
 
-		if (diffuse == null)
-			diffuse = TryGetSecondaryDiffuseMap(material, shader, scene);
-
 		TryGetSeparateAlphaMap(material, shader, scene, out separateAlphaMap);
 	}
 
+	/// <summary>
+	/// The secondary diffuse map, when the material multiplies one over its diffuse.
+	/// </summary>
+	/// <remarks>
+	/// It is never a stand-in for the diffuse. On a corpse's shirt the diffuse is a fabric tiled five
+	/// times over and this is the shirt's own creases-and-blood sheet, laid out once over its UVs and
+	/// black wherever the shirt has none - drawn as the diffuse, at the diffuse's tiling, it covered the
+	/// shirt in black blotches and scattered blood (issue 702).
+	/// </remarks>
 	private static Texture2D TryGetSecondaryDiffuseMap(Materials.Material material, Shaders.Shader shader, AlienScene scene)
 	{
 		if (!HasShaderFeature(shader, "SECONDARY_DIFFUSE_MAPPING"))
+			return null;
+
+		//CA_SKIN's layer always multiplies and has no blend flag to say so. Anything else has to say it
+		//does: CA_TERRAIN's layer, for one, is a vertex-weighted lerp towards it instead
+		if (shader.Ubershader != SHADER_LIST.CA_SKIN && !HasShaderFeature(shader, "SECONDARY_DIFFUSE_BLEND_MULTIPLY"))
 			return null;
 
 		int secondarySampler = GetSecondaryDiffuseSamplerIndex(shader);
@@ -380,6 +400,8 @@ public static class AlienSceneMaterials
 				return (int)CA_DECAL_ENVIRONMENT.SAMPLERS.SECONDARY_DIFFUSE_MAP;
 			case SHADER_LIST.CA_CHARACTER:
 				return (int)CA_CHARACTER.SAMPLERS.SECONDARY_DIFFUSE_MAP;
+			case SHADER_LIST.CA_SKIN:
+				return (int)CA_SKIN.SAMPLERS.SECONDARY_DIFFUSE_MAP;
 			case SHADER_LIST.CA_LIGHTMAP_ENVIRONMENT:
 				return (int)CA_LIGHTMAP_ENVIRONMENT.SAMPLERS.SECONDARY_DIFFUSE_MAP;
 			case SHADER_LIST.CA_STREAMER:
@@ -387,6 +409,26 @@ public static class AlienSceneMaterials
 			default:
 				return -1;
 		}
+	}
+
+	/// <summary>
+	/// The retail secondary diffuse: its squared colour times its own tint, multiplied over the tinted
+	/// diffuse at its own tiling. On a vertex-coloured CA_ENVIRONMENT or CA_CHARACTER surface its alpha
+	/// is coverage - the layer washes to white where it is transparent - and anywhere else it multiplies
+	/// in whole.
+	/// </summary>
+	private static void ApplySecondaryDiffuseParameters(
+		ShaderMaterial godotMaterial,
+		Materials.Material material,
+		Shaders.Shader shader,
+		Texture2D secondaryDiffuse)
+	{
+		godotMaterial.SetShaderParameter(SecondaryDiffuseMapParam, secondaryDiffuse);
+		godotMaterial.SetShaderParameter(SecondaryDiffuseUvMultParam, AlienSceneShaderParams.GetSecondaryDiffuseUvScale(material, shader));
+		godotMaterial.SetShaderParameter(SecondaryDiffuseTintParam, AlienSceneShaderParams.GetSecondaryDiffuseTint(material, shader));
+		godotMaterial.SetShaderParameter(
+			SecondaryDiffuseMaskedParam,
+			shader.Ubershader != SHADER_LIST.CA_SKIN && HasShaderFeature(shader, "VERTEX_COLOUR"));
 	}
 
 	private static void ApplyDiffuseParameters(
@@ -617,6 +659,64 @@ public static class AlienSceneMaterials
 		if (_shadedShader == null)
 			_shadedShader = GD.Load<Shader>("res://shaders/model_reference_shaded.gdshader");
 		return _shadedShader;
+	}
+
+	/// <summary>
+	/// The shaded shader, with a secondary diffuse layer multiplied over the tinted diffuse if asked for.
+	/// </summary>
+	/// <remarks>
+	/// The layer variants are built here from the exported shaders' own source rather than shipped as
+	/// shaders of their own, so they need no re-export and stay in step with the plain ones. The layer
+	/// goes in just ahead of the vertex colour tint - retail applies it straight after the diffuse tint -
+	/// and if that line has gone from the source the plain shader is used and the layer is not drawn.
+	/// </remarks>
+	private static Shader GetShadedShader(bool doubleSided, bool transparent, bool secondaryDiffuse)
+	{
+		Shader shader = GetShadedShader(doubleSided, transparent);
+		if (!secondaryDiffuse || shader == null)
+			return shader;
+
+		int variant = (transparent ? 2 : 0) + (doubleSided ? 1 : 0);
+		if (_shadedSecondaryDiffuseShaders[variant] == null)
+			_shadedSecondaryDiffuseShaders[variant] = BuildSecondaryDiffuseShader(shader) ?? shader;
+		return _shadedSecondaryDiffuseShaders[variant];
+	}
+
+	private const string SecondaryDiffuseInsertBefore = "color = model_reference_apply_vertex_colour_tint(";
+
+	private const string SecondaryDiffuseDeclarations = @"uniform sampler2D secondary_diffuse_map : source_color, filter_linear_mipmap_anisotropic;
+uniform vec2 secondary_diffuse_uv_mult = vec2(1.0);
+uniform vec4 secondary_diffuse_tint : source_color = vec4(1.0);
+uniform bool secondary_diffuse_masked = false;
+
+vec3 model_reference_secondary_diffuse(vec2 uv) {
+	vec4 layer = texture(secondary_diffuse_map, uv * secondary_diffuse_uv_mult);
+	vec3 tinted = layer.rgb * secondary_diffuse_tint.rgb;
+	return secondary_diffuse_masked ? mix(vec3(1.0), tinted, layer.a) : tinted;
+}
+
+";
+
+	private static Shader BuildSecondaryDiffuseShader(Shader plain)
+	{
+		string code = plain.Code;
+		int fragment = string.IsNullOrEmpty(code) ? -1 : code.IndexOf("void fragment()", System.StringComparison.Ordinal);
+		int insertAt = fragment < 0 ? -1 : code.IndexOf(SecondaryDiffuseInsertBefore, fragment, System.StringComparison.Ordinal);
+		if (insertAt < 0)
+		{
+			ViewerLog.PrintErr("[Materials] " + plain.ResourcePath + " has no vertex colour tint line to add a secondary diffuse layer ahead of; those layers will not draw.");
+			return null;
+		}
+
+		code = code
+			.Insert(insertAt, "color.rgb *= model_reference_secondary_diffuse(UV);\n\t")
+			.Insert(fragment, SecondaryDiffuseDeclarations);
+
+		//The double-sided and transparent checks elsewhere (picking, zones, composite focus) go by the
+		//shader's path, so this one keeps the plain shader's with a suffix
+		Shader shader = new Shader { Code = code };
+		shader.ResourcePath = plain.ResourcePath.Replace(".gdshader", "_secondary_diffuse.gdshader");
+		return shader;
 	}
 
 	private static Shader GetWireframeShader(bool doubleSided, bool transparent)

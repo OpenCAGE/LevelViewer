@@ -554,12 +554,16 @@ public partial class CommandsEditorConnection : Node3D
 
         if (_entityOps.Count > 0)
         {
-            //One line for a batch of adds (a whole composite's contents), not one per entity
+            //One line for a batch of adds (a whole composite's contents) or of removals (a box's worth of
+            //deep-select aliases let go of), not one per entity
             int adds = 0;
             foreach (EntityOp op in _entityOps)
                 if (op.Add) adds++;
+            int removals = _entityOps.Count - adds;
             if (adds > 1)
                 ViewerLog.Print("Adding " + adds + " entities");
+            if (removals > 1)
+                ViewerLog.Print("Removing " + removals + " entities");
             //The highlights are rebuilt once for the whole batch, as for adds: once per removal it was 0.4 s each on Torrens
             bool removedAny = false;
             while (_entityOps.Count > 0)
@@ -573,8 +577,9 @@ public partial class CommandsEditorConnection : Node3D
                 }
                 else
                 {
-                    ViewerLog.Print("Removing entity: " + op.Entity.AsUInt32);
-                    removedAny |= _scene.RemoveEntity(op.Composite, op.Entity, refreshHighlights: false);
+                    if (removals == 1)
+                        ViewerLog.Print("Removing entity: " + op.Entity.AsUInt32);
+                    removedAny |= _scene.RemoveEntity(op.Composite, op.Entity, refreshHighlights: false, logEach: removals == 1);
                 }
             }
             if (adds > 0 || removedAny)
@@ -782,7 +787,15 @@ public partial class CommandsEditorConnection : Node3D
         {
             bool releasedHere;
             lock (_lock)
+            {
                 releasedHere = _releasedEphemeralAliases.Remove(packet.entity);
+                //A set deleted together (batch_entities) is answered as one packet
+                if (packet.batch_entities != null)
+                {
+                    for (int i = 0; i < packet.batch_entities.Count; i++)
+                        releasedHere |= _releasedEphemeralAliases.Remove(packet.batch_entities[i]);
+                }
+            }
             if (releasedHere)
             {
                 RemoveDeletedEntity(packet);
@@ -2717,10 +2730,13 @@ public partial class CommandsEditorConnection : Node3D
 
     /* How many aliases one box may make in advanced deep select. Each is an entity added to the
        composite on screen, on the OpenCAGE side too, which also deletes it again once the selection
-       moves on (about 30 ms to add and 70 ms to let go of, each, measured on Torrens' environment),
-       and a box over a whole level would otherwise make thousands. The ones nearest the middle of the
-       box get them; entities past the limit that already have an alias are still taken. */
-    private const int MaxNewAliasesPerBox = 64;
+       moves on. Measured on Torrens' environment: this side makes them at about 2 ms each (a box of
+       987 took 1.9 s), OpenCAGE adds them at 3-5 ms each (5 s for 987, most of it the list and the
+       inspector taking up the selection) and lets a whole box go in under a second however big it
+       was, since it judges, deletes and tells this side about the set in one pass. A box over a whole
+       level would still make thousands, so there is a limit; the ones nearest the middle of the box
+       get them, and entities past the limit that already have an alias are still taken. */
+    private const int MaxNewAliasesPerBox = 1024;
 
     /// <summary>
     /// Select what a box drawn in the viewport holds (<see cref="LevelViewerBoxSelect"/> decides what
@@ -3548,13 +3564,32 @@ public partial class CommandsEditorConnection : Node3D
         List<(uint Composite, uint Entity)> releases = new List<(uint, uint)>(_pendingEphemeralDeepSelectReleases);
         ClearPendingEphemeralDeepSelectRelease();
 
+        /* One packet per composite the aliases were made in (one composite, nearly always), carrying every
+           alias let go of in it: a box's worth abandoned together is judged and deleted as one set on the
+           other side, where a packet per alias had it walk the level's saved flowgraph layouts once per alias. */
+        List<uint> composites = new List<uint>();
+        Dictionary<uint, List<uint>> entitiesByComposite = new Dictionary<uint, List<uint>>();
         for (int i = 0; i < releases.Count; i++)
         {
+            if (!entitiesByComposite.TryGetValue(releases[i].Composite, out List<uint> entities))
+            {
+                entities = new List<uint>();
+                entitiesByComposite.Add(releases[i].Composite, entities);
+                composites.Add(releases[i].Composite);
+            }
+            if (!entities.Contains(releases[i].Entity))
+                entities.Add(releases[i].Entity);
+        }
+
+        for (int i = 0; i < composites.Count; i++)
+        {
+            List<uint> entities = entitiesByComposite[composites[i]];
             Packet packet = new Packet(PacketEvent.ENTITY_ALIAS_RELEASED)
             {
-                composite = releases[i].Composite,
-                entity = releases[i].Entity,
+                composite = composites[i],
+                entity = entities[0],
                 entity_variant = EntityVariant.ALIAS,
+                batch_entities = new List<uint>(entities),
             };
 
             /* Remembered so the ENTITY_DELETED that may answer is taken as just that. An alias OpenCAGE keeps
@@ -3562,11 +3597,14 @@ public partial class CommandsEditorConnection : Node3D
              * deletion of it from OpenCAGE's side would also be read as an answer, its path left unapplied until
              * the packet after. */
             lock (_lock)
-                _releasedEphemeralAliases.Add(packet.entity);
+            {
+                for (int j = 0; j < entities.Count; j++)
+                    _releasedEphemeralAliases.Add(entities[j]);
+            }
 
             //The selection that replaced them rides along with the last, so OpenCAGE applies it in one step
             if (includeSelection
-                && i == releases.Count - 1
+                && i == composites.Count - 1
                 && selectionPathEntities != null
                 && selectionPathComposites != null
                 && selectionPathEntities.Count > 0
@@ -3609,32 +3647,41 @@ public partial class CommandsEditorConnection : Node3D
         lock (_lock)
         {
             Composite composite = _scene.Content.Level?.Commands.Entries.FirstOrDefault(o => o.shortGUID.AsUInt32 == packet.composite);
-            if (composite != null)
-            {
-                ShortGuid entityId = new ShortGuid(packet.entity);
-                switch (packet.entity_variant)
-                {
-                    case EntityVariant.FUNCTION:
-                        composite.RemoveFunction(entityId);
-                        break;
-                    case EntityVariant.ALIAS:
-                        composite.RemoveAlias(entityId);
-                        break;
-                    case EntityVariant.VARIABLE:
-                        composite.RemoveVariable(entityId);
-                        break;
-                    case EntityVariant.PROXY:
-                        composite.RemoveProxy(entityId);
-                        break;
-                }
-            }
 
-            ClearEphemeralDeepSelectAliasTrackingIfMatch(packet.composite, packet.entity);
-            //Inside a scene batch the rebuild at its end covers the scene, as for adds
-            if (InSceneBatch)
-                _sceneBatchTouched = true;
-            else
-                _entityOps.Enqueue(new EntityOp() { Add = false, Composite = new ShortGuid(packet.composite), Entity = new ShortGuid(packet.entity) });
+            //One entity, or the set a batch deletion carries (`entity` is among them)
+            List<uint> ids = packet.batch_entities != null && packet.batch_entities.Count > 0
+                ? packet.batch_entities
+                : new List<uint>() { packet.entity };
+            for (int i = 0; i < ids.Count; i++)
+            {
+                if (composite != null)
+                {
+                    ShortGuid entityId = new ShortGuid(ids[i]);
+                    //By what the entity is here; the packet says only what its first one is
+                    switch (composite.GetEntityByID(entityId)?.variant ?? packet.entity_variant)
+                    {
+                        case EntityVariant.FUNCTION:
+                            composite.RemoveFunction(entityId);
+                            break;
+                        case EntityVariant.ALIAS:
+                            composite.RemoveAlias(entityId);
+                            break;
+                        case EntityVariant.VARIABLE:
+                            composite.RemoveVariable(entityId);
+                            break;
+                        case EntityVariant.PROXY:
+                            composite.RemoveProxy(entityId);
+                            break;
+                    }
+                }
+
+                ClearEphemeralDeepSelectAliasTrackingIfMatch(packet.composite, ids[i]);
+                //Inside a scene batch the rebuild at its end covers the scene, as for adds
+                if (InSceneBatch)
+                    _sceneBatchTouched = true;
+                else
+                    _entityOps.Enqueue(new EntityOp() { Add = false, Composite = new ShortGuid(packet.composite), Entity = new ShortGuid(ids[i]) });
+            }
         }
     }
 

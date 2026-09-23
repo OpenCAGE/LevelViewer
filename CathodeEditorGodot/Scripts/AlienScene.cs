@@ -1698,14 +1698,14 @@ public partial class AlienScene : Node3D
 	{
 		if (_compositeNodes.ContainsKey(composite))
 		{
-			foreach (Node3D compositeInstance in _compositeNodes[composite])
+			//Snapshot: untracking an instance takes it out of this very list
+			foreach (Node3D compositeInstance in _compositeNodes[composite].ToArray())
 			{
 				if (compositeInstance != null && GodotObject.IsInstanceValid(compositeInstance))
 				{
 					UntrackFunctionEntityPreviews(compositeInstance);
+					UntrackEntityNodeTree(compositeInstance);
 					compositeInstance.QueueFree();
-					_nodeEntities.Remove(compositeInstance);
-					_nodeOwnerComposites.Remove(compositeInstance);
 				}
 			}
 			_compositeNodes.Remove(composite);
@@ -2091,11 +2091,19 @@ public partial class AlienScene : Node3D
 
 		if (!_content.Loaded || !PreviewVisibilitySettings.ShowZones)
 		{
-			//The grey-out stood down while zones had the level; it can have it back now they are off
+			/* The grey-out stood down while zones had the level; it can have it back now they are off.
+			   It stood down whether or not anything got coloured (a level with no zones tints nothing),
+			   so the focus itself is asked whether it is still waiting to come back. */
 			bool wasColoured = LevelViewerZoneHighlight.HasAny;
 			LevelViewerZoneHighlight.Clear();
-			if (wasColoured)
+			if (wasColoured || LevelViewerCompositeFocus.DimmingStoodDown)
 				RefreshCompositeFocus();
+
+			/* The alias and proxy overlays stood down while zones had the level (their Rebuild gates
+			   on ShowZones); this brings them back. Their rebuild keys carry the zones state, so it is
+			   a rebuild the first time through and nothing after that. */
+			RefreshProxyHighlights(forceRebuild: false);
+			RefreshAliasHighlights(forceRebuild: false);
 			LevelViewerSelection.ReapplyIfSelectionActive();
 			return;
 		}
@@ -2104,6 +2112,12 @@ public partial class AlienScene : Node3D
 		   LevelViewerCompositeFocus.Refresh, which gives every dimmed mesh its own material back so
 		   what gets saved underneath the zone colour is that and not a flat grey. */
 		RefreshCompositeFocus();
+
+		/* The alias and proxy overlays come off before the level is coloured: flat zone colour with
+		   orange or blue laid over it reads as more colour, not as a highlight. The selection keeps
+		   its green - it is drawn on the entity's own materials, which the tint hands back. */
+		RefreshProxyHighlights(forceRebuild: false);
+		RefreshAliasHighlights(forceRebuild: false);
 
 		LevelViewerZoneHighlight.Rebuild(this);
 		LevelViewerSelection.ReapplyIfSelectionActive();
@@ -3920,6 +3934,70 @@ public partial class AlienScene : Node3D
 			entityNodes.Remove(entityNode);
 	}
 
+	/* A node leaving the scene takes every entity node under it out of the registries with it. A
+	   composite instance is spawned as a subtree - the instanced composite's entities, all the way
+	   down, each tracked by (owner composite, entity) and registered as an instance of its own where
+	   it instances one - and freeing the instance node frees all of them at the end of the frame.
+	   Removal used to untrack the one node it was asked for, so a pasted or duplicated instance that
+	   was then deleted (or undone) left its whole spawned contents listed against the composite it
+	   instanced; stepping into another instance of that composite walked those aliases' nodes for the
+	   highlight, met the freed EntityOverride and threw on GetParent. */
+	private void UntrackEntityNodeTree(Node3D root)
+	{
+		if (root == null || !GodotObject.IsInstanceValid(root))
+			return;
+
+		bool overrideUntracked = false;
+		Stack<Node> pending = new Stack<Node>();
+		pending.Push(root);
+		while (pending.Count > 0)
+		{
+			Node current = pending.Pop();
+			if (current == null || !GodotObject.IsInstanceValid(current))
+				continue;
+
+			//Indexed child access: GetChildren() can hand back a read-only array mid-build
+			int childCount = current.GetChildCount();
+			for (int i = 0; i < childCount; i++)
+				pending.Push(current.GetChild(i));
+
+			if (current is Node3D node)
+				overrideUntracked |= UntrackSpawnedEntityNode(node);
+		}
+
+		if (overrideUntracked)
+		{
+			//An alias leaving the scene may be the one the render-target index names
+			_aliasParameterEntityByRenderTarget = null;
+			_aliasParameterDepthByRenderTarget = null;
+		}
+	}
+
+	/// <summary>Takes one spawned node out of every registry that knows it. True when it was an alias or proxy node.</summary>
+	private bool UntrackSpawnedEntityNode(Node3D node)
+	{
+		bool hadOwner = _nodeOwnerComposites.TryGetValue(node, out uint ownerCompositeId);
+		_nodeOwnerComposites.Remove(node);
+		if (!_nodeEntities.TryGetValue(node, out Entity entity))
+			return false;
+
+		_nodeEntities.Remove(node);
+		if (hadOwner)
+			UntrackEntityNode(new ShortGuid(ownerCompositeId), entity.shortGUID, node);
+
+		//A composite instance's node is also the instance the instanced composite's list holds
+		if (entity is FunctionEntity function
+			&& !function.function.IsFunctionType
+			&& _compositeNodes.TryGetValue(function.function, out List<Node3D> instances))
+		{
+			instances.Remove(node);
+			if (instances.Count == 0)
+				_compositeNodes.Remove(function.function);
+		}
+
+		return node is EntityOverride;
+	}
+
 	private void ClearEntityNodeCache()
 	{
 		_entityNodesByKey.Clear();
@@ -4085,8 +4163,9 @@ public partial class AlienScene : Node3D
 	/// forced rebuild costs about 0.4 s on a big composite, the removal itself a few ms, so a run of
 	/// deletions (a box selection deleted, or a box's deep-select aliases let go) paid it per entity.
 	/// </param>
+	/// <param name="logEach">False when the caller logs one line for a run of removals instead.</param>
 	/// <returns>Whether anything was removed.</returns>
-	public bool RemoveEntity(ShortGuid composite, ShortGuid entity, bool refreshHighlights = true)
+	public bool RemoveEntity(ShortGuid composite, ShortGuid entity, bool refreshHighlights = true, bool logEach = true)
 	{
 		string entityNodeName = entity.AsUInt32.ToString();
 		bool removed = false;
@@ -4142,11 +4221,11 @@ public partial class AlienScene : Node3D
 							EntityNodeUtil.SetPointed(pointedNode, false);
 						}
 
+						//By the key the removal names first: a node found by name never made it into the maps the tree walk goes by
 						UntrackEntityNode(composite, entity, entityNode);
+						UntrackEntityNodeTree(entityNode);
 						UntrackFunctionEntityPreviews(entityNode);
 						entityNode.QueueFree();
-						_nodeEntities.Remove(entityNode);
-						_nodeOwnerComposites.Remove(entityNode);
 						removed = true;
 						instancesProcessed++;
 					}
@@ -4164,7 +4243,7 @@ public partial class AlienScene : Node3D
 			RefreshEntityHighlights(forceRebuild: true);
 			ViewerLog.Print("Removed entity " + entityNodeName + " complete");
 		}
-		else if (removed)
+		else if (removed && logEach)
 		{
 			ViewerLog.Print("Removed entity " + entityNodeName + " x" + instancesProcessed);
 		}

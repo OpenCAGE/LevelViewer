@@ -17,6 +17,7 @@ internal sealed class EntityHighlightState
 
 	private uint _cachedActiveCompositeId;
 	private uint[] _cachedInstancePath = Array.Empty<uint>();
+	private bool _cachedShowZones;
 	private bool _cacheValid;
 
 	public EntityHighlightState(LevelViewerHighlightOverlay.HighlightOverlayMode mode)
@@ -32,6 +33,13 @@ internal sealed class EntityHighlightState
 		if (_cachedActiveCompositeId != activeCompositeId)
 			return true;
 
+		/* Show Zones is part of the key: the overlay is not drawn while it has the level (the
+		   per-mode Rebuild gates on it), so its going on or off is a rebuild either way. Without
+		   this a toggle with nothing else changed would read as up to date and keep whatever was
+		   drawn before it. */
+		if (_cachedShowZones != PreviewVisibilitySettings.ShowZones)
+			return true;
+
 		return !PreviewVisibilitySettings.InstancePathsEqual(
 			_cachedInstancePath,
 			PreviewVisibilitySettings.ActiveInstanceEntityPath);
@@ -44,6 +52,7 @@ internal sealed class EntityHighlightState
 	{
 		_cachedActiveCompositeId = activeCompositeId;
 		_cachedInstancePath = (uint[])(PreviewVisibilitySettings.ActiveInstanceEntityPath ?? Array.Empty<uint>()).Clone();
+		_cachedShowZones = PreviewVisibilitySettings.ShowZones;
 		_cacheValid = true;
 	}
 

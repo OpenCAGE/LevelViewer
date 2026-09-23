@@ -26,7 +26,9 @@ public static class LevelViewerProxyHighlight
 			return;
 		}
 
-		if (!PreviewVisibilitySettings.HighlightProxies || !PreviewVisibilitySettings.IsSteppedDownFromLevelRoot())
+		//Show Zones has the level's colour: the overlay stands down while it is on, as the alias one does
+		if (!PreviewVisibilitySettings.HighlightProxies || !PreviewVisibilitySettings.IsSteppedDownFromLevelRoot()
+			|| PreviewVisibilitySettings.ShowZones)
 		{
 			_state.MarkRebuildFailed();
 			return;

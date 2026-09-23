@@ -542,12 +542,12 @@ public partial class LevelViewerTransformGizmo : Node3D
             }
             else
             {
+                /* The ring is the anchor's own axis as it stood at the press. Turning about it is, in
+                   world terms, q0 * delta * q0^-1 - one world rotation, which the whole group makes. */
                 Vector3 localAxis = AxisToLocalDir(_dragAxis).Normalized();
                 Quaternion localDelta = new Quaternion(localAxis, angleRad);
                 Quaternion anchorRotation = _dragStartGlobalQuat * localDelta;
-                SetGlobalQuaternion(_target, anchorRotation);
-                //What that did to the anchor in world terms is what the rest of the group does
-                ApplyGroupRotationToOthers(anchorRotation * _dragStartGlobalQuat.Inverse());
+                ApplyGroupRotation(anchorRotation * _dragStartGlobalQuat.Inverse());
                 GlobalBasis = _target.GlobalBasis;
             }
         }
@@ -557,18 +557,15 @@ public partial class LevelViewerTransformGizmo : Node3D
         // Sync to OpenCAGE / all entity instances only on CommitDrag — not every mouse-move frame.
     }
 
-    /// <summary>Turn every target by the same world rotation, about the gizmo's pivot.</summary>
+    /// <summary>
+    /// Turn the group rigidly by one world rotation about the pivot - where the rings are. Every
+    /// target, the anchor included, turns by it and swings round the pivot by it, so the group keeps
+    /// its shape; the anchor turning on the spot while the rest orbited (issue 694) left the pivot
+    /// nowhere in particular. One entity is its own pivot, so it turns where it stands.
+    /// </summary>
     private void ApplyGroupRotation(Quaternion worldDelta)
     {
-        SetGlobalQuaternion(_target, worldDelta * _dragStartGlobalQuat);
-        ApplyGroupRotationToOthers(worldDelta);
-    }
-
-    /* The anchor turns on the spot (its own rotation is all that changes, exactly as it always has);
-       everything else also swings round the pivot, which is what keeps the group's shape. */
-    private void ApplyGroupRotationToOthers(Quaternion worldDelta)
-    {
-        for (int i = 1; i < _targets.Count; i++)
+        for (int i = 0; i < _targets.Count; i++)
         {
             Node3D target = _targets[i];
             if (target == null || !GodotObject.IsInstanceValid(target))

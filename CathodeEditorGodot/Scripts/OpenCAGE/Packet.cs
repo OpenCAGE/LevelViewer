@@ -374,5 +374,14 @@ namespace OpenCAGE.UnityConnection
         // it is answering. 0 = not a palette drop, which is also what a packet from before this carries; a viewer
         // from before this finds no composite to instance and lets the drop do nothing.
         public uint drop_function_type = 0;
+
+        // Every entity the packet is about when it is about several, `entity` among them. Level Viewer ->
+        // OpenCAGE, on ENTITY_ALIAS_RELEASED: the deep-select aliases let go of at once - a box's worth, abandoned
+        // together by the click that replaced them - which OpenCAGE judges and deletes as one set, where a packet
+        // per alias cost it a pass over the level's saved flowgraph layouts each. OpenCAGE -> Level Viewer, on
+        // ENTITY_DELETED: the set that deletion took out, which the viewer removes as one batch, where a packet
+        // per alias was 6 ms to build and send each. Empty means just `entity`, which is also what either side
+        // from before this sends.
+        public List<uint> batch_entities = new List<uint>();
     }
 }

@@ -33,6 +33,16 @@ public static class LevelViewerAliasHighlight
 			return;
 		}
 
+		/* Show Zones has the level: every mesh is drawn flat in its zone's colour, and an orange
+		   overlay on top of that reads as more colour, not as "an alias points here". The overlay
+		   stands down while zones are on (the selection's green still shows, on its own materials)
+		   and comes back when they go off - the zones state is part of the NeedsRebuild key. */
+		if (PreviewVisibilitySettings.ShowZones)
+		{
+			_state.MarkRebuildFailed();
+			return;
+		}
+
 		HashSet<ulong> tintedMeshIds = new HashSet<ulong>();
 		scene.ForEachParameterizedAliasInActiveComposite((ownerComposite, alias) =>
 		{

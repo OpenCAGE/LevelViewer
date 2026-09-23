@@ -37,7 +37,11 @@ public static class LevelViewerCompositeFocus
 	private static Node3D _scopeAnchorNode;
 	private static IReadOnlyDictionary<Node3D, Entity> _scopeNodeEntities;
 	private static Node _scopeContentRoot;
+	//Show Zones has the level's materials: nothing is greyed out, though the scope is still kept (see Refresh)
+	private static bool _dimmingStoodDown;
 	public static bool HasActiveComposite => PreviewVisibilitySettings.ActiveCompositeId != 0;
+	//Zones are (or were) on and the grey-out is off for it; a zones-off refresh has to bring it back
+	public static bool DimmingStoodDown => _dimmingStoodDown;
 
 	public static void SetScopeEvaluationContext(IReadOnlyDictionary<Node3D, Entity> nodeEntities, Node contentRoot)
 	{
@@ -223,17 +227,6 @@ public static class LevelViewerCompositeFocus
 			return;
 		}
 
-		/* Show Zones stands the grey-out down. Both work by replacing MaterialOverride across the whole
-		   level, and the dimmed material is a flat grey whatever it replaces - so dimming zone-coloured
-		   geometry loses the colour entirely, and the two of them saving and restoring each other's
-		   materials is how a mesh ends up stuck in a colour after the overlay is switched off. One
-		   owner at a time; AlienScene.RefreshZoneOverlay brings the dimming back when zones go off. */
-		if (PreviewVisibilitySettings.ShowZones)
-		{
-			Clear();
-			return;
-		}
-
 		PruneInvalidMeshState();
 
 		_scopeNodeEntities = nodeEntities ?? _scopeNodeEntities;
@@ -252,9 +245,36 @@ public static class LevelViewerCompositeFocus
 		_scopeAnchorNode = scopeAnchorOverride ?? ResolveScopeAnchorNode(contentRoot, instancePath);
 		_lastFocusInstancePath = (uint[])instancePath.Clone();
 
-		if (activeCompositeChanged || focusPathChanged)
+		/* Show Zones stands the grey-out down. Both work by replacing MaterialOverride across the whole
+		   level, and the dimmed material is a flat grey whatever it replaces - so dimming zone-coloured
+		   geometry loses the colour entirely, and the two of them saving and restoring each other's
+		   materials is how a mesh ends up stuck in a colour after the overlay is switched off. One
+		   owner at a time; AlienScene.RefreshZoneOverlay brings the dimming back when zones go off.
+
+		   Only the dimming stands down. The scope worked out above is kept current regardless, because
+		   picking goes by it whether or not anything is greyed out: a click tests every owner against
+		   the anchor and the focus instance path, and with those thrown away every owner under a
+		   stepped-into instance read as out of scope - nothing could be clicked while zones were on. */
+		if (PreviewVisibilitySettings.ShowZones)
 		{
-			if (!activeCompositeChanged
+			if (!_dimmingStoodDown)
+			{
+				ResetDimStateForScopeChange();
+				_dimmingStoodDown = true;
+			}
+
+			LevelViewerPick.InvalidateScopedPickables();
+			return;
+		}
+
+		//Zones have just gone off: nothing is dimmed and the per-mesh state went with it, so the scope is applied in full
+		bool dimmingReturns = _dimmingStoodDown;
+		_dimmingStoodDown = false;
+
+		if (dimmingReturns || activeCompositeChanged || focusPathChanged)
+		{
+			if (!dimmingReturns
+				&& !activeCompositeChanged
 				&& focusPathChanged
 				&& TryApplyIncrementalFocusPathChange(previousFocusPath, instancePath, commands))
 			{
@@ -288,6 +308,7 @@ public static class LevelViewerCompositeFocus
 		_scopeCacheActiveCompositeId = 0;
 		_lastFocusInstancePath = Array.Empty<uint>();
 		_scopeAnchorNode = null;
+		_dimmingStoodDown = false;
 		_meshDimmedState.Clear();
 		_dimmedMaterialBySource.Clear();
 		_ownerEntityChainCache.Clear();

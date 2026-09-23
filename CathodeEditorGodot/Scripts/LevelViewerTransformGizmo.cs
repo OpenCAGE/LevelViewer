@@ -572,7 +572,9 @@ public partial class LevelViewerTransformGizmo : Node3D
                 continue;
 
             SetGlobalQuaternion(target, worldDelta * _dragStartQuaternions[i]);
-            target.GlobalPosition = _dragPivot + worldDelta * (_dragStartPositions[i] - _dragPivot);
+            //One entity is its own pivot: its position is left alone, as it always was (no round trip through its parent)
+            if (_targets.Count > 1)
+                target.GlobalPosition = _dragPivot + worldDelta * (_dragStartPositions[i] - _dragPivot);
         }
     }
 

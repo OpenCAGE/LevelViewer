@@ -131,6 +131,22 @@ namespace OpenCAGE.UnityConnection
         // opening and closing, so the viewer knows to hand its next input to the menu. Built like OpenCAGE's
         // other packets, with the selection on it, so a viewer from before this takes it as a re-sync.
         VIEWPORT_ACTION,
+
+        // OpenCAGE -> Level Viewer: take a square preview of each composite in `preview_composites` (its ShortGuid
+        // as a number; empty = every composite of the loaded level), its content framed in the middle of a transparent
+        // square `preview_size` pixels across (0 = the default), written as <composite>.png into
+        // `preview_output_dir`. Each composite is captured as it looks opened on its own - built as the composite
+        // on screen, not as an instance inside the level with the level's material remaps and overrides - so the
+        // scene is rebuilt for every composite captured and, with `preview_restore_view`, put back afterwards. A
+        // composite that draws nothing leaves a zero-byte <composite>.empty beside where its PNG would be. With
+        // `preview_skip_existing`, a composite whose PNG or .empty is already there is left alone (a run over every
+        // level meets the same library composite many times). `preview_request_id` is echoed back. Answered by
+        // COMPOSITE_PREVIEW_CAPTURED once the lot is done.
+        COMPOSITE_PREVIEW_CAPTURE_REQUEST,
+
+        // Level Viewer -> OpenCAGE: what a COMPOSITE_PREVIEW_CAPTURE_REQUEST produced - one CompositePreviewResult
+        // per composite asked for, in `preview_results`, with the request's `preview_request_id`.
+        COMPOSITE_PREVIEW_CAPTURED,
     }
 
     /// <summary>
@@ -153,6 +169,24 @@ namespace OpenCAGE.UnityConnection
         //OpenCAGE's context menu opened for the viewer's last VIEWPORT_CONTEXT_MENU, or has closed again
         ContextMenuOpened,
         ContextMenuClosed,
+    }
+
+    /// <summary>What became of one composite a COMPOSITE_PREVIEW_CAPTURE_REQUEST asked for.</summary>
+    public enum CompositePreviewStatus
+    {
+        Captured = 0,        //the preview was taken and written
+        Empty = 1,           //the composite draws nothing, so there is no preview to take
+        Failed = 2,          //something went wrong (the viewer's log says what)
+        SkippedExisting = 3, //preview_skip_existing was set and the file was already there
+        Unknown = 4,         //no composite of that id in the loaded level
+    }
+
+    /// <summary>One composite's outcome from a COMPOSITE_PREVIEW_CAPTURE_REQUEST.</summary>
+    public class CompositePreviewResult
+    {
+        public uint composite;
+        public string file = ""; //the PNG written, "" when none was
+        public int status;        //a CompositePreviewStatus
     }
 
     /// <summary>One entity of a composite, as ENTITY_ADDED would carry it, for COMPOSITE_CONTENTS.</summary>
@@ -383,5 +417,22 @@ namespace OpenCAGE.UnityConnection
         // per alias was 6 ms to build and send each. Empty means just `entity`, which is also what either side
         // from before this sends.
         public List<uint> batch_entities = new List<uint>();
+
+        // Composite previews (COMPOSITE_PREVIEW_CAPTURE_REQUEST / COMPOSITE_PREVIEW_CAPTURED): which composites,
+        // where the PNGs go, how big, whether to leave existing files be, and the outcome per composite. A packet
+        // from before this carries none of it, which the viewer reads as nothing asked for.
+        public uint preview_request_id = 0;
+        public List<uint> preview_composites = new List<uint>();
+        public string preview_output_dir = "";
+        public int preview_size = 0;
+        public bool preview_skip_existing = false;
+        public List<CompositePreviewResult> preview_results = new List<CompositePreviewResult>();
+
+        // OpenCAGE -> Level Viewer, on COMPOSITE_PREVIEW_CAPTURE_REQUEST: each composite is captured as it looks opened on
+        // its own (populated as the root, not an instance inside the level), so the batch rebuilds the scene for every
+        // composite it previews and, when this is true, puts the composite that was on screen back afterwards, camera
+        // and all. OpenCAGE never says otherwise; the one-off capture run over every level says false, since its viewer
+        // is closed straight after. True is also what a packet from before this carries.
+        public bool preview_restore_view = true;
     }
 }

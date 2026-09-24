@@ -937,11 +937,22 @@ public partial class AlienScene : Node3D
 		LevelViewerCompositeFocus.Clear();
 		CancelLargeSceneRenderPolicy();
 		ModelReferenceRenderSettings.ResetForLevelLoad();
-		ClearPopulateMaterialCaches();
-		ModelReferenceMaterialMapping.PrepareForLevelPopulate(_content.Level.Commands);
+		/* A preview batch keeps both from one composite to the next: the materials are keyed by the level's
+		   own and stay right whatever the root, and the mapping index is over the whole script (the batch
+		   builds it once, before its first populate). */
+		if (!_previewBatchPopulate)
+		{
+			ClearPopulateMaterialCaches();
+			ModelReferenceMaterialMapping.PrepareForLevelPopulate(_content.Level.Commands);
+		}
 
 		if (_parentNode != null && GodotObject.IsInstanceValid(_parentNode))
 			_parentNode.QueueFree();
+		/* The old scene's meshes go with it. A bulk-spawned mesh has no TreeExited hook to take itself out
+		   (see SpawnRenderable), so until now they sat here as dead wrappers until the next level load, and
+		   every filter pass and mesh count walked them - a preview batch replaces the scene a thousand times. */
+		_modelReferenceMeshes.Clear();
+		_meshBindings.Clear();
 
 		_contentOrigin = Vector3.Zero;
 		_parentNode = new Node3D { Name = _levelName };
@@ -960,9 +971,12 @@ public partial class AlienScene : Node3D
 		_stateInfoOverlay = new StateInfoOverlay { Name = "StateInfo", Visible = false };
 		_parentNode.AddChild(_stateInfoOverlay);
 		_stateInfoOverlay.Setup(_content);
-		ApplyStateInfoOverlays(_pendingNavMeshState, _pendingCoverState);
+		//Never part of a composite's preview, and the nav mesh is not cheap to draw a thousand times
+		if (!_previewBatchPopulate)
+			ApplyStateInfoOverlays(_pendingNavMeshState, _pendingCoverState);
 
-		ViewerLog.Print("Loading composite " + comp?.name + "...");
+		if (!_previewBatchPopulate)
+			ViewerLog.Print("Loading composite " + comp?.name + "...");
 		_loadedComposite = comp;
 
 		LevelViewerPopulateTree.Plan spawnPlan =
@@ -972,24 +986,35 @@ public partial class AlienScene : Node3D
 			LevelViewerPopulatePrewarm.BuildModelReferenceCache(spawnPlan.ModelReferences, _content, spawnPlan);
 		_modelRefRenderablesByEntityId = modelRefCache.RenderablesByInstanceKey;
 		LevelViewerPopulatePrewarm.Plan prewarmPlan = modelRefCache.PrewarmPlan;
-		ViewerLog.Print(
-			"Population plan: "
-			+ prewarmPlan.MeshWriteIndices.Count + " meshes, "
-			+ prewarmPlan.Textures.Count + " textures, "
-			+ prewarmPlan.Materials.Count + " materials.");
+		if (!_previewBatchPopulate)
+		{
+			ViewerLog.Print(
+				"Population plan: "
+				+ prewarmPlan.MeshWriteIndices.Count + " meshes, "
+				+ prewarmPlan.Textures.Count + " textures, "
+				+ prewarmPlan.Materials.Count + " materials.");
+		}
 
+		//Under a preview batch the union of every composite's plan was restored and converted before the
+		//first populate, so this finds everything cached and reads no pak; kept for the odd entry it did not cover
 		RestoreReleasedSourceData(prewarmPlan);
 
 		LevelViewerPopulatePrewarm.Result prewarmResult = LevelViewerPopulatePrewarm.Execute(prewarmPlan, _content.Level);
 
 		FinalizePrewarmGodotResources(prewarmResult, prewarmPlan);
 
-		ViewerLog.Print("Spawn plan: " + spawnPlan.Commands.Count + " entities.");
+		if (!_previewBatchPopulate)
+			ViewerLog.Print("Spawn plan: " + spawnPlan.Commands.Count + " entities.");
 
-		LevelViewerRenderIdleThrottle.SetLoadActive(true);
+		/* CompletePopulate lets go of this, and a preview batch does not run it: the batch holds the
+		   frame rate up itself for its whole run, so its populates must not take it (a thousand takes
+		   with no release, and the viewer never idles again). */
+		if (!_previewBatchPopulate)
+			LevelViewerRenderIdleThrottle.SetLoadActive(true);
 		RegisterCompositeNode(comp, _parentNode);
 
-		ShowLoading("Spawning " + spawnPlan.Commands.Count + " entities...");
+		if (!_previewBatchPopulate)
+			ShowLoading("Spawning " + spawnPlan.Commands.Count + " entities...");
 		_nodeEntities.EnsureCapacity(spawnPlan.Commands.Count);
 		_parentNode.ProcessMode = Node.ProcessModeEnum.Disabled;
 		try
@@ -1016,11 +1041,18 @@ public partial class AlienScene : Node3D
 		// Mesh jobs need alias wiring and instance mapping meta before material remaps resolve.
 		RebuildBulkMeshSpawnJobsFromPreviews();
 
-		ShowLoading("Spawning model-reference meshes...");
+		if (!_previewBatchPopulate)
+			ShowLoading("Spawning model-reference meshes...");
 		FinishBulkPopulateVisuals();
-		ViewerLog.Print("Spawned " + _modelReferenceMeshes.Count + " model-reference meshes.");
-
 		ModelReferenceRenderSettings.FinalizeLevelLoad(_modelReferenceMeshes.Count);
+
+		/* A preview batch stops here: it holds the binaries for its whole run and releases them once at
+		   the end, keeps the frame rate up itself, and distance culling would only hide the far end of a
+		   big composite in its preview. The memory line is one per level, not one per composite. */
+		if (_previewBatchPopulate)
+			return;
+
+		ViewerLog.Print("Spawned " + _modelReferenceMeshes.Count + " model-reference meshes.");
 		ReleaseCathodeBinarySourceData();
 		CollectReleasedSourceData();
 		ViewerLog.Print(
@@ -1764,32 +1796,66 @@ public partial class AlienScene : Node3D
 		}
 		else
 		{
-			Composite nested = _content.Level.Commands.GetComposite(function.function);
-			if (nested == null)
+			plan = BuildCompositePrewarmPlan(_content.Level.Commands.GetComposite(function.function));
+			if (plan == null)
 				return;
-			LevelViewerPopulateTree.Plan spawnPlan =
-				LevelViewerPopulateTree.Collect(nested, _content, deferAliasProxy: true, includeVariables: false);
-			plan = LevelViewerPopulatePrewarm.BuildModelReferenceCache(spawnPlan.ModelReferences, _content, spawnPlan).PrewarmPlan;
 		}
 
-		bool meshesCached = plan.MeshWriteIndices.All(writeIndex => _modelMeshesByWriteIndex.ContainsKey(writeIndex));
-		bool texturesCached = plan.Textures.All(tex4 =>
-		{
-			TexturePtr.Source location = plan.TextureLocations.TryGetValue(tex4, out TexturePtr.Source stored)
-				? stored
-				: TexturePtr.Source.LEVEL;
-			int writeIndex = GetTextureWriteIndex(tex4, location);
-			return writeIndex >= 0 && TryGetCachedTexture(location, writeIndex, out _);
-		});
+		PrewarmPlanIfMissing(plan, "entity " + entity.shortGUID.AsUInt32 + " spawned after populate");
+	}
+
+	/// <summary>
+	/// What a composite's contents, all the way down, need converting - as a populate of it would plan
+	/// it. Null when there is no composite.
+	/// </summary>
+	private LevelViewerPopulatePrewarm.Plan BuildCompositePrewarmPlan(Composite composite)
+	{
+		if (_content?.Level == null || composite == null)
+			return null;
+
+		LevelViewerPopulateTree.Plan spawnPlan =
+			LevelViewerPopulateTree.Collect(composite, _content, deferAliasProxy: true, includeVariables: false);
+		return LevelViewerPopulatePrewarm.BuildModelReferenceCache(spawnPlan.ModelReferences, _content, spawnPlan).PrewarmPlan;
+	}
+
+	private bool IsPlanMeshCached(int writeIndex)
+	{
+		return _modelMeshesByWriteIndex.ContainsKey(writeIndex);
+	}
+
+	private bool IsPlanTextureCached(Textures.TEX4 tex4, LevelViewerPopulatePrewarm.Plan plan)
+	{
+		TexturePtr.Source location = plan.TextureLocations.TryGetValue(tex4, out TexturePtr.Source stored)
+			? stored
+			: TexturePtr.Source.LEVEL;
+		int writeIndex = GetTextureWriteIndex(tex4, location);
+		return writeIndex >= 0 && TryGetCachedTexture(location, writeIndex, out _);
+	}
+
+	/// <summary>
+	/// Restore, convert and cache whatever in the plan the caches do not hold yet. The common case of
+	/// everything already on screen costs a lookup; otherwise the restore re-reads a whole pak to get
+	/// at a few entries, which is why a caller with several composites to spawn merges their plans
+	/// first (the composite previews).
+	/// </summary>
+	/// <returns>Whether anything had to be converted.</returns>
+	private bool PrewarmPlanIfMissing(LevelViewerPopulatePrewarm.Plan plan, string what)
+	{
+		if (plan == null || _content?.Level == null)
+			return false;
+
+		bool meshesCached = plan.MeshWriteIndices.All(IsPlanMeshCached);
+		bool texturesCached = plan.Textures.All(tex4 => IsPlanTextureCached(tex4, plan));
 		if (meshesCached && texturesCached)
-			return;
+			return false;
 
 		RestoreReleasedSourceData(plan);
 		LevelViewerPopulatePrewarm.Result result = LevelViewerPopulatePrewarm.Execute(plan, _content.Level);
 		FinalizePrewarmGodotResources(result, plan);
 		CollectReleasedSourceData(); //the restore re-read a whole pak to get at a few entries
 		ViewerLog.Print("Prewarmed " + plan.MeshWriteIndices.Count + " mesh(es) and " + plan.Textures.Count
-			+ " texture(s) for entity " + entity.shortGUID.AsUInt32 + " spawned after populate.");
+			+ " texture(s) for " + what + ".");
+		return true;
 	}
 
 	/// <summary>Spawns an entity under every instance of its composite that is in the scene.</summary>
@@ -2071,6 +2137,9 @@ public partial class AlienScene : Node3D
 
 	public void RefreshEntityHighlights(bool forceRebuild = true)
 	{
+		if (_previewOverlaysStoodDown)
+			return;
+
 		RefreshProxyHighlights(forceRebuild);
 		RefreshAliasHighlights(forceRebuild);
 
@@ -2087,6 +2156,9 @@ public partial class AlienScene : Node3D
 	{
 		//Half a scene is not worth colouring; CompletePopulate calls this again once it is all there
 		if (_isBulkPopulating)
+			return;
+		//Stood down for a preview batch, and put back by it (either branch here would colour a preview)
+		if (_previewOverlaysStoodDown)
 			return;
 
 		if (!_content.Loaded || !PreviewVisibilitySettings.ShowZones)
@@ -2143,6 +2215,10 @@ public partial class AlienScene : Node3D
 
 	public void RefreshCompositeFocus()
 	{
+		//Stood down for a preview batch (the grey-out would be in the previews); the batch puts it back
+		if (_previewOverlaysStoodDown)
+			return;
+
 		if (_parentNode == null || !GodotObject.IsInstanceValid(_parentNode) || !_content.Loaded)
 		{
 			LevelViewerCompositeFocus.Clear();
@@ -5197,10 +5273,14 @@ public partial class AlienScene : Node3D
 
 		int missingTextureCount = ConvertMissingPlanTextures(plan);
 		textureCount += missingTextureCount;
-		ViewerLog.Print(
-			"Converted "
-			+ meshCount + "/" + result.Meshes.Count + " meshes and "
-			+ textureCount + "/" + plan.Textures.Count + " textures.");
+		//A preview batch's populates find everything cached; a line per composite would only say so
+		if (!_previewBatchPopulate || meshCount > 0 || textureCount > 0)
+		{
+			ViewerLog.Print(
+				"Converted "
+				+ meshCount + "/" + result.Meshes.Count + " meshes and "
+				+ textureCount + "/" + plan.Textures.Count + " textures.");
+		}
 	}
 
 	private int ConvertMissingPlanTextures(LevelViewerPopulatePrewarm.Plan plan)

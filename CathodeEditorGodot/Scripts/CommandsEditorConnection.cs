@@ -922,6 +922,13 @@ public partial class CommandsEditorConnection : Node3D
             return;
         }
 
+        if (packet.packet_event == PacketEvent.COMPOSITE_PREVIEW_CAPTURE_REQUEST)
+        {
+            //Nothing but the request: it carries no path, so it must not be taken for a selection or a settings sync
+            HandleCompositePreviewCaptureRequest(packet);
+            return;
+        }
+
         if (packet.packet_event == PacketEvent.ENTITY_PARAMETER_MODIFIED
             || packet.packet_event == PacketEvent.ENTITY_MOVED
             || packet.packet_event == PacketEvent.ENTITY_RESOURCE_MODIFIED)
@@ -1193,6 +1200,64 @@ public partial class CommandsEditorConnection : Node3D
                 break;
             }
         }
+    }
+
+    private bool _compositePreviewCaptureRunning;
+
+    /* The previews are taken from the scene, so the batch runs on the main thread, one at a time: a
+       request that lands while one is running is answered straight away with every composite Failed
+       rather than queued behind it - whoever sent it (a run over every level) is waiting on the answer. */
+    private void HandleCompositePreviewCaptureRequest(Packet packet)
+    {
+        uint requestId = packet.preview_request_id;
+        List<uint> composites = packet.preview_composites == null ? new List<uint>() : new List<uint>(packet.preview_composites);
+        string outputDir = packet.preview_output_dir ?? "";
+        int size = packet.preview_size;
+        bool skipExisting = packet.preview_skip_existing;
+        bool restoreView = packet.preview_restore_view;
+        Callable.From(() => RunCompositePreviewCapture(requestId, composites, outputDir, size, skipExisting, restoreView)).CallDeferred();
+    }
+
+    private async void RunCompositePreviewCapture(uint requestId, List<uint> composites, string outputDir, int size, bool skipExisting, bool restoreView)
+    {
+        // async void: an escaping exception would take the process down, so everything is caught here
+        List<CompositePreviewResult> results;
+        try
+        {
+            if (_scene == null)
+            {
+                results = new List<CompositePreviewResult>();
+            }
+            else if (_compositePreviewCaptureRunning)
+            {
+                ViewerLog.PrintErr("[Preview] Request " + requestId + " refused: a capture batch is already running.");
+                results = _scene.BuildFailedPreviewResults(composites);
+            }
+            else
+            {
+                _compositePreviewCaptureRunning = true;
+                try
+                {
+                    results = await _scene.CapturePreviewsAsync(composites, outputDir, size, skipExisting, restoreView);
+                }
+                finally
+                {
+                    _compositePreviewCaptureRunning = false;
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            ViewerLog.PrintErr("[Preview] Request " + requestId + " failed: " + ex);
+            results = _scene != null ? _scene.BuildFailedPreviewResults(composites) : new List<CompositePreviewResult>();
+        }
+
+        SendMessage(new Packet(PacketEvent.COMPOSITE_PREVIEW_CAPTURED)
+        {
+            preview_request_id = requestId,
+            preview_output_dir = outputDir,
+            preview_results = results,
+        });
     }
 
     private void QueueParameterSync(Packet packet)

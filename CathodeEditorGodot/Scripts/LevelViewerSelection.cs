@@ -94,6 +94,16 @@ public static class LevelViewerSelection
         ClearInternal();
     }
 
+    /// <summary>
+    /// Take the highlight off the meshes without forgetting the selection - for a picture of the scene
+    /// that must not show it (composite previews). <see cref="ReapplyIfSelectionActive"/> puts it back.
+    /// </summary>
+    public static void Suspend()
+    {
+        LevelViewerHighlightOverlay.RestoreOverlays(_savedOverlays);
+        LevelViewerHighlightOverlay.RestoreOverrides(_savedOverrides);
+    }
+
     private static void ClearInternal()
     {
         LevelViewerHighlightOverlay.RestoreOverlays(_savedOverlays);

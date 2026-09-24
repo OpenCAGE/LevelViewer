@@ -539,11 +539,24 @@ public partial class LevelViewerCamera : Camera3D
         HandleSelectionFocus(target, fixCamera, framePositionOnly);
     }
 
+    /// <summary>
+    /// Leave the camera where it is when the next composite finishes loading, once. A composite preview
+    /// batch sets it before it puts the composite the user had on screen back: the view is the user's,
+    /// and the batch restores it exactly rather than framing it afresh.
+    /// </summary>
+    public bool SkipNextCompositeFraming { get; set; }
+
     private void OnCompositeLoaded()
     {
         // Occlusion culling stays off (set in _Ready): the scene has no OccluderInstance3D, so turning it on for a big
         // level could hide nothing and only paid for the CPU depth pyramid - which is where the engine crashed
         // (crash dashboard 0.18.0.41 #405, HZBuffer::update_mips on a 62k-mesh level). Distance culling is separate.
+
+        if (SkipNextCompositeFraming)
+        {
+            SkipNextCompositeFraming = false;
+            return;
+        }
 
         FrameLoadedContentWhenReadyAsync();
     }

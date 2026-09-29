@@ -67,6 +67,8 @@ public partial class CollisionMeshOverlay : Node3D
 	/// <summary>Rebuild after an entity's COLLISION_MAPPING resource changed.</summary>
 	public void RefreshEntity(ShortGuid entity)
 	{
+		//The kept slices were cut along the old mapping, so they go whether or not this overlay has built yet
+		_meshesByHost.Clear();
 		if (!_built)
 			return;
 
@@ -129,36 +131,78 @@ public partial class CollisionMeshOverlay : Node3D
 
 		foreach (HavokPackfile.StaticCompoundShape host in new List<HavokPackfile.StaticCompoundShape>(hosts.Keys))
 		{
-			HavokPackfile.PreviewMesh preview;
-			try
+			//Triangulated and sliced once per host, not once per populate (see _meshesByHost)
+			if (!_meshesByHost.TryGetValue(host, out Dictionary<uint, ArrayMesh> meshesByEntity))
 			{
-				preview = packfile.BuildBakeMesh(host, skipInstances: null, trackInstances: true);
-			}
-			catch (Exception ex)
-			{
-				ViewerLog.PrintErr("[Collision] Failed to triangulate host: " + ex.Message);
-				continue;
+				HavokPackfile.PreviewMesh preview;
+				try
+				{
+					preview = packfile.BuildBakeMesh(host, skipInstances: null, trackInstances: true);
+				}
+				catch (Exception ex)
+				{
+					ViewerLog.PrintErr("[Collision] Failed to triangulate host: " + ex.Message);
+					continue;
+				}
+
+				if (preview == null || preview.InstanceRanges == null || preview.TriangleCount == 0)
+				{
+					ViewerLog.Print("[Collision] Host produced no tracked triangles.");
+					continue;
+				}
+
+				meshesByEntity = SliceInstances(preview, entityByInstance);
+				_meshesByHost.Add(host, meshesByEntity);
 			}
 
-			if (preview == null || preview.InstanceRanges == null || preview.TriangleCount == 0)
-			{
-				ViewerLog.Print("[Collision] Host produced no tracked triangles.");
-				continue;
-			}
-
-			spawned += SliceInstances(preview, entityByInstance, entityNodes, material);
+			spawned += SpawnSlices(meshesByEntity, entityNodes, material);
 		}
 
 		ViewerLog.Print("[Collision] Built " + spawned + " collision meshes from " + hosts.Count
 			+ " host(s) in " + timer.ElapsedMilliseconds + "ms.");
 	}
 
+	/* Each host's meshes, per entity, kept for as long as the host itself is: the overlay is rebuilt with every populate,
+	   and triangulating the level's collision again each time was 2.5 s on TECH_Hub with nothing answered - a switch to
+	   a 48-entity prop paid it in full. The hosts are the loaded level's own objects, so a level load starts afresh. */
+	private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<HavokPackfile.StaticCompoundShape, Dictionary<uint, ArrayMesh>> _meshesByHost =
+		new System.Runtime.CompilerServices.ConditionalWeakTable<HavokPackfile.StaticCompoundShape, Dictionary<uint, ArrayMesh>>();
+
+	/// <summary>A mesh instance per entity from a host's sliced meshes, under that entity's holder.</summary>
+	private int SpawnSlices(Dictionary<uint, ArrayMesh> meshesByEntity, Dictionary<uint, List<Node3D>> entityNodes, Material material)
+	{
+		int spawned = 0;
+		foreach (KeyValuePair<uint, ArrayMesh> entry in meshesByEntity)
+		{
+			LevelViewerSentMessages.PumpIfDue();
+			if (entry.Value == null || !GodotObject.IsInstanceValid(entry.Value))
+				continue;
+
+			Node3D holder = GetOrCreateHolder(entry.Key, entityNodes);
+			MeshInstance3D instance = new MeshInstance3D
+			{
+				Name = "collision_" + entry.Key,
+				Mesh = entry.Value,
+				MaterialOverride = material,
+			};
+			LevelViewerMeshUtil.ConfigureMeshInstance(instance);
+			holder.AddChild(instance);
+
+			if (!_meshesByEntity.TryGetValue(entry.Key, out List<MeshInstance3D> meshes))
+			{
+				meshes = new List<MeshInstance3D>();
+				_meshesByEntity[entry.Key] = meshes;
+			}
+			meshes.Add(instance);
+			spawned++;
+		}
+		return spawned;
+	}
+
 	/// <summary>Split a host's triangles back into one mesh per entity.</summary>
-	private int SliceInstances(
+	private static Dictionary<uint, ArrayMesh> SliceInstances(
 		HavokPackfile.PreviewMesh preview,
-		Dictionary<HavokPackfile.CompoundInstance, uint> entityByInstance,
-		Dictionary<uint, List<Node3D>> entityNodes,
-		Material material)
+		Dictionary<HavokPackfile.CompoundInstance, uint> entityByInstance)
 	{
 		//InstanceRanges is (first triangle, instance) in ascending triangle order
 		Dictionary<uint, List<int>> trianglesByEntity = new Dictionary<uint, List<int>>();
@@ -191,33 +235,15 @@ public partial class CollisionMeshOverlay : Node3D
 			}
 		}
 
-		int spawned = 0;
+		Dictionary<uint, ArrayMesh> meshesByEntity = new Dictionary<uint, ArrayMesh>();
 		foreach (KeyValuePair<uint, List<int>> entry in trianglesByEntity)
 		{
+			LevelViewerSentMessages.PumpIfDue();
 			ArrayMesh mesh = BuildMesh(preview.Positions, entry.Value);
-			if (mesh == null)
-				continue;
-
-			Node3D holder = GetOrCreateHolder(entry.Key, entityNodes);
-			MeshInstance3D instance = new MeshInstance3D
-			{
-				Name = "collision_" + entry.Key,
-				Mesh = mesh,
-				MaterialOverride = material,
-			};
-			LevelViewerMeshUtil.ConfigureMeshInstance(instance);
-			holder.AddChild(instance);
-
-			if (!_meshesByEntity.TryGetValue(entry.Key, out List<MeshInstance3D> meshes))
-			{
-				meshes = new List<MeshInstance3D>();
-				_meshesByEntity[entry.Key] = meshes;
-			}
-			meshes.Add(instance);
-			spawned++;
+			if (mesh != null)
+				meshesByEntity[entry.Key] = mesh;
 		}
-
-		return spawned;
+		return meshesByEntity;
 	}
 
 	/// <summary>Entity shortGUID to the scene nodes representing it, so collision can follow its owner.</summary>

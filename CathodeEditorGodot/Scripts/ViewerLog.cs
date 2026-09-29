@@ -45,7 +45,7 @@ public static class ViewerLog
 
 		GD.Print(message);
 		WriteToFile(message, false);
-		ViewerLogBridge.TryForward(message, false);
+		ForwardUnlessHosted(message, false);
 	}
 
 	public static void PrintErr(string message)
@@ -55,7 +55,19 @@ public static class ViewerLog
 
 		GD.PrintErr(message);
 		WriteToFile(message, true);
-		ViewerLogBridge.TryForward(message, true);
+		ForwardUnlessHosted(message, true);
+	}
+
+	/* Hosted, OpenCAGE already reads every line off stdout/stderr (the same relay and crash tail these feed), so sending
+	   each one again as a VIEWER_LOG packet only doubled the traffic - one echo per packet received, given the "Packet:"
+	   breadcrumbs - for a release build to deserialise and throw away on its UI thread. A viewer run on its own still
+	   forwards: nothing reads its console. This relies on run/flush_stdout_on_print in project.godot - a release export
+	   buffers stdout otherwise, and the lines reached OpenCAGE minutes late, or not at all when the viewer died. */
+	private static void ForwardUnlessHosted(string message, bool isError)
+	{
+		if (_embedded)
+			return;
+		ViewerLogBridge.TryForward(message, isError);
 	}
 
 	public static string LogFilePath

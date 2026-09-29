@@ -560,15 +560,45 @@ public partial class CommandsEditorConnection : Node3D
             foreach (EntityOp op in _entityOps)
                 if (op.Add) adds++;
             int removals = _entityOps.Count - adds;
+
+            /* Every op here is already in the script's copy (the packets are read into it as they arrive), so when the adds
+               would put back a large share of the scene one entity at a time, building the composite on screen again from
+               that copy gets to the same place about three times sooner (see IsIncrementalSpawnTooBig). */
+            if (adds > 0 && _scene.IsIncrementalSpawnTooBig(_entityOps.Where(o => o.Add).Select(o => (o.Composite, o.Entity)).ToList()))
+            {
+                ViewerLog.Print("Rebuilding the composite on screen rather than spawning " + adds + " entities (and removing " + removals + ") one at a time");
+                _entityOps.Clear();
+                _scene.RebuildLoadedComposite();
+                adds = removals = 0;
+            }
+
             if (adds > 1)
                 ViewerLog.Print("Adding " + adds + " entities");
             if (removals > 1)
                 ViewerLog.Print("Removing " + removals + " entities");
             //The highlights are rebuilt once for the whole batch, as for adds: once per removal it was 0.4 s each on Torrens
             bool removedAny = false;
+            System.Diagnostics.Stopwatch batchTime = System.Diagnostics.Stopwatch.StartNew();
+            bool focusReleased = false;
             while (_entityOps.Count > 0)
             {
                 EntityOp op = _entityOps.Dequeue();
+                LevelViewerSentMessages.PumpIfDue();
+                /* A batch that runs on keeps this thread from OpenCAGE's focus changes as a populate does, and OpenCAGE froze
+                   on one until it was done: hand focus back to it, as a populate does before it starts - once the batch
+                   has run a while, or before an add that brings a composite instance (one op, and it can be a whole level). */
+                if (!focusReleased && (batchTime.ElapsedMilliseconds > 250 || (op.Add && _scene.IsCompositeInstanceEntity(op.Composite, op.Entity))))
+                {
+                    focusReleased = true;
+                    try
+                    {
+                        LevelViewerEmbeddedFocus.ReleaseFocusToHostUnlessDragging();
+                    }
+                    catch (Exception e)
+                    {
+                        ViewerLog.PrintErr("[Focus] Could not hand focus back during a long entity batch: " + e.Message);
+                    }
+                }
                 if (op.Add)
                 {
                     if (adds == 1)
@@ -584,6 +614,9 @@ public partial class CommandsEditorConnection : Node3D
             }
             if (adds > 0 || removedAny)
                 _scene.RefreshEntityHighlights();
+            //Worth a line when it is long enough for OpenCAGE to have noticed: this is the viewer's busiest path outside a populate
+            if (batchTime.ElapsedMilliseconds > 1000)
+                ViewerLog.Print("Entity batch (" + adds + " added, " + removals + " removed) took " + (batchTime.ElapsedMilliseconds / 1000.0).ToString("0.0") + " s");
         }
 
         while (_removedComposites.Count > 0)
@@ -649,18 +682,28 @@ public partial class CommandsEditorConnection : Node3D
                 _renderFiltersChangedFunctionTypes = null;
             }
 
-            if (nestedVisibilityDirty)
+            /* A refresh that threw used to leave the dirty flag set: it ran again (in full - the changed set was already
+               taken) every physics tick for good, and the selection and focus below were never reached, so the viewport
+               stopped following the editor. Logged once and let go instead; the next filter change refreshes again. */
+            try
             {
-                _scene.RefreshNestedCompositeVisibility(
-                    nestedVisibilityPreviousCompositeId,
-                    PreviewVisibilitySettings.ActiveCompositeId);
-            }
-            else
-            {
-                _scene.RefreshRenderFilters(changedFunctionTypes);
-            }
+                if (nestedVisibilityDirty)
+                {
+                    _scene.RefreshNestedCompositeVisibility(
+                        nestedVisibilityPreviousCompositeId,
+                        PreviewVisibilitySettings.ActiveCompositeId);
+                }
+                else
+                {
+                    _scene.RefreshRenderFilters(changedFunctionTypes);
+                }
 
-            SyncTransformGizmoToSelection();
+                SyncTransformGizmoToSelection();
+            }
+            catch (Exception ex)
+            {
+                ViewerLog.PrintErr("[Viewer] Render filter refresh failed: " + ex);
+            }
 
             lock (_lock)
             {
@@ -2376,15 +2419,23 @@ public partial class CommandsEditorConnection : Node3D
         });
     }
 
+    /* Used for the populate start/finish packets, from the main thread. Waiting on SendMessageAsync right there could
+       never finish if any part of a send completed asynchronously: its continuation (and the one that releases
+       _sendLock, possibly for another send already in flight) is queued back to this main thread, which is the thread
+       doing the waiting - the viewer froze for good while OpenCAGE still saw it connected. The send now runs on the
+       pool (SendMessageAsync no longer resumes on the main thread either), and the wait is bounded: past it the
+       packet still goes out, just later. */
     private void SendMessageBlocking(Packet content)
     {
         try
         {
-            SendMessageAsync(content).GetAwaiter().GetResult();
+            Task send = Task.Run(() => SendMessageAsync(content));
+            if (!send.Wait(TimeSpan.FromSeconds(5)))
+                ViewerLog.PrintErr("Websocket send of " + content.packet_event + " still pending after 5 s; carrying on");
         }
         catch (Exception ex)
         {
-            ViewerLog.PrintErr("Failed to send websocket message: " + ex.Message);
+            ViewerLog.PrintErr("Failed to send websocket message: " + (ex is AggregateException agg && agg.InnerException != null ? agg.InnerException.Message : ex.Message));
         }
     }
 
@@ -2424,19 +2475,23 @@ public partial class CommandsEditorConnection : Node3D
         if (cts == null || _client == null || _client.State != WebSocketState.Open)
             return;
 
+        /* Serialised (and logged) here, on the caller's thread, before anything awaits: what follows may resume on the
+           pool, and a packet can hold the live lists the main thread goes on changing (the path, the selection). */
+        string json = JsonConvert.SerializeObject(content);
+        byte[] bytes = Encoding.UTF8.GetBytes(json);
+        WebSocketPacketLog.LogSent(content, json.Length);
+
         CancellationToken token = cts.Token;
-        await _sendLock.WaitAsync(token);
+        //Not resumed on the main thread: see SendMessageBlocking (callers' own awaits still come back to theirs)
+        await _sendLock.WaitAsync(token).ConfigureAwait(false);
         try
         {
             if (_client == null || _client.State != WebSocketState.Open)
                 return;
 
-            string json = JsonConvert.SerializeObject(content);
-            byte[] bytes = Encoding.UTF8.GetBytes(json);
-            WebSocketPacketLog.LogSent(content, json.Length);
             try
             {
-                await _client.SendAsync(new ArraySegment<byte>(bytes), WebSocketMessageType.Text, true, token);
+                await _client.SendAsync(new ArraySegment<byte>(bytes), WebSocketMessageType.Text, true, token).ConfigureAwait(false);
             }
             catch (Exception ex)
             {
@@ -3719,6 +3774,11 @@ public partial class CommandsEditorConnection : Node3D
                 : new List<uint>() { packet.entity };
             for (int i = 0; i < ids.Count; i++)
             {
+                /* An alias made here waits in this set for OpenCAGE's echo of its ENTITY_ADDED, which OpenCAGE never
+                   sends for a viewer-made alias - so once it was deleted, undoing the delete (a genuine ENTITY_ADDED
+                   for the same id) was swallowed as that echo and the alias never came back on screen. Gone is gone. */
+                _viewerOriginatedEntityAdds.Remove(ids[i]);
+
                 if (composite != null)
                 {
                     ShortGuid entityId = new ShortGuid(ids[i]);

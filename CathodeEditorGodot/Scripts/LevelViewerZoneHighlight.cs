@@ -108,6 +108,7 @@ public static class LevelViewerZoneHighlight
 
 			foreach (List<uint> path in zone.roots)
 			{
+				LevelViewerSentMessages.PumpIfDue();
 				Node3D node = scene.TryResolveInstancePathNode(path);
 				if (node == null)
 				{
@@ -154,6 +155,8 @@ public static class LevelViewerZoneHighlight
 
 		while (pending.Count != 0)
 		{
+			//Every node of the level: seconds on the big ones, with no sent message answered otherwise
+			LevelViewerSentMessages.PumpIfDue();
 			(Node node, Color colour, bool inZone) = pending.Pop();
 			if (node == null || !GodotObject.IsInstanceValid(node))
 				continue;
@@ -292,6 +295,20 @@ public static class LevelViewerZoneHighlight
 		if (root == null || !GodotObject.IsInstanceValid(root) || _tinted.Count == 0)
 			return;
 
+		/* The selection's own meshes, found by walking down from it and looked up here: a selection is usually one entity,
+		   and asking every tinted mesh whether the selection is its ancestor (an interop call each) was ~150k calls per
+		   selected node on a DLC map. A selection with more nodes under it than there are tinted meshes scans instead. */
+		List<MeshInstance3D> under = new List<MeshInstance3D>();
+		if (CollectMeshesUnder(root, under, _tinted.Count))
+		{
+			for (int i = 0; i < under.Count; i++)
+			{
+				if (_tinted.TryGetValue(under[i], out Tint found) && found.Applied)
+					Restore(under[i], found);
+			}
+			return;
+		}
+
 		foreach (KeyValuePair<MeshInstance3D, Tint> entry in _tinted)
 		{
 			MeshInstance3D mesh = entry.Key;
@@ -303,6 +320,30 @@ public static class LevelViewerZoneHighlight
 
 			Restore(mesh, entry.Value);
 		}
+	}
+
+	/// <summary>The meshes at and under <paramref name="root"/>; false (and a partial list) past <paramref name="limit"/> nodes.</summary>
+	private static bool CollectMeshesUnder(Node root, List<MeshInstance3D> into, int limit)
+	{
+		Stack<Node> pending = new Stack<Node>();
+		pending.Push(root);
+		int visited = 0;
+		while (pending.Count != 0)
+		{
+			Node node = pending.Pop();
+			if (node == null || !GodotObject.IsInstanceValid(node))
+				continue;
+			if (++visited > limit)
+				return false;
+
+			if (node is MeshInstance3D mesh)
+				into.Add(mesh);
+
+			int children = node.GetChildCount();
+			for (int i = 0; i < children; i++)
+				pending.Push(node.GetChild(i));
+		}
+		return true;
 	}
 
 	/// <summary>
@@ -324,17 +365,8 @@ public static class LevelViewerZoneHighlight
 		mesh.MaterialOverride = tint.Saved != null && GodotObject.IsInstanceValid(tint.Saved) ? tint.Saved : null;
 	}
 
-	private static bool IsMeshUnderSelection(MeshInstance3D mesh)
-	{
-		Node current = mesh;
-		while (current != null)
-		{
-			if (LevelViewerSelection.IsUnderSelection(current))
-				return true;
-
-			current = current.GetParent();
-		}
-
-		return false;
-	}
+	/* IsUnderSelection already walks the node's ancestors. This used to walk them too and ask it at every level - depth
+	   squared interop calls per mesh, for every tinted mesh on every selection change: seconds a click on a DLC map
+	   with Show Zones on, packets handled with no frame drawn in between. */
+	private static bool IsMeshUnderSelection(MeshInstance3D mesh) => LevelViewerSelection.IsUnderSelection(mesh);
 }

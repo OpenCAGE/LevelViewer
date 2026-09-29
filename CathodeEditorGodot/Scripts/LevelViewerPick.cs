@@ -380,11 +380,9 @@ public static class LevelViewerPick
 		if (!_registeredPickables.Add(meshInstance))
 			return;
 
-		if (!LevelViewerCompositeFocus.IsMeshVisuallyDimmed(meshInstance))
-		{
-			if (!meshInstance.IsInGroup(PickableGroupName))
-				meshInstance.AddToGroup(PickableGroupName);
-		}
+		/* No engine group any more: nothing read it (picking goes through the tables here), and Godot checks a group for
+		   the node with a linear scan before adding it - with a level's few hundred thousand meshes already in, an undo
+		   that put a composite back spent a third of its minutes there, per mesh. Removal scanned the same way. */
 		_pickOwners[meshInstance] = ownerNode;
 
 		if (!_pickablesByOwner.TryGetValue(ownerNode, out List<MeshInstance3D> meshes))
@@ -448,8 +446,6 @@ public static class LevelViewerPick
 		if (bounds.Size.LengthSquared() <= RayEpsilon)
 			return;
 
-		if (!visual.IsInGroup(PickableGroupName))
-			visual.AddToGroup(PickableGroupName);
 		_pickOwners[visual] = ownerEntityNode;
 	}
 
@@ -458,8 +454,6 @@ public static class LevelViewerPick
 		if (visual == null || !GodotObject.IsInstanceValid(visual))
 			return;
 
-		if (visual.IsInGroup(PickableGroupName))
-			visual.RemoveFromGroup(PickableGroupName);
 		_pickOwners.Remove(visual);
 	}
 
@@ -468,8 +462,6 @@ public static class LevelViewerPick
 		if (meshInstance == null || !GodotObject.IsInstanceValid(meshInstance))
 			return;
 
-		if (meshInstance.IsInGroup(PickableGroupName))
-			meshInstance.RemoveFromGroup(PickableGroupName);
 		_pickOwners.Remove(meshInstance);
 		_registeredPickables.Remove(meshInstance);
 

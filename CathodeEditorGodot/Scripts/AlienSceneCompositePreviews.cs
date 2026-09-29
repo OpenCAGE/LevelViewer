@@ -166,6 +166,7 @@ public partial class AlienScene
 		Transform3D viewCamera = camera != null ? camera.GlobalTransform : Transform3D.Identity;
 		bool sceneRebuilt = false;
 		bool abandoned = false;
+		bool stoppedForSync = false;
 
 		_previewBatchRunning = true;
 		LevelViewerRenderIdleThrottle.SetLoadActive(true);
@@ -235,8 +236,17 @@ public partial class AlienScene
 						ViewerLog.PrintErr("[Preview] The level changed under the batch after " + i + " of " + jobs.Length
 							+ " composite(s); the rest are marked failed and nothing is put back.");
 					}
+					/* A resource sync waits for the batch (see AdvanceResourceSync), and every packet from OpenCAGE waits
+					   behind the sync: the batch stops here rather than hold the editor off for the rest of it. The scene
+					   is still the batch's own, so it is put back as usual. */
+					if (!abandoned && !stoppedForSync && _pendingResourceSyncs.Count > 0)
+					{
+						stoppedForSync = true;
+						ViewerLog.PrintErr("[Preview] A resource sync is waiting: stopping the batch after " + i + " of " + jobs.Length
+							+ " composite(s); the rest are marked failed.");
+					}
 
-					if (abandoned)
+					if (abandoned || stoppedForSync)
 					{
 						status = CompositePreviewStatus.Failed;
 					}
@@ -337,8 +347,9 @@ public partial class AlienScene
 		{
 			_previewBatchRunning = false;
 			RestoreOverlaysAfterPreviews();
-			//A load or populate that arrived part way through showed the overlay for itself and hides it when it is done
-			if (_loadStep == LoadPipelineStep.None)
+			//A load or populate that arrived part way through showed the overlay for itself and hides it when it is done;
+			//a load that failed shows its message there, which stays until the next load
+			if (_loadStep == LoadPipelineStep.None && !_levelLoadFailedShown)
 				HideLoading();
 			LevelViewerRenderIdleThrottle.SetLoadActive(false);
 		}

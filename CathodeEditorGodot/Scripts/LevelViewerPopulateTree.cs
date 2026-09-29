@@ -45,6 +45,9 @@ public static class LevelViewerPopulateTree
 		public uint MappingScopeInstanceEntityId { get; }
 	}
 
+	//Asked for every entity of the plan from several threads at once: by name, each was a lookup under ShortGuidUtils' one lock
+	private static readonly ShortGuid PositionParameter = ShortGuidUtils.Generate("position");
+
 	public static bool TryGetSpawnTransform(Entity entity, out Vector3 position, out Vector3 rotationDegrees)
 	{
 		position = Vector3.Zero;
@@ -52,7 +55,7 @@ public static class LevelViewerPopulateTree
 		if (entity == null)
 			return false;
 
-		Parameter positionParam = entity.GetParameter("position");
+		Parameter positionParam = entity.GetParameter(PositionParameter);
 		if (positionParam?.content == null || positionParam.content.dataType != DataType.TRANSFORM)
 			return false;
 
@@ -76,100 +79,105 @@ public static class LevelViewerPopulateTree
 			return plan;
 
 		Stopwatch stopwatch = Stopwatch.StartNew();
-		List<Command> commands = CollectCompositeSubtree(
+		//Commands.GetComposite scans every composite, and the walk asks it for every instance entity it meets
+		Dictionary<ShortGuid, Composite> compositesById = new Dictionary<ShortGuid, Composite>(content.Level.Commands.Entries.Count);
+		foreach (Composite entry in content.Level.Commands.Entries)
+			if (entry != null && !compositesById.ContainsKey(entry.shortGUID))
+				compositesById[entry.shortGUID] = entry;
+		Segment segment = CollectSegment(
 			root,
-			content,
+			compositesById,
 			deferAliasProxy,
 			includeVariables,
 			plan.ModelReferences,
 			mappingScopeInstanceEntityId: 0);
-		plan.Commands.AddRange(commands);
+		plan.Commands.Capacity = segment.Total;
+		Flatten(segment, -1, plan.Commands);
 		stopwatch.Stop();
 		plan.CollectCpuMs = stopwatch.Elapsed.TotalMilliseconds;
 		return plan;
 	}
 
-	private static List<Command> CollectCompositeSubtree(
+	/* A composite's own entities, and the composites it instances, each attached to one of those entities. The plan used to
+	   be built by copying every child's finished list into its parent's, level by level: each command was copied once per
+	   level of nesting, with list growth on top - over a gigabyte of garbage for one populate of TECH_Hub (1.1M commands),
+	   a quarter of everything the viewer allocated and a steady stream of collections. Now the tree is kept as it is
+	   collected and written out once, in the same order with the same parent indexes. */
+	private sealed class Segment
+	{
+		public List<Command> Local;
+		public List<(int ParentLocalIndex, Segment Child)> Children;
+		public int Total;
+	}
+
+	private static void Flatten(Segment segment, int attachParentIndex, List<Command> output)
+	{
+		int start = output.Count;
+		for (int i = 0; i < segment.Local.Count; i++)
+		{
+			Command cmd = segment.Local[i];
+			output.Add(new Command(
+				attachParentIndex,
+				cmd.CompositeId,
+				cmd.Entity,
+				cmd.Position,
+				cmd.RotationDegrees,
+				cmd.HasTransform,
+				cmd.MappingScopeInstanceEntityId));
+		}
+
+		if (segment.Children == null)
+			return;
+		for (int i = 0; i < segment.Children.Count; i++)
+			Flatten(segment.Children[i].Child, start + segment.Children[i].ParentLocalIndex, output);
+	}
+
+	private static Segment CollectSegment(
 		Composite composite,
-		LevelContent content,
+		Dictionary<ShortGuid, Composite> compositesById,
 		bool deferAliasProxy,
 		bool includeVariables,
 		List<FunctionEntity> modelReferences,
 		uint mappingScopeInstanceEntityId)
 	{
-		Level level = content.Level;
 		List<Command> commands = new List<Command>();
 		List<(int ParentLocalIndex, Composite Nested, uint NestedMappingScopeInstanceEntityId)> nestedBranches =
 			new List<(int, Composite, uint)>();
 
-		CollectEntityList(
-			composite.functions,
-			composite,
-			level,
-			commands,
-			nestedBranches,
-			modelReferences,
-			mappingScopeInstanceEntityId);
+		CollectEntityList(composite.functions, composite, compositesById, commands, nestedBranches, modelReferences, mappingScopeInstanceEntityId);
 		if (includeVariables)
-		{
-			CollectEntityList(
-				composite.variables,
-				composite,
-				level,
-				commands,
-				nestedBranches,
-				modelReferences,
-				mappingScopeInstanceEntityId);
-		}
-
+			CollectEntityList(composite.variables, composite, compositesById, commands, nestedBranches, modelReferences, mappingScopeInstanceEntityId);
 		if (!deferAliasProxy)
 		{
-			CollectEntityList(
-				composite.aliases,
-				composite,
-				level,
-				commands,
-				nestedBranches,
-				modelReferences,
-				mappingScopeInstanceEntityId);
-			CollectEntityList(
-				composite.proxies,
-				composite,
-				level,
-				commands,
-				nestedBranches,
-				modelReferences,
-				mappingScopeInstanceEntityId);
+			CollectEntityList(composite.aliases, composite, compositesById, commands, nestedBranches, modelReferences, mappingScopeInstanceEntityId);
+			CollectEntityList(composite.proxies, composite, compositesById, commands, nestedBranches, modelReferences, mappingScopeInstanceEntityId);
 		}
 
+		Segment segment = new Segment { Local = commands, Total = commands.Count };
 		if (nestedBranches.Count == 0)
-			return commands;
+			return segment;
 
+		segment.Children = new List<(int, Segment)>(nestedBranches.Count);
 		if (nestedBranches.Count == 1)
 		{
 			(int parentLocalIndex, Composite nested, uint nestedScopeId) = nestedBranches[0];
-			List<Command> nestedCommands = CollectCompositeSubtree(
-				nested,
-				content,
-				deferAliasProxy,
-				includeVariables,
-				modelReferences,
-				nestedScopeId);
-			MergeSubtree(commands, nestedCommands, parentLocalIndex);
-			return commands;
+			Segment child = CollectSegment(nested, compositesById, deferAliasProxy, includeVariables, modelReferences, nestedScopeId);
+			segment.Children.Add((parentLocalIndex, child));
+			segment.Total += child.Total;
+			return segment;
 		}
 
 		(int ParentLocalIndex, Composite Nested, uint NestedMappingScopeInstanceEntityId)[] branches = nestedBranches.ToArray();
-		List<Command>[] nestedPlans = new List<Command>[branches.Length];
+		Segment[] nestedSegments = new Segment[branches.Length];
 		// Each branch collects into its own model-reference list; List<T>.Add is not thread-safe,
 		// so a shared list would corrupt/crash under Parallel.For on multi-core machines.
 		List<FunctionEntity>[] nestedModelReferences = new List<FunctionEntity>[branches.Length];
 		Parallel.For(0, branches.Length, i =>
 		{
 			List<FunctionEntity> branchModelReferences = new List<FunctionEntity>();
-			nestedPlans[i] = CollectCompositeSubtree(
+			nestedSegments[i] = CollectSegment(
 				branches[i].Nested,
-				content,
+				compositesById,
 				deferAliasProxy,
 				includeVariables,
 				branchModelReferences,
@@ -181,16 +189,16 @@ public static class LevelViewerPopulateTree
 		{
 			if (nestedModelReferences[i] != null)
 				modelReferences.AddRange(nestedModelReferences[i]);
-			MergeSubtree(commands, nestedPlans[i], branches[i].ParentLocalIndex);
+			segment.Children.Add((branches[i].ParentLocalIndex, nestedSegments[i]));
+			segment.Total += nestedSegments[i].Total;
 		}
-
-		return commands;
+		return segment;
 	}
 
 	private static void CollectEntityList(
 		IEnumerable<Entity> entities,
 		Composite composite,
-		Level level,
+		Dictionary<ShortGuid, Composite> compositesById,
 		List<Command> commands,
 		List<(int ParentLocalIndex, Composite Nested, uint NestedMappingScopeInstanceEntityId)> nestedBranches,
 		List<FunctionEntity> modelReferences,
@@ -222,30 +230,8 @@ public static class LevelViewerPopulateTree
 				continue;
 			}
 
-			Composite nested = level.Commands.GetComposite(function.function);
-			if (nested != null)
+			if (compositesById.TryGetValue(function.function, out Composite nested) && nested != null)
 				nestedBranches.Add((localIndex, nested, function.shortGUID.AsUInt32));
-		}
-	}
-
-	private static void MergeSubtree(List<Command> target, List<Command> subtree, int attachParentIndex)
-	{
-		if (subtree == null || subtree.Count == 0)
-			return;
-
-		int offset = target.Count;
-		for (int i = 0; i < subtree.Count; i++)
-		{
-			Command cmd = subtree[i];
-			int parentIndex = cmd.ParentIndex < 0 ? attachParentIndex : cmd.ParentIndex + offset;
-			target.Add(new Command(
-				parentIndex,
-				cmd.CompositeId,
-				cmd.Entity,
-				cmd.Position,
-				cmd.RotationDegrees,
-				cmd.HasTransform,
-				cmd.MappingScopeInstanceEntityId));
 		}
 	}
 }

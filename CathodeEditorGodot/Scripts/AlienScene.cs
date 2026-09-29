@@ -621,8 +621,11 @@ public partial class AlienScene : Node3D
 		//Its stars likewise: the plain sky until the next level brings its own
 		LevelViewerGalaxy.SetGalaxy(this, null);
 
+		/* Freed here, answering sent messages as it goes, as a populate frees the scene it replaces. Queued, the whole
+		   level was deleted in one go at the end of the frame (SceneTree's delete queue, nothing answered): 15 s when
+		   TECH_Hub made way for SCI_Hub. */
 		if (_parentNode != null && GodotObject.IsInstanceValid(_parentNode))
-			_parentNode.QueueFree();
+			FreeSceneAnsweringMessages(_parentNode);
 
 		_parentNode = null;
 
@@ -685,10 +688,37 @@ public partial class AlienScene : Node3D
 		_queuedLevelName = level;
 		_queuedLevelPath = pathToAI;
 
-		if (_loadStep != LoadPipelineStep.None)
+		//A level load already on its way reads the names just set
+		if (_loadStep == LoadPipelineStep.WaitUiBeforeLevelLoad || _loadStep == LoadPipelineStep.LoadLevel)
 			return;
 
+		/* A composite populate is on its way: the load used to be dropped here, so reloading the level to throw away
+		   unsaved changes while the viewer was still switching composites left the edited scene on screen for good
+		   (OpenCAGE's closing LEVEL_LOADED only forces a reload when the viewer was never asked). Run it after. */
+		if (_loadStep != LoadPipelineStep.None)
+		{
+			_levelLoadAfterPopulate = true;
+			return;
+		}
+
 		BeginWaitUiBeforeLevelLoad("Loading level " + level + "...");
+	}
+
+	private bool _levelLoadAfterPopulate;
+	//A switch replaced a pending forced rebuild of the composite on screen; switching straight back must still rebuild it
+	private bool _pendingRebuildDisplaced;
+	//The overlay is saying a level failed to load: nothing that finishes afterwards takes it down (the preview batch did)
+	private bool _levelLoadFailedShown;
+
+	/// <summary>A level load asked for while a composite populate was on its way: start it now that the populate is over.</summary>
+	private bool RunLevelLoadDeferredByPopulate()
+	{
+		if (!_levelLoadAfterPopulate)
+			return false;
+		_levelLoadAfterPopulate = false;
+		string level = _queuedLevelName, path = _queuedLevelPath;
+		Callable.From(() => QueueLoadLevel(level, path)).CallDeferred();
+		return true;
 	}
 
 	/// <summary>Shows the loading overlay, waits for UI redraw, then builds the composite scene.</summary>
@@ -728,9 +758,37 @@ public partial class AlienScene : Node3D
 			_forcedRepopulate = ShortGuid.Invalid;
 			return;
 		}
+		/* Two switches inside the couple of frames a populate waits before it runs (quick clicks in the browser, or a
+		   backlog handled in one tick after a busy spell): the first used to win, and the viewer went on showing a
+		   composite OpenCAGE had already left until the next switch. The latest now wins - or, when the latest is
+		   the composite already on screen, the pending switch is called off. */
+		bool pending = _loadStep == LoadPipelineStep.WaitUiBeforeCompositePopulate;
 		if (!force && _loadedComposite != null && _loadedComposite.shortGUID == guid)
 		{
+			if (pending && _queuedComposite != null && _queuedComposite.shortGUID != guid)
+			{
+				//Back where it started - unless what the switch displaced was a rebuild of this one, which is still owed
+				if (_pendingRebuildDisplaced)
+				{
+					_pendingRebuildDisplaced = false;
+					_queuedComposite = _loadedComposite;
+					return; //that populate reports itself
+				}
+				_queuedComposite = null;
+			}
 			ViewerPopulateBridge.NotifySkipped();
+			return;
+		}
+		if (pending)
+		{
+			//A pending populate of the composite on screen can only be a forced rebuild
+			if (_queuedComposite != null && _loadedComposite != null && _queuedComposite == _loadedComposite && comp != _loadedComposite)
+				_pendingRebuildDisplaced = true;
+			//A rebuild asked for the composite being switched away from would otherwise run after this populate, and take
+			//the viewer back there
+			if (_forcedRepopulate != guid)
+				_forcedRepopulate = ShortGuid.Invalid;
+			_queuedComposite = comp;
 			return;
 		}
 		if (_loadStep != LoadPipelineStep.None)
@@ -796,6 +854,52 @@ public partial class AlienScene : Node3D
 		}
 
 		ViewerLog.Print("Loading level " + _queuedLevelName + "...");
+		ReleaseFocusForLongWork();
+		_levelLoadAfterPopulate = false; //this is that load
+		_levelLoadFailedShown = false;
+		_pendingRebuildDisplaced = false; //the level's populate replaces whatever was on screen
+
+		/* Nothing here used to catch: a level that failed to read (a file missing or locked by a save, a table that
+		   would not parse) left the pipeline on LoadLevel for good - every later load and populate returned early, the
+		   loading overlay stayed up and OpenCAGE's "populating" marquee waited forever. Now it ends the step, says so,
+		   and the next LEVEL_LOADED can try again. */
+		try
+		{
+			ExecuteLoadLevelCore();
+		}
+		catch (Exception e)
+		{
+			FailLevelLoad(e);
+		}
+	}
+
+	/* Nothing half-loaded is kept: a resource snapshot held for this level would otherwise keep IsResourceSyncBusy - and
+	   with it every packet behind it - waiting for content that never arrives. The level name is forgotten so the next
+	   LEVEL_LOADED for it reads it again. OpenCAGE gets a FINISHED so its load progress closes. */
+	private void FailLevelLoad(Exception e)
+	{
+		string failed = _queuedLevelName;
+		ViewerLog.PrintErr("[Viewer] Loading level " + failed + " failed: " + e);
+		_contentGeneration++;
+		_content.Reset();
+		_loadedComposite = null;
+		_queuedComposite = null;
+		_queuedCompositeGuid = ShortGuid.Invalid;
+		_queuedLevelName = "";
+		_queuedLevelPath = "";
+		//Rebuilds asked for in the level that did not load would otherwise run after the next one's populate
+		_forcedRepopulate = ShortGuid.Invalid;
+		_pendingRebuildDisplaced = false;
+		ResetResourceSyncState();
+		_loadStep = LoadPipelineStep.None;
+		ViewerPopulateBridge.NotifySkipped();
+		_levelLoadFailedShown = true;
+		ShowLoading("Could not load " + failed + " - see the log.");
+		UpdateLoadPipelineProcessing();
+	}
+
+	private void ExecuteLoadLevelCore()
+	{
 		ResetLevel();
 
 		_levelName = _queuedLevelName;
@@ -819,7 +923,8 @@ public partial class AlienScene : Node3D
 		{
 			PreviewVisibilitySettings.LevelRootCompositeId = _content.Level.Commands.EntryPoints[0].shortGUID.AsUInt32;
 			Composite levelRoot = _content.Level.Commands.EntryPoints[0];
-			if (_queuedCompositeGuid == ShortGuid.Invalid)
+			//Also when the composite asked for belongs to another level (a load that waited behind a populate)
+			if (_queuedCompositeGuid == ShortGuid.Invalid || _content.Level.Commands.GetComposite(_queuedCompositeGuid) == null)
 				_queuedCompositeGuid = levelRoot.shortGUID;
 		}
 
@@ -839,19 +944,46 @@ public partial class AlienScene : Node3D
 		UpdateLoadPipelineProcessing();
 	}
 
+	/* This window is parented into OpenCAGE's, so the two UI threads share keyboard focus: while it sits here any focus
+	   change OpenCAGE makes (clicking the inspector, minimising, switching away) waits for this thread to take the focus
+	   messages - and a load or populate keeps it for seconds, a minute on the big levels, freezing OpenCAGE for as long.
+	   Handing focus back first (as the render-idle hand-off does) leaves OpenCAGE nothing to wait for; a click on the
+	   viewport takes it again afterwards. */
+	private static void ReleaseFocusForLongWork()
+	{
+		try
+		{
+			LevelViewerEmbeddedFocus.ReleaseFocusAndCaptureToHost();
+		}
+		catch (Exception e)
+		{
+			ViewerLog.PrintErr("[Focus] Could not hand focus back before a populate: " + e.Message);
+		}
+	}
+
 	private void ExecutePopulateComposite()
 	{
 		if (_loadStep != LoadPipelineStep.PopulateComposite || _queuedComposite == null)
 		{
+			//Called off while it waited (see QueuePopulateComposite): take the overlay it put up down again
 			_loadStep = LoadPipelineStep.None;
+			_pendingRebuildDisplaced = false;
+			Callable.From(HideLoading).CallDeferred();
+			UpdateLoadPipelineProcessing();
+			/* A forced rebuild asked for while it waited was of the composite it was switching to, which has just been
+			   switched away from: left set, it fired after the next populate and took the viewer back there. */
+			_forcedRepopulate = ShortGuid.Invalid;
+			RunLevelLoadDeferredByPopulate();
 			return;
 		}
 
 		Composite comp = _queuedComposite;
 		_queuedComposite = null;
 		_queuedCompositeGuid = ShortGuid.Invalid;
+		_pendingRebuildDisplaced = false; //whatever it was owed, this populate replaces the scene
 
 		ViewerPopulateBridge.NotifyStarted(GetPopulateDisplayLabel(comp));
+		ReleaseFocusForLongWork();
 
 		_isBulkPopulating = true;
 		_deferMeshTreeActivation = true;
@@ -871,6 +1003,13 @@ public partial class AlienScene : Node3D
 		UpdateLoadPipelineProcessing();
 		CompletePopulate();
 
+		//A level load that arrived while this populate was on its way: it rebuilds everything, forced populate included
+		if (RunLevelLoadDeferredByPopulate())
+		{
+			_forcedRepopulate = ShortGuid.Invalid;
+			return;
+		}
+
 		//A forced populate that arrived while this one was on its way: now that this one is done and
 		//reported, build the composite again from what the script holds now (see QueuePopulateComposite)
 		if (_forcedRepopulate != ShortGuid.Invalid)
@@ -888,19 +1027,66 @@ public partial class AlienScene : Node3D
 		_deferMeshTreeActivation = false;
 		_isBulkPopulating = false;
 
-		// Filters are often applied from OpenCAGE before the entity tree exists; refresh now that spawn finished.
-		RefreshRenderFilters(null);
-		//Same for the scene geometry categories: a filter left on from the last session arrives
-		//before the meshes exist, so it has to be reapplied once they do.
-		RefreshSceneGeometryFilters();
-		RefreshCompositeFocus();
-		//The zone table is normally here well before the nodes its roots name are
-		RefreshZoneOverlay();
+		/* Whatever these throw, OpenCAGE still hears the populate finished: without it the populating marquee, and every
+		   focus hand-over held back while the viewer is busy, waited for good. */
+		try
+		{
+			// Filters are often applied from OpenCAGE before the entity tree exists; refresh now that spawn finished.
+			RefreshRenderFilters(null);
+			//Same for the scene geometry categories: a filter left on from the last session arrives
+			//before the meshes exist, so it has to be reapplied once they do.
+			RefreshSceneGeometryFilters();
+			RefreshCompositeFocus();
+			//The zone table is normally here well before the nodes its roots name are
+			RefreshZoneOverlay();
 
-		OnLoaded?.Invoke();
-		ViewerPopulateBridge.NotifyFinished();
-		Callable.From(HideLoading).CallDeferred();
-		UpdateLoadPipelineProcessing();
+			OnLoaded?.Invoke();
+		}
+		catch (Exception e)
+		{
+			ViewerLog.PrintErr("[Viewer] Finishing the populate failed: " + e);
+		}
+		finally
+		{
+			ViewerPopulateBridge.NotifyFinished();
+			Callable.From(HideLoading).CallDeferred();
+			UpdateLoadPipelineProcessing();
+		}
+	}
+
+	/* The scene being replaced, freed children first, answering OpenCAGE's sent messages as it goes. QueueFree left it to Godot at
+	   the end of the frame, in one go: a million nodes on TECH_Hub, 7 s after the populate had reported finished in which the
+	   viewer answered nothing - and OpenCAGE froze on any focus or activation change (a panel floated or slid out, the window
+	   brought forward). The new scene was not drawn until that free was over either way; it is now done first, under the
+	   loading screen, and the memory is back before the new scene takes its own. Each node's children are taken in one call:
+	   asking for the last child after every removal made Godot rebuild the parent's child cache each time. */
+	private static void FreeSceneAnsweringMessages(Node root)
+	{
+		System.Diagnostics.Stopwatch timer = System.Diagnostics.Stopwatch.StartNew();
+		int freed = 0;
+		Stack<(Node Node, bool Expanded)> stack = new Stack<(Node, bool)>();
+		stack.Push((root, false));
+		while (stack.Count > 0)
+		{
+			LevelViewerSentMessages.PumpIfDue();
+			(Node node, bool expanded) = stack.Pop();
+			if (node == null || !GodotObject.IsInstanceValid(node))
+				continue;
+
+			if (!expanded)
+			{
+				stack.Push((node, true));
+				foreach (Node child in node.GetChildren())
+					stack.Push((child, false));
+				continue;
+			}
+
+			//Its children are gone; anything left (an internal child) goes with it
+			node.Free();
+			freed++;
+		}
+		if (timer.ElapsedMilliseconds > 500)
+			ViewerLog.Print("Freed the previous scene (" + freed + " nodes) in " + (timer.ElapsedMilliseconds / 1000.0).ToString("0.0") + " s");
 	}
 
 	private static string GetPopulateDisplayLabel(Composite comp)
@@ -947,7 +1133,12 @@ public partial class AlienScene : Node3D
 		}
 
 		if (_parentNode != null && GodotObject.IsInstanceValid(_parentNode))
-			_parentNode.QueueFree();
+		{
+			if (_previewBatchPopulate)
+				_parentNode.QueueFree();
+			else
+				FreeSceneAnsweringMessages(_parentNode);
+		}
 		/* The old scene's meshes go with it. A bulk-spawned mesh has no TreeExited hook to take itself out
 		   (see SpawnRenderable), so until now they sat here as dead wrappers until the next level load, and
 		   every filter pass and mesh count walked them - a preview batch replaces the scene a thousand times. */
@@ -1053,8 +1244,13 @@ public partial class AlienScene : Node3D
 			return;
 
 		ViewerLog.Print("Spawned " + _modelReferenceMeshes.Count + " model-reference meshes.");
-		ReleaseCathodeBinarySourceData();
-		CollectReleasedSourceData();
+		/* The forced collection is for big dead buffers: the paks a level load or a restore read whole, and the binaries let
+		   go of here. A switch to a composite whose meshes were all built already has neither, and paid two blocking full
+		   collections anyway - 0.5-0.8 s a populate with the viewer answering nothing, on TECH_Hub. */
+		long released = ReleaseCathodeBinarySourceData();
+		if (released >= ForcedCollectMinReleasedBytes || _restoreReadWholePak)
+			CollectReleasedSourceData();
+		_restoreReadWholePak = false;
 		ViewerLog.Print(
 			"Scene resources: "
 			+ _modelReferenceMeshes.Count + " mesh instances, "
@@ -1071,6 +1267,11 @@ public partial class AlienScene : Node3D
 	/// 412 MB dead arrays still resident 45 s after populate, 0.8 GB of the process's 5.4 GB. A blocking,
 	/// compacting collection here, once, at the point the scene is built, returns them to the OS.
 	/// </summary>
+	private const long ForcedCollectMinReleasedBytes = 64L << 20;
+
+	//Set when a restore read a whole pak to get at a few entries: that buffer is big and dead by the time the populate ends
+	private bool _restoreReadWholePak;
+
 	private static void CollectReleasedSourceData()
 	{
 		System.Runtime.GCSettings.LargeObjectHeapCompactionMode = System.Runtime.GCLargeObjectHeapCompactionMode.CompactOnce;
@@ -1120,6 +1321,7 @@ public partial class AlienScene : Node3D
 		{
 			for (int i = 0; i < _bulkMeshSpawnJobs.Count; i++)
 			{
+				LevelViewerSentMessages.PumpIfDue();
 				BulkMeshSpawnJob job = _bulkMeshSpawnJobs[i];
 				if (job.RenderTarget == null || !GodotObject.IsInstanceValid(job.RenderTarget))
 					continue;
@@ -1145,6 +1347,23 @@ public partial class AlienScene : Node3D
 			_deferBulkPickRegistration = false;
 		}
 
+		/* The content goes to its focus point now, before the meshes just spawned are in the renderer's culling BVH (they
+		   join it when it next draws). Moved there by the camera's framing a frame later instead, every mesh in the level
+		   was taken out of that BVH and put back one at a time - DynamicBVH::update, 11-16 s with nothing answered after
+		   each SCI_AndroidLab populate (76k meshes). The framing then finds it done. */
+		if (!_previewBatchPopulate)
+		{
+			//Nothing here may stop the meshes being registered and shown below
+			try
+			{
+				RecenterContentOrigin();
+			}
+			catch (Exception e)
+			{
+				ViewerLog.PrintErr("Could not centre the content on its focus point: " + e.Message);
+			}
+		}
+
 		RegisterBulkMeshPickables();
 
 		ActivateDeferredMeshes();
@@ -1156,6 +1375,7 @@ public partial class AlienScene : Node3D
 	{
 		for (int i = 0; i < _bulkPickableMeshes.Count; i++)
 		{
+			LevelViewerSentMessages.PumpIfDue();
 			(MeshInstance3D mesh, Node3D owner) = _bulkPickableMeshes[i];
 			if (mesh == null || !GodotObject.IsInstanceValid(mesh))
 				continue;
@@ -1178,19 +1398,18 @@ public partial class AlienScene : Node3D
 		_deferredPickOwners.Clear();
 	}
 
-	//Passing the group name as a string interns a fresh StringName on every call, and activating a
-	//level's meshes asks twice per mesh.
-	private static readonly StringName ModelReferenceRenderableGroup = new StringName("model_reference_renderable");
-
+	/* The meshes used to join a "model_reference_renderable" group here that nothing ever read. Godot keeps a
+	   group's members in a vector and scans it on every add and every tree exit, so 80k meshes cost O(n^2) twice:
+	   seconds here (TECH_Hub, no messages answered - OpenCAGE froze on any focus change) and more again when the
+	   scene was freed. _modelReferenceMeshes is the list of them. */
 	private void ActivateDeferredMeshes()
 	{
 		foreach (MeshInstance3D mesh in _modelReferenceMeshes.Keys)
 		{
+			LevelViewerSentMessages.PumpIfDue();
 			if (mesh == null || !GodotObject.IsInstanceValid(mesh))
 				continue;
 
-			if (!mesh.IsInGroup(ModelReferenceRenderableGroup))
-				mesh.AddToGroup(ModelReferenceRenderableGroup);
 			mesh.Visible = ModelReferencesShown;
 			MeshInstance3D overlay = FindWireframeOverlay(mesh);
 			if (overlay != null)
@@ -1233,10 +1452,17 @@ public partial class AlienScene : Node3D
 		if (!hasExplicitFocus)
 			return;
 
-		if (_contentOrigin.DistanceSquaredTo(focusPoint) < 0.25f)
+		/* The focus point is where it is on screen, with the content already moved by -_contentOrigin: in the content it is
+		   that plus the origin. Compared as it was (on screen against the origin), a scene already centred read as off by
+		   the whole origin and was moved back, and the next call moved it again - each move every mesh in the level. */
+		Vector3 contentFocusPoint = focusPoint + _contentOrigin;
+		if (_contentOrigin.DistanceSquaredTo(contentFocusPoint) < 0.25f)
 			return;
 
-		_contentOrigin = focusPoint;
+		//Worth a line: once the meshes are drawn, a move is every one of them taken out of the renderer's BVH and put back
+		ViewerLog.Print("Recentred the content by " + _contentOrigin.DistanceTo(contentFocusPoint).ToString("0.0") + " m ("
+			+ _modelReferenceMeshes.Count + " meshes).");
+		_contentOrigin = contentFocusPoint;
 		_parentNode.Position = -_contentOrigin;
 		LevelViewerPick.InvalidateAllPickBounds();
 	}
@@ -1557,6 +1783,8 @@ public partial class AlienScene : Node3D
 		LevelViewerPopulateTree.Command? planCommand,
 		ref bool addedPreview)
 	{
+		//Every spawn, populate or incremental, goes through here: long runs of them still answer OpenCAGE (see LevelViewerSentMessages)
+		LevelViewerSentMessages.PumpIfDue();
 		if (_isBulkPopulating && !_wiringCompositeLinks
 			&& (entity.variant == EntityVariant.ALIAS || entity.variant == EntityVariant.PROXY))
 		{
@@ -1755,9 +1983,23 @@ public partial class AlienScene : Node3D
 				return;
 
 			PrewarmForIncrementalSpawn(c, e);
+
+			/* Not under an instance that already has it. Every packet of a batch goes into the script's copy before any of
+			   the batch is spawned, so an instance of this composite spawned earlier in the same batch (an undo putting a
+			   composite instance back, then the entities it gained) was built with this entity in it already - and
+			   spawning it again drew it twice, whole subtree and all. */
+			HashSet<Node> alreadyUnder = null;
+			if (TryGetCachedEntityNodes(composite, entity, out List<Node3D> existing))
+			{
+				alreadyUnder = new HashSet<Node>();
+				foreach (Node3D node in existing)
+					if (node != null && GodotObject.IsInstanceValid(node))
+						alreadyUnder.Add(node.GetParent());
+			}
 			foreach (Node3D compositeInstance in _compositeNodes[composite].ToArray())
 			{
-				if (compositeInstance != null && GodotObject.IsInstanceValid(compositeInstance))
+				if (compositeInstance != null && GodotObject.IsInstanceValid(compositeInstance)
+					&& (alreadyUnder == null || !alreadyUnder.Contains(compositeInstance)))
 					AddEntity(c, e, compositeInstance);
 			}
 
@@ -1769,6 +2011,67 @@ public partial class AlienScene : Node3D
 				LevelViewerPick.InvalidateScopedPickables();
 			}
 		}
+	}
+
+	/// <summary>
+	/// Whether spawning these adds one at a time would put back so much of what is on screen that rebuilding the composite
+	/// is quicker. Measured on HAB_ShoppingCentre: undoing a Create Composite that had taken in the environment instance
+	/// spawned it back entity by entity in 26-33 s, where a populate of the whole level takes 9-12 s (it plans, prewarms and
+	/// spawns in bulk) - and shows OpenCAGE the loading screen and progress while it does.
+	/// </summary>
+	public bool IsIncrementalSpawnTooBig(IEnumerable<(ShortGuid composite, ShortGuid entity)> adds)
+	{
+		if (_loadedComposite == null || _content?.Level?.Commands == null || _loadStep != LoadPipelineStep.None)
+			return false;
+
+		Dictionary<ShortGuid, Composite> composites = new Dictionary<ShortGuid, Composite>();
+		foreach (Composite composite in _content.Level.Commands.Entries)
+			if (composite != null)
+				composites[composite.shortGUID] = composite;
+		Dictionary<Composite, long> memo = new Dictionary<Composite, long>();
+
+		long adding = 0;
+		foreach ((ShortGuid compositeId, ShortGuid entityId) in adds)
+		{
+			if (!_compositeNodes.TryGetValue(compositeId, out List<Node3D> instances) || instances.Count == 0)
+				continue;
+			if (!composites.TryGetValue(compositeId, out Composite owner)
+				|| !(owner.GetEntityByID(entityId) is FunctionEntity function) || function.function.IsFunctionType)
+				continue;
+			composites.TryGetValue(function.function, out Composite instanced);
+			adding += (1 + CountSubtreeFunctions(instanced, composites, memo, 0)) * instances.Count;
+		}
+		if (adding < MinRebuildInsteadOfSpawn)
+			return false;
+		long onScreen = CountSubtreeFunctions(_loadedComposite, composites, memo, 0);
+		return adding * 3 > onScreen;
+	}
+
+	/// <summary>An entity of a composite on screen that instances another composite: spawning it spawns all of that one.</summary>
+	public bool IsCompositeInstanceEntity(ShortGuid composite, ShortGuid entity)
+	{
+		if (!_compositeNodes.ContainsKey(composite) || _content?.Level?.Commands == null)
+			return false;
+		Composite owner = _content.Level.Commands.GetComposite(composite);
+		return owner?.GetEntityByID(entity) is FunctionEntity function && !function.function.IsFunctionType;
+	}
+
+	//Below this many functions the entity-by-entity spawn is quick enough whatever share of the scene it is
+	private const long MinRebuildInsteadOfSpawn = 2000;
+
+	private static long CountSubtreeFunctions(Composite composite, Dictionary<ShortGuid, Composite> composites, Dictionary<Composite, long> memo, int depth)
+	{
+		if (composite == null || depth > 64)
+			return 0;
+		if (memo.TryGetValue(composite, out long count))
+			return count;
+		memo[composite] = 0; //a composite that reaches itself counts once
+		count = composite.functions.Count;
+		foreach (FunctionEntity function in composite.functions)
+			if (!function.function.IsFunctionType && composites.TryGetValue(function.function, out Composite instanced))
+				count += CountSubtreeFunctions(instanced, composites, memo, depth + 1);
+		memo[composite] = count;
+		return count;
 	}
 
 	/// <summary>
@@ -1852,7 +2155,9 @@ public partial class AlienScene : Node3D
 		RestoreReleasedSourceData(plan);
 		LevelViewerPopulatePrewarm.Result result = LevelViewerPopulatePrewarm.Execute(plan, _content.Level);
 		FinalizePrewarmGodotResources(result, plan);
-		CollectReleasedSourceData(); //the restore re-read a whole pak to get at a few entries
+		if (_restoreReadWholePak)
+			CollectReleasedSourceData(); //the restore re-read a whole pak to get at a few entries
+		_restoreReadWholePak = false;
 		ViewerLog.Print("Prewarmed " + plan.MeshWriteIndices.Count + " mesh(es) and " + plan.Textures.Count
 			+ " texture(s) for " + what + ".");
 		return true;
@@ -3556,6 +3861,8 @@ public partial class AlienScene : Node3D
 
 		foreach (KeyValuePair<Node3D, Entity> entry in _nodeEntities)
 		{
+			//Thousands of previews built at the end of a populate: seconds without a sent message answered otherwise
+			LevelViewerSentMessages.PumpIfDue();
 			Node3D entityNode = entry.Key;
 			if (entityNode == null || !GodotObject.IsInstanceValid(entityNode))
 				continue;
@@ -3879,6 +4186,7 @@ public partial class AlienScene : Node3D
 
 		for (int i = 0; i < _cachedFunctionEntityPreviews.Length; i++)
 		{
+			LevelViewerSentMessages.PumpIfDue();
 			FunctionEntityPreview preview = _cachedFunctionEntityPreviews[i];
 			if (preview == null || !GodotObject.IsInstanceValid(preview))
 			{
@@ -4249,13 +4557,39 @@ public partial class AlienScene : Node3D
 
 		if (_compositeNodes.TryGetValue(composite, out List<Node3D> compositeInstances))
 		{
+			/* The (composite, entity) map names the entity's node under each instance straight away. Every child of every
+			   instance was walked instead - thousands of them on SCI_AndroidLab's environment, per removal: an undo moving
+			   ~800 entities out of it took 87 s. An instance the map has nothing under is still searched child by child
+			   (a node that never made it into the map, see below). */
+			Dictionary<Node, List<Node>> mappedByInstance = null;
+			if (TryGetCachedEntityNodes(composite, entity, out List<Node3D> mappedNodes))
+			{
+				mappedByInstance = new Dictionary<Node, List<Node>>();
+				foreach (Node3D mapped in mappedNodes)
+				{
+					if (mapped == null || !GodotObject.IsInstanceValid(mapped))
+						continue;
+					Node instance = mapped.GetParent();
+					if (instance == null)
+						continue;
+					if (!mappedByInstance.TryGetValue(instance, out List<Node> underInstance))
+						mappedByInstance[instance] = underInstance = new List<Node>();
+					underInstance.Add(mapped);
+				}
+			}
+
 			// Snapshot: QueueFree / restore-pointed below can mutate the tree and this list.
 			foreach (Node3D compositeInstance in compositeInstances.ToArray())
 			{
+				//One entity of a composite placed 192 times was 1.8 s of this with nothing answered (the adds already pump)
+				LevelViewerSentMessages.PumpIfDue();
 				if (compositeInstance == null || !GodotObject.IsInstanceValid(compositeInstance))
 					continue;
 
-				foreach (Node child in compositeInstance.GetChildren().ToArray())
+				IEnumerable<Node> candidates = mappedByInstance != null && mappedByInstance.TryGetValue(compositeInstance, out List<Node> mappedHere)
+					? mappedHere
+					: compositeInstance.GetChildren().ToArray();
+				foreach (Node child in candidates)
 				{
 					if (child == null || !GodotObject.IsInstanceValid(child))
 						continue;
@@ -4431,6 +4765,7 @@ public partial class AlienScene : Node3D
 
 		foreach (KeyValuePair<MeshInstance3D, SceneFilterMesh> entry in _sceneFilterMeshes.ToArray())
 		{
+			LevelViewerSentMessages.PumpIfDue();
 			MeshInstance3D mesh = entry.Key;
 			if (mesh == null || !GodotObject.IsInstanceValid(mesh))
 			{
@@ -4487,8 +4822,6 @@ public partial class AlienScene : Node3D
 		Entity fallbackEntity = fallbackParameterEntity ?? modelReferenceEntity;
 		LevelViewerMeshUtil.ConfigureMeshInstance(meshInstance);
 		if (!_bulkMeshSpawning)
-			meshInstance.AddToGroup(ModelReferenceRenderableGroup);
-		if (!_bulkMeshSpawning)
 			meshInstance.TreeExited += () => { _modelReferenceMeshes.Remove(meshInstance); _meshBindings.Remove(meshInstance); };
 		_modelReferenceMeshes[meshInstance] = material;
 		meshInstance.MaterialOverride = GetSolidMaterialForModelReference(
@@ -4540,6 +4873,8 @@ public partial class AlienScene : Node3D
 		int end = Mathf.Min(_largeScenePolicyIndex + LargeScenePolicyBatchSize, _largeScenePolicyMeshes.Length);
 		for (int i = _largeScenePolicyIndex; i < end; i++)
 		{
+			//A batch was 0.7 s on TECH_Hub
+			LevelViewerSentMessages.PumpIfDue();
 			MeshInstance3D mesh = _largeScenePolicyMeshes[i];
 			if (mesh == null || !GodotObject.IsInstanceValid(mesh))
 				continue;
@@ -5331,15 +5666,23 @@ public partial class AlienScene : Node3D
 	private static bool HasTextureContent(Textures.TEX4.Texture part) =>
 		part?.Content != null && part.Content.Length > 0;
 
-	private static void ReleaseTex4SourceContent(Textures.TEX4 tex)
+	private static long ReleaseTex4SourceContent(Textures.TEX4 tex)
 	{
 		if (tex == null)
-			return;
+			return 0;
 
+		long released = 0;
 		if (tex.TextureStreamed != null)
+		{
+			released += tex.TextureStreamed.Content?.Length ?? 0;
 			tex.TextureStreamed.Content = null;
+		}
 		if (tex.TexturePersistent != null)
+		{
+			released += tex.TexturePersistent.Content?.Length ?? 0;
 			tex.TexturePersistent.Content = null;
+		}
+		return released;
 	}
 
 	/// <summary>
@@ -5358,16 +5701,38 @@ public partial class AlienScene : Node3D
 		RestoreReleasedTextureData(plan);
 	}
 
+	/* Submeshes this file cannot give back - it has no data for them (the "non-parsed model" ones), or the table has drifted
+	   from it since an import: each populate that planned one read the whole model pak again and restored nothing -
+	   hundreds of MB read and dropped, every time (stress runs: "Restored 0/1", "0/15" over and over). Remembered for the
+	   file and table they were looked up in; a synced snapshot is a new file, a level load a new table, and a save that
+	   rewrites the level pak in place a new write time. */
+	private readonly HashSet<int> _modelWriteIndicesNotInFile = new HashSet<int>();
+	private string _modelWriteIndicesNotInFilePath;
+	private DateTime _modelWriteIndicesNotInFileWriteTime;
+	private Models _modelWriteIndicesNotInFileTable;
+
 	private void RestoreReleasedModelData(LevelViewerPopulatePrewarm.Plan plan)
 	{
 		Models models = _content?.Level?.Models;
 		if (models == null)
 			return;
 
+		string sourcePath = _modelsRestorePath ?? models.Filepath; //a synced snapshot, once there is one: the level pak lacks what it brought
+		DateTime writeTime = DateTime.MinValue;
+		try { writeTime = File.GetLastWriteTimeUtc(sourcePath); } catch { }
+		if (!ReferenceEquals(_modelWriteIndicesNotInFileTable, models) || _modelWriteIndicesNotInFilePath != sourcePath
+			|| _modelWriteIndicesNotInFileWriteTime != writeTime)
+		{
+			_modelWriteIndicesNotInFile.Clear();
+			_modelWriteIndicesNotInFileTable = models;
+			_modelWriteIndicesNotInFilePath = sourcePath;
+			_modelWriteIndicesNotInFileWriteTime = writeTime;
+		}
+
 		List<int> missing = null;
 		foreach (int writeIndex in plan.MeshWriteIndices)
 		{
-			if (_modelMeshesByWriteIndex.ContainsKey(writeIndex))
+			if (_modelMeshesByWriteIndex.ContainsKey(writeIndex) || _modelWriteIndicesNotInFile.Contains(writeIndex))
 				continue;
 
 			Models.CS2.Component.LOD.Submesh submesh = models.GetAtWriteIndex(writeIndex);
@@ -5380,8 +5745,9 @@ public partial class AlienScene : Node3D
 
 		try
 		{
+			_restoreReadWholePak = true;
 			Models fresh = new Models(
-				_modelsRestorePath ?? models.Filepath, //a synced snapshot, once there is one: the level pak lacks what it brought
+				sourcePath,
 				_content.Level.Materials,
 				_content.Level.WeightedCollisions,
 				_content.Level.MorphTargetDB);
@@ -5390,13 +5756,19 @@ public partial class AlienScene : Node3D
 			{
 				Models.CS2.Component.LOD.Submesh target = models.GetAtWriteIndex(writeIndex);
 				Models.CS2.Component.LOD.Submesh source = fresh.GetAtWriteIndex(writeIndex);
+				if (target != null && fresh.Loaded && (source?.Data == null || source.Data.Length == 0))
+					_modelWriteIndicesNotInFile.Add(writeIndex);
 				if (target == null || source?.Data == null || source.Data.Length == 0)
 					continue;
 
 				//Write-index order comes from the same file both times; count mismatches catch
 				//an in-memory list that has drifted from what is on disk (imports, deletions).
+				//Reading the same file again will not undo that drift, so it is remembered as well.
 				if (source.VertexCount != target.VertexCount || source.IndexCount != target.IndexCount)
+				{
+					_modelWriteIndicesNotInFile.Add(writeIndex);
 					continue;
+				}
 
 				target.Data = source.Data;
 				restored++;
@@ -5443,6 +5815,7 @@ public partial class AlienScene : Node3D
 			try
 			{
 				string restorePath = entry.Key == TexturePtr.Source.LEVEL && _levelTexturesRestorePath != null ? _levelTexturesRestorePath : live.Filepath;
+				_restoreReadWholePak = true;
 				Textures fresh = new Textures(restorePath);
 				Dictionary<string, Textures.TEX4> globalByName = null;
 				int restored = 0;
@@ -5494,8 +5867,10 @@ public partial class AlienScene : Node3D
 		return byName;
 	}
 
-	private void ReleaseCathodeBinarySourceData()
+	/// <summary>Drops the source binaries the Godot resources were built from; how many bytes that let go of.</summary>
+	private long ReleaseCathodeBinarySourceData()
 	{
+		long released = 0;
 		Models models = _content?.Level?.Models;
 		if (models?.Entries != null)
 		{
@@ -5515,23 +5890,29 @@ public partial class AlienScene : Node3D
 							continue;
 
 						foreach (Models.CS2.Component.LOD.Submesh submesh in lod.Submeshes)
+						{
+							released += submesh.Data?.Length ?? 0;
 							submesh.Data = null;
+						}
 					}
 				}
 			}
 		}
 
-		ReleaseTextureSourceContent(_content?.Level?.Textures);
-		ReleaseTextureSourceContent(LevelContent.Global?.Textures);
+		released += ReleaseTextureSourceContent(_content?.Level?.Textures);
+		released += ReleaseTextureSourceContent(LevelContent.Global?.Textures);
+		return released;
 	}
 
-	private static void ReleaseTextureSourceContent(Textures textures)
+	private static long ReleaseTextureSourceContent(Textures textures)
 	{
 		if (textures?.Entries == null)
-			return;
+			return 0;
 
+		long released = 0;
 		foreach (Textures.TEX4 entry in textures.Entries)
-			ReleaseTex4SourceContent(entry);
+			released += ReleaseTex4SourceContent(entry);
+		return released;
 	}
 
 }
@@ -5576,9 +5957,23 @@ public class LevelContent
 	{
 		Reset();
 
-		if (Global == null)
-			Global = new Global(aiPath + "\\DATA\\ENV\\GLOBAL");
-		Level = new Level(aiPath + "\\DATA\\ENV\\" + levelName, Global);
+		/* Read on a worker, with this thread answering OpenCAGE's calls to it while it waits (see LevelViewerSentMessages).
+		   Answering them between the phases of the read was not enough: one phase of a big level - SOLACE's scripts - held
+		   the thread for 21 s, and anything OpenCAGE did that needed this window (a focus change, the window activated)
+		   waited as long. Nothing in here touches Godot: CathodeLib reads the files and builds its own objects. */
+		Level level = null;
+		System.Threading.Tasks.Task read = System.Threading.Tasks.Task.Run(() =>
+		{
+			if (Global == null)
+				Global = new Global(aiPath + "\\DATA\\ENV\\GLOBAL");
+			level = new Level(aiPath + "\\DATA\\ENV\\" + levelName, Global, loadImmediately: false);
+			level.Load();
+		});
+		//Waited on its handle: Task.Wait would throw a failed read as an AggregateException around the real one
+		while (!((IAsyncResult)read).AsyncWaitHandle.WaitOne(20))
+			LevelViewerSentMessages.PumpIfDue();
+		read.GetAwaiter().GetResult(); //the read's own exception, if it failed
+		Level = level;
 	}
 
 	public void Reset()

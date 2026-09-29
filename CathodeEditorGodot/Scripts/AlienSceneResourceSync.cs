@@ -81,7 +81,11 @@ public partial class AlienScene
 
 	private void AdvanceResourceSync()
 	{
-		if (_resourceSyncInFlight || _pendingResourceSyncs.Count == 0 || _loadStep != LoadPipelineStep.None || !_content.Loaded)
+		/* Not under a preview batch either: each composite it builds bumps _contentGeneration, which FinishResourceSync
+		   reads as the level having changed - the snapshot was dropped, and OpenCAGE (which had moved its fingerprints
+		   on) never sent it again, so an edit made during a preview capture never showed until a reload. */
+		if (_resourceSyncInFlight || _pendingResourceSyncs.Count == 0 || _loadStep != LoadPipelineStep.None || !_content.Loaded
+			|| _previewBatchRunning)
 			return;
 
 		BeginResourceSync(_pendingResourceSyncs.Dequeue());
@@ -1064,7 +1068,9 @@ public partial class AlienScene
 	#endregion
 
 	/* Snapshots are numbered folders under one per level. Older ones are deleted once no restore path
-	   points into them; the current one stays as it may be read from until the next arrives. */
+	   points into them; the current one stays as it may be read from until the next arrives. A newer one
+	   is left alone: OpenCAGE may already have written it, its packet held behind this sync - deleting it
+	   failed that sync's load (two texture edits seconds apart lost the second). */
 	private void PruneResourceSnapshotFolders(Packet packet)
 	{
 		try
@@ -1083,9 +1089,13 @@ public partial class AlienScene
 			if (_levelTexturesRestorePath != null)
 				keep.Add(Path.GetFullPath(Path.GetDirectoryName(_levelTexturesRestorePath)));
 
+			int currentSequence = SnapshotSequence(current);
 			foreach (string folder in Directory.GetDirectories(parent))
 			{
 				if (keep.Contains(Path.GetFullPath(folder)))
+					continue;
+				int sequence = SnapshotSequence(folder);
+				if (currentSequence < 0 || sequence < 0 || sequence >= currentSequence)
 					continue;
 				try
 				{
@@ -1101,6 +1111,12 @@ public partial class AlienScene
 		{
 			ViewerLog.Print("Snapshot folder prune skipped: " + ex.Message);
 		}
+	}
+
+	private static int SnapshotSequence(string folder)
+	{
+		string name = Path.GetFileName(folder.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
+		return int.TryParse(name, out int sequence) ? sequence : -1;
 	}
 
 	private static string FirstSnapshotFolder(Packet packet)

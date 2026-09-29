@@ -608,10 +608,11 @@ public partial class LevelViewerCamera : Camera3D
             return;
 
         Vector3 positionBefore = GlobalPosition;
-        _alienScene.TryResolveInitialFocusPoint(out Vector3 focusPoint, out bool hasExplicitFocus);
-        if (hasExplicitFocus)
-            _alienScene.RecenterContentOrigin();
-        Vector3 framePoint = hasExplicitFocus ? Vector3.Zero : focusPoint;
+        /* Framed on the focus point where it is. The populate centres the content on it before its meshes are drawn;
+           moving the content here instead (as this did) took every drawn mesh out of the renderer's culling BVH and put
+           it back one at a time - 20-55 s with nothing answered after a populate of all of SCI_AndroidLab, whose focus
+           only resolves once the populate is over. */
+        _alienScene.TryResolveInitialFocusPoint(out Vector3 framePoint, out _);
         float framingDistance = ResolveContentFramingDistance(framePoint);
         LevelViewerView.FrameRuntimeCameraOnPoint(
             framePoint,
@@ -656,6 +657,10 @@ public partial class LevelViewerCamera : Camera3D
 
         //OpenCAGE's menu is up: the next key closes it, it doesn't fly
         if (IsEditorContextMenuUp) return;
+
+        //Whether the keys are the viewport's at all is one answer for the frame: asked once here, not once per key below
+        //(seven lots of window, focus and cursor queries every frame)
+        if (EmbeddedInOpenCage && !ShouldAcceptEmbeddedKeyboardInput()) return;
 
         float speed = MoveSpeed * deltaSeconds;
         if (IsMovementKeyDown(Key.Shift))
@@ -708,9 +713,7 @@ public partial class LevelViewerCamera : Camera3D
         if (!EmbeddedInOpenCage)
             return Input.IsKeyPressed(key);
 
-        if (!ShouldAcceptEmbeddedKeyboardInput())
-            return false;
-
+        //ApplyKeyboardMovement has already asked ShouldAcceptEmbeddedKeyboardInput for this frame
         return key switch
         {
             Key.W => Win32Input.IsKeyDown(Win32Input.VK_W),
@@ -1578,6 +1581,9 @@ public partial class LevelViewerCamera : Camera3D
         public static extern bool GetClientRect(IntPtr hwnd, out Rect rect);
 
         [DllImport("user32.dll")]
+        public static extern bool GetWindowRect(IntPtr hwnd, out Rect rect);
+
+        [DllImport("user32.dll")]
         public static extern bool ClientToScreen(IntPtr hwnd, ref Point point);
 
         [DllImport("user32.dll")]
@@ -1620,6 +1626,14 @@ public partial class LevelViewerCamera : Camera3D
         public static bool IsMouseOverWindow(IntPtr hwnd)
         {
             if (hwnd == IntPtr.Zero || !GetCursorPos(out Point screen))
+                return false;
+
+            /* The window's own rectangle first. WindowFromPoint hit-tests whatever is under the cursor, and for a window
+               of another thread that means waiting for it: with the cursor resting over OpenCAGE while OpenCAGE was busy
+               (a port), the camera's once-a-frame key check held this thread for twelve seconds. Only a cursor already
+               over the viewport is asked which window is on top there. */
+            if (!GetWindowRect(hwnd, out Rect rect)
+                || screen.X < rect.Left || screen.X >= rect.Right || screen.Y < rect.Top || screen.Y >= rect.Bottom)
                 return false;
 
             return IsSameOrDescendant(hwnd, WindowFromPoint(screen));

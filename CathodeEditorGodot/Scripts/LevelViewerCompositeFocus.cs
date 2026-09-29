@@ -82,6 +82,12 @@ public static class LevelViewerCompositeFocus
 		pending.Enqueue(active);
 		HashSet<uint> visited = new HashSet<uint> { activeId };
 
+		//Commands.GetComposite scans every composite: once per instance entity in scope it was most of a second on TECH_Hub
+		Dictionary<ShortGuid, Composite> compositesById = new Dictionary<ShortGuid, Composite>(commands.Entries.Count);
+		foreach (Composite entry in commands.Entries)
+			if (entry != null && !compositesById.ContainsKey(entry.shortGUID))
+				compositesById[entry.shortGUID] = entry;
+
 		while (pending.Count > 0)
 		{
 			Composite composite = pending.Dequeue();
@@ -94,7 +100,7 @@ public static class LevelViewerCompositeFocus
 				if (function.function.IsFunctionType)
 					continue;
 
-				Composite child = commands.GetComposite(function.function);
+				compositesById.TryGetValue(function.function, out Composite child);
 				if (child == null)
 					continue;
 
@@ -524,6 +530,8 @@ public static class LevelViewerCompositeFocus
 	{
 		for (int i = 0; i < meshes.Count; i++)
 		{
+			//Every mesh of the level on a composite switch: most of a second on TECH_Hub
+			LevelViewerSentMessages.PumpIfDue();
 			MeshInstance3D mesh = meshes[i];
 			if (mesh == null || !GodotObject.IsInstanceValid(mesh) || mesh.IsInGroup(LevelViewerPick.WireframeOverlayGroupName))
 				continue;

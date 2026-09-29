@@ -46,6 +46,8 @@ public static class LevelViewerAliasHighlight
 		HashSet<ulong> tintedMeshIds = new HashSet<ulong>();
 		scene.ForEachParameterizedAliasInActiveComposite((ownerComposite, alias) =>
 		{
+			//Seconds on a big level after every populate, with no sent message answered
+			LevelViewerSentMessages.PumpIfDue();
 			if (!scene.TryGetEntitySceneNodes(ownerComposite.shortGUID, alias.shortGUID, out List<Node3D> aliasNodes))
 				return;
 

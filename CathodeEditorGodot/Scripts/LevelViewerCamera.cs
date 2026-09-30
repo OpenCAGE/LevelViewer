@@ -5,6 +5,7 @@ using System.Runtime.InteropServices;
 /// <summary>
 /// Free camera: WASD/QE move; RMB drag look, RMB click context menu; MMB pan; LMB select entity, LMB drag box-select (Ctrl adds, Shift toggles); Ctrl+MMB step into composite instance; - step back hierarchy; 0/8/9 set regular/deep/advanced deep select; 1-4 transform/rotate world/local, 5 none; Alt+1-4 set the selection highlight mode; H hide selected; Shift+H unhide all; scroll adjusts speed; Z frames selection; Ctrl+D duplicates the selection; Ctrl+Z/Ctrl+Y undo/redo in OpenCAGE.
 /// MoveSpeed is world units per second (framerate-independent via delta).
+/// While it follows the running game's camera (LiveLink Camera, <see cref="IsFollowingGameCamera"/>) none of these move it.
 /// </summary>
 public partial class LevelViewerCamera : Camera3D
 {
@@ -375,6 +376,28 @@ public partial class LevelViewerCamera : Camera3D
             // must never escape the engine callback and terminate the process.
             ViewerLog.PrintErr("[Viewer] Camera _Process failed: " + ex);
         }
+
+        //Following the game's camera: back on its pose if anything has moved it off (outside ProcessInternal, as below)
+        try
+        {
+            HoldFollowedGamePose();
+        }
+        catch (Exception ex)
+        {
+            ViewerLog.PrintErr("[Viewer] Following the game camera failed: " + ex);
+        }
+
+        /* After ProcessInternal rather than in it: that returns early while the viewer idles, and the pose the game is
+           following still has to go then - the camera moved by OpenCAGE (a remote focus, a placement) rather than by
+           input, or the last pose of a flight, held back by the rate limit until the frame after it stopped. */
+        try
+        {
+            SendCameraPoseIfMoved();
+        }
+        catch (Exception ex)
+        {
+            ViewerLog.PrintErr("[Viewer] Camera pose stream failed: " + ex);
+        }
     }
 
     private void ProcessInternal(double delta)
@@ -430,7 +453,8 @@ public partial class LevelViewerCamera : Camera3D
     /// </param>
     public void FocusOnTarget(Node3D target, bool framePositionOnly = false)
     {
-        if (target == null || !GodotObject.IsInstanceValid(target))
+        //Following the game's camera (LiveLink Camera), the camera is the game's to move: no focus, from here or OpenCAGE
+        if (target == null || !GodotObject.IsInstanceValid(target) || _followingGameCamera)
             return;
 
         Vector3 positionBefore = GlobalPosition;
@@ -486,7 +510,7 @@ public partial class LevelViewerCamera : Camera3D
 
     private void BeginSelectionFollow(Node3D target)
     {
-        if (target == null || !GodotObject.IsInstanceValid(target))
+        if (target == null || !GodotObject.IsInstanceValid(target) || _followingGameCamera)
         {
             ClearSelectionFollow();
             return;
@@ -502,7 +526,7 @@ public partial class LevelViewerCamera : Camera3D
         if (!_followActive)
             return;
 
-        if (_followTarget == null || !GodotObject.IsInstanceValid(_followTarget))
+        if (_followTarget == null || !GodotObject.IsInstanceValid(_followTarget) || _followingGameCamera)
         {
             ClearSelectionFollow();
             return;
@@ -580,6 +604,7 @@ public partial class LevelViewerCamera : Camera3D
             return;
 
         int contentGeneration = _alienScene.ContentGeneration;
+        int placements = _cameraPlacements;
 
         const int maxFrames = 60;
         for (int i = 0; i < maxFrames; i++)
@@ -605,6 +630,14 @@ public partial class LevelViewerCamera : Camera3D
             return;
 
         if (_alienScene.ParentNode == null || !GodotObject.IsInstanceValid(_alienScene.ParentNode))
+            return;
+
+        //OpenCAGE put the camera somewhere while this waited for the focus point (PlaceAtLevelPose): that is the newer word
+        if (_cameraPlacements != placements)
+            return;
+
+        //Following the game's camera: it stays where the game's is (HoldFollowedGamePose), not where this would frame it
+        if (_followingGameCamera)
             return;
 
         Vector3 positionBefore = GlobalPosition;
@@ -657,6 +690,9 @@ public partial class LevelViewerCamera : Camera3D
 
         //OpenCAGE's menu is up: the next key closes it, it doesn't fly
         if (IsEditorContextMenuUp) return;
+
+        //Following the game's camera (LiveLink Camera): the game flies it
+        if (_followingGameCamera) return;
 
         //Whether the keys are the viewport's at all is one answer for the frame: asked once here, not once per key below
         //(seven lots of window, focus and cursor queries every frame)
@@ -832,6 +868,11 @@ public partial class LevelViewerCamera : Camera3D
                     EnsureWindowFocus();
                     GetViewport().SetInputAsHandled();
                 }
+                //Following the game's camera: no pan, so no mouse captured for one
+                else if (_followingGameCamera)
+                {
+                    GetViewport().SetInputAsHandled();
+                }
                 else
                 {
                     _panning = true;
@@ -917,7 +958,8 @@ public partial class LevelViewerCamera : Camera3D
     {
         _rightDragStarted = true;
         _rightClickPending = false;
-        if (!EmbeddedInOpenCage && _rightPressed && !_mouseLookActive)
+        //Following the game's camera, a drag is still no click - but there is no look to capture the mouse for
+        if (!EmbeddedInOpenCage && _rightPressed && !_mouseLookActive && !_followingGameCamera)
         {
             _mouseLookActive = true;
             CaptureMouse(this);
@@ -993,7 +1035,9 @@ public partial class LevelViewerCamera : Camera3D
 
     private bool CanFocusSelectedEntity()
     {
-        return _alienScene != null
+        //Following the game's camera, the focus does nothing: the menu greys it out
+        return !_followingGameCamera
+            && _alienScene != null
             && _alienScene.TryGetSelectedEntity(out Node3D selected)
             && _alienScene.TryResolveFocusTarget(selected, maxExtent: 0f, out _, out _);
     }
@@ -1097,7 +1141,7 @@ public partial class LevelViewerCamera : Camera3D
 
     private void ApplyLookRelative(Vector2 relative)
     {
-        if (!_mouseLookActive || relative.LengthSquared() <= 0f)
+        if (!_mouseLookActive || relative.LengthSquared() <= 0f || _followingGameCamera)
             return;
 
         LevelViewerRenderIdleThrottle.NotifyUserActivity();
@@ -1110,7 +1154,7 @@ public partial class LevelViewerCamera : Camera3D
 
     private void ApplyPanRelative(Vector2 relative, Vector2 velocity, float deltaSeconds)
     {
-        if (!_panning)
+        if (!_panning || _followingGameCamera)
             return;
 
         Vector3 positionBefore = GlobalPosition;
@@ -1152,7 +1196,9 @@ public partial class LevelViewerCamera : Camera3D
             _rightDragStarted = false;
         }
 
-        if (!dragActive)
+        /* Following the game's camera (LiveLink Camera) there is no look or pan to poll for: no capture, and no cursor
+           hidden and held in the middle. A right click still opens the context menu (the button events do that). */
+        if (!dragActive || _followingGameCamera)
         {
             ReleaseEmbeddedMouseCapture();
             _mouseLookActive = false;
@@ -1362,6 +1408,21 @@ public partial class LevelViewerCamera : Camera3D
         _positionPanel.OffsetRight = 280f;
         _positionPanel.Visible = false;
         hudRoot.AddChild(_positionPanel);
+
+        //Just above the position, sized to its text: shown for as long as the camera follows the game's (UpdateFollowHint)
+        _followLabel = CreateHudLabel();
+        _followPanel = WrapHudPanel(_followLabel);
+        _followPanel.MouseFilter = Control.MouseFilterEnum.Ignore;
+        _followPanel.SetAnchorsPreset(Control.LayoutPreset.BottomLeft);
+        _followPanel.GrowVertical = Control.GrowDirection.Begin;
+        _followPanel.OffsetLeft = 12f;
+        _followPanel.OffsetRight = 12f;
+        _followPanel.OffsetTop = -56f;
+        _followPanel.OffsetBottom = -56f;
+        _followPanel.Visible = false;
+        hudRoot.AddChild(_followPanel);
+        _followHintState = FollowHintHidden;
+        UpdateFollowHint(otherComposite: false);
     }
 
     private static Label CreateHudLabel()
@@ -1832,5 +1893,436 @@ public partial class LevelViewerCamera : Camera3D
 
         _commandsEditorConnection.ExitCreateMode();
         return true;
+    }
+
+    // -------------------------------------------------------------------------
+    //  Live link camera sync
+    // -------------------------------------------------------------------------
+
+    /* While OpenCAGE asks for it (CommandsEditorConnection.IsStreamingCameraPose - on while the running game's camera
+       follows the viewport), where this camera is goes to OpenCAGE as VIEWER_CAMERA_POSE, and on to the game. Sent when
+       it has moved, at most once every CameraPoseIntervalMsec. Each frame compares with the pose last SENT, not the one
+       last seen, so the pose a flight stops on always goes: a frame or two late, when the interval is up. */
+    private const ulong CameraPoseIntervalMsec = 33;
+    private const float CameraPosePositionEpsilon = 0.001f;   //1 mm
+    private const float CameraPoseDirectionEpsilon = 0.0005f; //along a unit vector: about three hundredths of a degree
+    private const float CameraPoseFovEpsilon = 0.01f;         //degrees
+
+    private bool _cameraPoseSent;
+    private ulong _cameraPoseSentMsec;
+    private Vector3 _cameraPoseSentPosition;
+    private Vector3 _cameraPoseSentForward;
+    private Vector3 _cameraPoseSentUp;
+    private float _cameraPoseSentFov;
+    private bool _cameraPoseSentInLevelSpace;
+    private int _cameraPoseSentContentGeneration;
+
+    /* Counts the placements OpenCAGE has asked for (PlaceAtLevelPose). The framing after a populate waits a few frames
+       for its focus point, and a placement that lands in that time is the newer word on where the camera goes. */
+    private int _cameraPlacements;
+
+    /// <summary>
+    /// Streaming has just been switched on: send where the camera is now, rather than when it next moves, so the game
+    /// goes to the viewport the moment it starts following it. With nothing loaded yet, the first pose there is goes
+    /// out as soon as there is one. Main thread.
+    /// </summary>
+    public void RestartCameraPoseStream()
+    {
+        _cameraPoseSent = false;
+        LevelViewerRenderIdleThrottle.NotifyUserActivity();
+        if (!IsProcessing())
+            SetProcess(true);
+
+        SendCameraPoseIfMoved();
+    }
+
+    private void SendCameraPoseIfMoved()
+    {
+        if (_commandsEditorConnection == null || !GodotObject.IsInstanceValid(_commandsEditorConnection))
+            _commandsEditorConnection = GetNodeOrNull<CommandsEditorConnection>(CommandsEditorConnectionPath);
+
+        CommandsEditorConnection connection = _commandsEditorConnection;
+        if (connection == null || !connection.IsStreamingCameraPose)
+            return;
+
+        if (!TryGetLevelSpacePose(out Vector3 position, out Vector3 forward, out Vector3 up, out bool inLevelSpace, out uint levelRoot))
+            return;
+
+        float fov = GetVerticalFovDegrees();
+        //A populate or level load since the last pose: sent again even where it is the same, as the scene it is in is not
+        int contentGeneration = _alienScene.ContentGeneration;
+        ulong now = Time.GetTicksMsec();
+        if (_cameraPoseSent)
+        {
+            bool changed = inLevelSpace != _cameraPoseSentInLevelSpace
+                || contentGeneration != _cameraPoseSentContentGeneration
+                || position.DistanceSquaredTo(_cameraPoseSentPosition) > CameraPosePositionEpsilon * CameraPosePositionEpsilon
+                || forward.DistanceSquaredTo(_cameraPoseSentForward) > CameraPoseDirectionEpsilon * CameraPoseDirectionEpsilon
+                || up.DistanceSquaredTo(_cameraPoseSentUp) > CameraPoseDirectionEpsilon * CameraPoseDirectionEpsilon
+                || Mathf.Abs(fov - _cameraPoseSentFov) > CameraPoseFovEpsilon;
+            if (!changed || now - _cameraPoseSentMsec < CameraPoseIntervalMsec)
+                return;
+        }
+
+        _cameraPoseSent = true;
+        _cameraPoseSentMsec = now;
+        _cameraPoseSentPosition = position;
+        _cameraPoseSentForward = forward;
+        _cameraPoseSentUp = up;
+        _cameraPoseSentFov = fov;
+        _cameraPoseSentInLevelSpace = inLevelSpace;
+        _cameraPoseSentContentGeneration = contentGeneration;
+        connection.SendCameraPose(position, forward, up, fov, inLevelSpace, levelRoot);
+    }
+
+    /// <summary>
+    /// The camera in the space of the scene's root node, on CATHODE's axes: what the game's camera is given. The root
+    /// node's space and not Godot's own, because the content is moved to sit near the origin
+    /// (AlienScene.RecenterContentOrigin) and the camera is not - GlobalTransform alone is off by wherever the content
+    /// was put. That space is the game's world when the scene is the level root (<paramref name="inLevelSpace"/>); any
+    /// other composite on screen is built about its own origin. <paramref name="levelRoot"/> says which level (its root
+    /// composite; 0 when not in level space): OpenCAGE loads a new level in its own time, and must not pass a pose from
+    /// one level on to the game as another's. False while there is no scene, or a composite preview batch has it (the
+    /// batch builds every composite in turn and puts the view back afterwards).
+    /// </summary>
+    private bool TryGetLevelSpacePose(out Vector3 position, out Vector3 forward, out Vector3 up, out bool inLevelSpace, out uint levelRoot)
+    {
+        position = forward = up = Vector3.Zero;
+        inLevelSpace = false;
+        levelRoot = 0;
+
+        AlienScene scene = _alienScene;
+        if (scene == null || !GodotObject.IsInstanceValid(scene) || !scene.Content.Loaded || scene.IsPreviewBatchRunning)
+            return false;
+
+        Node3D root = scene.ParentNode;
+        if (root == null || !GodotObject.IsInstanceValid(root) || !root.IsInsideTree())
+            return false;
+
+        Transform3D levelSpace = root.GlobalTransform.AffineInverse() * GlobalTransform;
+        position = FlipHandedness(levelSpace.Origin);
+        forward = FlipHandedness(-levelSpace.Basis.Z).Normalized();
+        up = FlipHandedness(levelSpace.Basis.Y).Normalized();
+
+        uint compositeId = scene.CompositeID;
+        inLevelSpace = compositeId != 0 && compositeId == PreviewVisibilitySettings.LevelRootCompositeId;
+        if (inLevelSpace)
+            levelRoot = compositeId;
+        return true;
+    }
+
+    /// <summary>
+    /// The vertical field of view in degrees, which is the one the game takes. Fov is vertical with the default
+    /// KeepAspect (Height); kept width-wise it is horizontal, and is converted through the viewport's shape. 0 (the
+    /// game keeps its own) for an orthographic camera, which has none.
+    /// </summary>
+    private float GetVerticalFovDegrees()
+    {
+        if (Projection != ProjectionType.Perspective)
+            return 0f;
+
+        if (KeepAspect == KeepAspectEnum.Height)
+            return Fov;
+
+        Viewport viewport = GetViewport();
+        Vector2 size = viewport != null ? viewport.GetVisibleRect().Size : Vector2.Zero;
+        if (size.X <= 0f || size.Y <= 0f)
+            return Fov;
+
+        float halfHorizontal = Mathf.DegToRad(Fov * 0.5f);
+        return Mathf.RadToDeg(2f * Mathf.Atan(Mathf.Tan(halfHorizontal) * size.Y / size.X));
+    }
+
+    /// <summary>
+    /// Put the camera where OpenCAGE says (VIEWPORT_SET_CAMERA) - where the game's camera is, say: at
+    /// <paramref name="position"/>, looking along <paramref name="forward"/> with <paramref name="up"/> as up, in the
+    /// space VIEWER_CAMERA_POSE is sent in (the scene root's, on CATHODE's axes). Anything that would move the camera
+    /// on from there - following the selection, the framing a populate has yet to do - is called off, and the look
+    /// carries on from the new direction. Main thread.
+    /// </summary>
+    public void PlaceAtLevelPose(Vector3 position, Vector3 forward, Vector3 up)
+    {
+        AlienScene scene = _alienScene;
+        Node3D root = scene != null && GodotObject.IsInstanceValid(scene) ? scene.ParentNode : null;
+        if (root == null || !GodotObject.IsInstanceValid(root) || !root.IsInsideTree())
+        {
+            ViewerLog.Print("[Viewer] Camera placement ignored: no scene is loaded to place it in");
+            return;
+        }
+
+        //The batch has the scene, and puts the camera back where it found it when it is done
+        if (scene.IsPreviewBatchRunning)
+        {
+            ViewerLog.Print("[Viewer] Camera placement ignored: composite previews are being taken");
+            return;
+        }
+
+        if (!TryBuildLevelPose(position, forward, up, out Transform3D pose))
+        {
+            ViewerLog.PrintErr("[Viewer] Camera placement ignored: not a usable pose (position " + position + ", forward " + forward + ", up " + up + ")");
+            return;
+        }
+
+        Vector3 positionBefore = GlobalPosition;
+        _cameraPlacements++;
+        ClearSelectionFollow();
+        GlobalTransform = root.GlobalTransform * pose;
+        SyncAnglesFromTransform();
+
+        //Awake to draw it and, while streaming, to send it on: the game follows this camera, so it follows the placement too
+        LevelViewerRenderIdleThrottle.NotifyUserActivity();
+        if (!IsProcessing())
+            SetProcess(true);
+
+        if (ShouldShowCameraPosition())
+            UpdatePositionHud(positionBefore);
+        _positionHudTimer = ShouldShowCameraPosition() ? HudFadeSeconds : 0f;
+    }
+
+    /// <summary>
+    /// The camera's transform in the scene root's space, on Godot's axes, for a pose in the space VIEWER_CAMERA_POSE is
+    /// sent in: at <paramref name="position"/>, looking along <paramref name="forward"/> with <paramref name="up"/> as
+    /// up. False for one that is not finite or looks nowhere.
+    /// </summary>
+    private static bool TryBuildLevelPose(Vector3 position, Vector3 forward, Vector3 up, out Transform3D pose)
+    {
+        pose = Transform3D.Identity;
+        Vector3 back = -FlipHandedness(forward);
+        if (!position.IsFinite() || !back.IsFinite() || !up.IsFinite() || back.LengthSquared() < 1e-12f)
+            return false;
+        back = back.Normalized();
+
+        /* Godot's right is up x back. An up that is missing or lies along the view gives none: the world's up stands in,
+           and looking straight up or down, the world's forward. The roll that loses would go at the next look anyway -
+           the camera's own look is yaw and pitch only. */
+        Vector3 right = FlipHandedness(up).Cross(back);
+        if (right.LengthSquared() < 1e-8f)
+            right = Vector3.Up.Cross(back);
+        if (right.LengthSquared() < 1e-8f)
+            right = Vector3.Forward.Cross(back);
+        right = right.Normalized();
+        pose = new Transform3D(new Basis(right, back.Cross(right).Normalized(), back), FlipHandedness(position));
+        return true;
+    }
+
+    // -------------------------------------------------------------------------
+    //  Live link camera: following the game's
+    // -------------------------------------------------------------------------
+
+    /* LiveLink Camera "Sync game camera to viewport" (CommandsEditorConnection's camera_follows_game setting): this camera
+       follows the running game's, which OpenCAGE sends as VIEWPORT_SET_CAMERA, and takes no control of its own meanwhile -
+       no flying, looking, panning, focusing, selection following or framing. The game's pose is held in the scene root's
+       space and put back whenever anything else moves the camera or the root off it (a populate recentring the content,
+       a preview batch putting its view back), so the camera stays where the game's is between poses too. Main thread. */
+    private bool _followingGameCamera;
+    private float _fovBeforeFollowing;
+    private bool _followPoseHeld;
+    private Transform3D _followPose;   //in the scene root's space, on Godot's axes
+    private uint _followPoseLevelRoot; //the level it is a pose in (its root composite)
+    private float _followFov;          //the game's vertical field of view in degrees; 0 while none has come
+
+    private const int FollowHintHidden = -1;
+    private const int FollowHintInLevel = 0;
+    private const int FollowHintOtherComposite = 1;
+    private PanelContainer _followPanel;
+    private Label _followLabel;
+    private int _followHintState = FollowHintHidden;
+
+    /// <summary>Whether the camera follows the running game's (LiveLink Camera), and takes no control of its own.</summary>
+    public bool IsFollowingGameCamera => _followingGameCamera;
+
+    /// <summary>
+    /// LiveLink Camera's "Sync game camera to viewport" came on or went off (camera_follows_game). On: whatever look, pan
+    /// or selection following was under way ends, and one VIEWER_CAMERA_POSE of where the camera is now goes to OpenCAGE
+    /// - the answer that tells it this viewer can follow (one from before this never answers, and is sent nothing). Off:
+    /// the field of view it had comes back, and its own controls carry on from wherever the game left it. Main thread.
+    /// </summary>
+    public void SetFollowingGameCamera(bool follow)
+    {
+        if (follow == _followingGameCamera)
+            return;
+
+        _followingGameCamera = follow;
+        _followPoseHeld = false;
+        _followFov = 0f;
+
+        LevelViewerRenderIdleThrottle.NotifyUserActivity();
+        if (!IsProcessing())
+            SetProcess(true);
+
+        if (follow)
+        {
+            _fovBeforeFollowing = Fov;
+            ClearSelectionFollow();
+            _mouseLookActive = false;
+            _panning = false;
+            ReleaseEmbeddedMouseCapture();
+            ReleaseMouse(this);
+            UpdateFollowHint(otherComposite: false);
+            SendFollowingGameCameraAnswer();
+            return;
+        }
+
+        Fov = _fovBeforeFollowing;
+        SyncAnglesFromTransform();
+        UpdateFollowHint(otherComposite: false);
+    }
+
+    /* The answer to camera_follows_game coming on: where the camera is now, as the pose stream would send it. With no
+       scene to be in, where it is on Godot's own axes, in no level - the answer still has to go. */
+    private void SendFollowingGameCameraAnswer()
+    {
+        if (_commandsEditorConnection == null || !GodotObject.IsInstanceValid(_commandsEditorConnection))
+            _commandsEditorConnection = GetNodeOrNull<CommandsEditorConnection>(CommandsEditorConnectionPath);
+
+        CommandsEditorConnection connection = _commandsEditorConnection;
+        if (connection == null)
+            return;
+
+        if (!TryGetLevelSpacePose(out Vector3 position, out Vector3 forward, out Vector3 up, out bool inLevelSpace, out uint levelRoot))
+        {
+            position = FlipHandedness(GlobalPosition);
+            forward = FlipHandedness(-GlobalTransform.Basis.Z).Normalized();
+            up = FlipHandedness(GlobalTransform.Basis.Y).Normalized();
+            inLevelSpace = false;
+            levelRoot = 0;
+        }
+
+        connection.SendCameraPose(position, forward, up, GetVerticalFovDegrees(), inLevelSpace, levelRoot);
+    }
+
+    /// <summary>
+    /// The game's camera, from OpenCAGE (VIEWPORT_SET_CAMERA while following it): where it is, the way it looks and which
+    /// way is up, in the space VIEWER_CAMERA_POSE is sent in, and its vertical field of view in degrees (0 leaves the one
+    /// the camera has). Only while <see cref="IsFollowingGameCamera"/>. Taken as a pose in the level loaded now, and held:
+    /// shown while the scene is that level's root (in any other composite it means nothing), and put back there whatever
+    /// else moves the camera. Silent when it cannot be used - it comes many times a second. Main thread.
+    /// </summary>
+    public void FollowGamePose(Vector3 position, Vector3 forward, Vector3 up, float fov)
+    {
+        if (!_followingGameCamera)
+            return;
+
+        uint levelRoot = PreviewVisibilitySettings.LevelRootCompositeId;
+        if (levelRoot == 0 || !TryBuildLevelPose(position, forward, up, out Transform3D pose))
+            return;
+
+        _followPose = pose;
+        _followPoseLevelRoot = levelRoot;
+        _followPoseHeld = true;
+        if (fov > 0f && float.IsFinite(fov))
+            _followFov = fov;
+        //Any framing a populate still has to do is older than this
+        _cameraPlacements++;
+
+        LevelViewerRenderIdleThrottle.NotifyUserActivity();
+        if (!IsProcessing())
+            SetProcess(true);
+
+        HoldFollowedGamePose();
+    }
+
+    /* While following the game's camera: the camera on the game's last pose and field of view, if it has come off them,
+       and the hint saying why it will not move. Only while the scene on screen is the level root the pose is in. */
+    private void HoldFollowedGamePose()
+    {
+        if (!_followingGameCamera)
+            return;
+
+        bool levelOnScreen = TryGetLevelRootOnScreen(out Node3D root, out bool otherComposite);
+        UpdateFollowHint(otherComposite);
+        if (!levelOnScreen || !_followPoseHeld || _followPoseLevelRoot != PreviewVisibilitySettings.LevelRootCompositeId)
+            return;
+
+        Transform3D target = root.GlobalTransform * _followPose;
+        if (!GlobalTransform.IsEqualApprox(target))
+        {
+            GlobalTransform = target;
+            SyncAnglesFromTransform();
+        }
+
+        if (_followFov > 0f)
+            SetVerticalFovDegrees(_followFov);
+    }
+
+    /* Whether the scene on screen is the level root (so in the game's world space), and its root node. Not while nothing
+       is loaded or a preview batch has the scene. otherComposite: a composite other than the level root is on screen,
+       which the game's pose means nothing in. */
+    private bool TryGetLevelRootOnScreen(out Node3D root, out bool otherComposite)
+    {
+        root = null;
+        otherComposite = false;
+
+        AlienScene scene = _alienScene;
+        if (scene == null || !GodotObject.IsInstanceValid(scene) || !scene.Content.Loaded || scene.IsPreviewBatchRunning)
+            return false;
+
+        uint compositeId = scene.CompositeID;
+        if (compositeId == 0)
+            return false;
+        if (compositeId != PreviewVisibilitySettings.LevelRootCompositeId)
+        {
+            otherComposite = true;
+            return false;
+        }
+
+        root = scene.ParentNode;
+        return root != null && GodotObject.IsInstanceValid(root) && root.IsInsideTree();
+    }
+
+    /* The inverse of GetVerticalFovDegrees: a vertical field of view in degrees (the game's), as this camera keeps its
+       own - width-wise, converted through the viewport's shape. Nothing for an orthographic camera. */
+    private void SetVerticalFovDegrees(float degrees)
+    {
+        if (Projection != ProjectionType.Perspective)
+            return;
+
+        float fov = Mathf.Clamp(degrees, 1f, 179f);
+        if (KeepAspect != KeepAspectEnum.Height)
+        {
+            Viewport viewport = GetViewport();
+            Vector2 size = viewport != null ? viewport.GetVisibleRect().Size : Vector2.Zero;
+            if (size.X > 0f && size.Y > 0f)
+            {
+                float halfVertical = Mathf.DegToRad(fov * 0.5f);
+                fov = Mathf.Clamp(Mathf.RadToDeg(2f * Mathf.Atan(Mathf.Tan(halfVertical) * size.X / size.Y)), 1f, 179f);
+            }
+        }
+
+        if (!Mathf.IsEqualApprox(Fov, fov))
+            Fov = fov;
+    }
+
+    /* The hint while following: that the camera is the game's, and - with another composite on screen - where to see
+       it. Only touched when what it says changes. */
+    private void UpdateFollowHint(bool otherComposite)
+    {
+        int state = !_followingGameCamera ? FollowHintHidden
+            : otherComposite ? FollowHintOtherComposite
+            : FollowHintInLevel;
+        if (state == _followHintState || _followPanel == null || _followLabel == null)
+            return;
+
+        _followHintState = state;
+        if (state == FollowHintHidden)
+        {
+            _followPanel.Visible = false;
+            return;
+        }
+
+        _followLabel.Text = state == FollowHintOtherComposite
+            ? "Following the game camera (LiveLink Camera) - open the level's root composite to see it"
+            : "Following the game camera (LiveLink Camera)";
+        _followPanel.Visible = true;
+        _followPanel.Modulate = Colors.White;
+    }
+
+    /// <summary>
+    /// Godot's axes to CATHODE's, or back: Z negated (see CathodeCoordinates). Its own inverse, and the same for a
+    /// direction as for a point, since there is no scale.
+    /// </summary>
+    private static Vector3 FlipHandedness(Vector3 value)
+    {
+        return new Vector3(value.X, value.Y, -value.Z);
     }
 }

@@ -147,6 +147,18 @@ namespace OpenCAGE.UnityConnection
         // Level Viewer -> OpenCAGE: what a COMPOSITE_PREVIEW_CAPTURE_REQUEST produced - one CompositePreviewResult
         // per composite asked for, in `preview_results`, with the request's `preview_request_id`.
         COMPOSITE_PREVIEW_CAPTURED,
+
+        // Level Viewer -> OpenCAGE, while `stream_camera_pose` is on: where the viewport camera is, in the game's
+        // world space (`camera_position`, `camera_forward`, `camera_up`, `camera_fov`), sent when it moves (at most
+        // about 30 a second, the last pose always sent) and once when streaming starts. OpenCAGE passes it to the
+        // running game (live link), whose camera then follows the viewport. `camera_in_level_space` says the viewer
+        // is showing the level itself; for any other composite the pose means nothing to the game.
+        VIEWER_CAMERA_POSE,
+
+        // OpenCAGE -> Level Viewer: put the viewport camera at `camera_position`, looking along `camera_forward` with
+        // `camera_up` as up, in the same space VIEWER_CAMERA_POSE uses (the level's, CATHODE's axes) - e.g. where the
+        // game's camera is. A viewer from before this ignores it.
+        VIEWPORT_SET_CAMERA,
     }
 
     /// <summary>
@@ -434,5 +446,32 @@ namespace OpenCAGE.UnityConnection
         // and all. OpenCAGE never says otherwise; the one-off capture run over every level says false, since its viewer
         // is closed straight after. True is also what a packet from before this carries.
         public bool preview_restore_view = true;
+
+        // OpenCAGE -> Level Viewer, as a setting (carried like the others by SETTINGS_CHANGED and every generic packet):
+        // send VIEWER_CAMERA_POSE while true - OpenCAGE turns it on while the game's camera is following the viewport.
+        // False is also what a packet from before this carries, so nothing is streamed unless asked for.
+        public bool stream_camera_pose = false;
+
+        // OpenCAGE -> Level Viewer, as a setting like the one above: the viewport camera follows the GAME's camera (LiveLink
+        // Camera: "Sync game camera to viewport"). While true the viewer takes no camera control of its own - no flying,
+        // looking, focusing or framing - and puts its camera wherever each VIEWPORT_SET_CAMERA says, field of view
+        // included; set false, its own controls and field of view come back. On the false-to-true edge the viewer answers
+        // with one VIEWER_CAMERA_POSE, which tells OpenCAGE this viewer can follow (one from before this never answers).
+        public bool camera_follows_game = false;
+
+        // Level Viewer -> OpenCAGE, on VIEWER_CAMERA_POSE: the viewport camera in the game's world space (CATHODE's axes:
+        // Godot's with Z negated) - its position, the unit vectors it looks along and has as up, and its vertical field
+        // of view in degrees - and whether the viewer is showing the level root (so the pose is in world space at all).
+        // OpenCAGE -> Level Viewer, on VIEWPORT_SET_CAMERA: where to put the camera (position, forward, up); camera_fov is
+        // applied too while camera_follows_game (and is 0 otherwise, which leaves the viewer's own).
+        public System.Numerics.Vector3 camera_position = new System.Numerics.Vector3(0, 0, 0);
+        public System.Numerics.Vector3 camera_forward = new System.Numerics.Vector3(0, 0, 1);
+        public System.Numerics.Vector3 camera_up = new System.Numerics.Vector3(0, 1, 0);
+        public float camera_fov = 0;
+        public bool camera_in_level_space = false;
+        // ... and which level that is (its root composite, as a number): OpenCAGE and the viewer load a new level each in
+        // their own time, so a pose is only passed on to the game for the level OpenCAGE has open. 0 = not in level space,
+        // or a viewer from before this (taken as the level OpenCAGE has open).
+        public uint camera_level_root = 0;
     }
 }

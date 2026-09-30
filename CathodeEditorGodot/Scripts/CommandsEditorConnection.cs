@@ -159,6 +159,34 @@ public partial class CommandsEditorConnection : Node3D
 	private bool _focusOnSelected = false;
 	private bool _fixCameraToSelected = false;
     private bool _hideNestedScriptEntities = false;
+
+    /* Live link camera sync (the stream_camera_pose setting): while OpenCAGE has it on, the camera sends where it is
+       as VIEWER_CAMERA_POSE (LevelViewerCamera.SendCameraPoseIfMoved). Written from the settings a packet carries, read
+       by the camera every frame: volatile rather than under _lock, which that read would otherwise take every frame. */
+    private volatile bool _streamCameraPose = false;
+    public bool IsStreamingCameraPose => _streamCameraPose;
+
+    /* The newest camera pose not yet handed to the socket, and whether a send of one is under way. Poses go one at a
+       time, the newest each time. Sent as they came, a socket slow to drain (OpenCAGE busy) would queue them all on
+       _sendLock, which does not keep order: an older pose could land after the one the camera stopped on, and leave
+       the game looking from there. */
+    private readonly object _cameraPoseLock = new object();
+    private Packet _pendingCameraPose;
+    private bool _cameraPoseSendRunning;
+
+    /* LiveLink Camera "Sync game camera to viewport" (the camera_follows_game setting): while OpenCAGE has it on, the
+       camera follows the game's (LevelViewerCamera.IsFollowingGameCamera), which comes as VIEWPORT_SET_CAMERA. Written
+       from the settings a packet carries, like _streamCameraPose; each change reaches the camera a deferred call later,
+       in the order they came, so every switch-on is answered. */
+    private volatile bool _cameraFollowsGame = false;
+
+    /* The newest VIEWPORT_SET_CAMERA not yet put on the camera while it follows the game, and whether a call to put it
+       there is queued. They come about 30 a second, and several can be handled in one go: only the newest is worth
+       anything, so it is the one applied, once, when the deferred call runs. */
+    private readonly object _followedCameraPoseLock = new object();
+    private Packet _pendingFollowedCameraPose;
+    private bool _followedCameraPoseApplyQueued;
+
     private bool _renderFiltersDirty = false;
     private bool _nestedVisibilityDirty = false;
     private uint _nestedVisibilityPreviousCompositeId = 0;
@@ -790,10 +818,11 @@ public partial class CommandsEditorConnection : Node3D
 
         WebSocketPacketLog.LogReceived(packet, data?.Length ?? 0);
 
-        // Diagnostic breadcrumb (skip the high-frequency drag/param spam) so viewer.log shows the
+        // Diagnostic breadcrumb (skip the high-frequency drag/param/camera spam) so viewer.log shows the
         // exact packet sequence leading up to a crash.
         if (packet.packet_event != PacketEvent.ENTITY_MOVED
-            && packet.packet_event != PacketEvent.ENTITY_PARAMETER_MODIFIED)
+            && packet.packet_event != PacketEvent.ENTITY_PARAMETER_MODIFIED
+            && !WebSocketPacketLog.IsStreamed(packet))
             ViewerLog.Print("Packet: " + packet.packet_event);
 
         if (packet.version != new Packet().version)
@@ -969,6 +998,13 @@ public partial class CommandsEditorConnection : Node3D
         {
             //Nothing but the request: it carries no path, so it must not be taken for a selection or a settings sync
             HandleCompositePreviewCaptureRequest(packet);
+            return;
+        }
+
+        if (packet.packet_event == PacketEvent.VIEWPORT_SET_CAMERA)
+        {
+            //Nothing but where to put the camera: it must not be taken for a selection or a settings sync either
+            HandleViewportSetCamera(packet);
             return;
         }
 
@@ -1566,6 +1602,18 @@ public partial class CommandsEditorConnection : Node3D
             Callable.From(() => LevelViewerGalaxy.SetEnabled(_scene, renderGalaxy)).CallDeferred();
         }
 
+        /* Switched on, the pose goes straight away rather than when the camera next moves: the game goes to the viewport
+           the moment it starts following it. The camera is the main thread's, and this runs on the socket's. */
+        bool streamCameraPose = packet.stream_camera_pose;
+        if (streamCameraPose != _streamCameraPose)
+        {
+            _streamCameraPose = streamCameraPose;
+            if (streamCameraPose)
+                Callable.From(RestartCameraPoseStream).CallDeferred();
+        }
+
+        ApplyCameraFollowsGame(packet.camera_follows_game);
+
         ApplyDeepSelectModeFromPacket(packet.deep_select_mode);
         ApplyGizmoModeFromPacket(packet.gizmo_mode);
         ApplyCreateModeFromPacket(packet.create_function_type);
@@ -2035,6 +2083,183 @@ public partial class CommandsEditorConnection : Node3D
         }).CallDeferred();
     }
 
+    /* OpenCAGE puts the viewport camera somewhere (VIEWPORT_SET_CAMERA) - where the game's camera is, say - in the space
+       VIEWER_CAMERA_POSE is sent in. Moving the camera is main-thread work, deferred as a viewport action is. */
+    private void HandleViewportSetCamera(Packet packet)
+    {
+        //Following the game's camera, these are its poses, many a second: the newest is put on the camera, field of view and all
+        if (_cameraFollowsGame)
+        {
+            QueueFollowedCameraPose(packet);
+            return;
+        }
+
+        Vector3 position = new Vector3(packet.camera_position.X, packet.camera_position.Y, packet.camera_position.Z);
+        Vector3 forward = new Vector3(packet.camera_forward.X, packet.camera_forward.Y, packet.camera_forward.Z);
+        Vector3 up = new Vector3(packet.camera_up.X, packet.camera_up.Y, packet.camera_up.Z);
+        Callable.From(() =>
+        {
+            try
+            {
+                if (FindCamera() is LevelViewerCamera camera)
+                    camera.PlaceAtLevelPose(position, forward, up);
+            }
+            catch (Exception ex)
+            {
+                ViewerLog.PrintErr("[Viewer] Placing the camera failed: " + ex);
+            }
+        }).CallDeferred();
+    }
+
+    /* stream_camera_pose has just come on: the camera sends where it is now (main thread). */
+    private void RestartCameraPoseStream()
+    {
+        try
+        {
+            if (_streamCameraPose && FindCamera() is LevelViewerCamera camera)
+                camera.RestartCameraPoseStream();
+        }
+        catch (Exception ex)
+        {
+            ViewerLog.PrintErr("[Viewer] Starting the camera pose stream failed: " + ex);
+        }
+    }
+
+    /* camera_follows_game, from the settings a packet carries (or the connection going: off). Each change goes to the
+       camera on the main thread, in the order it came - OpenCAGE waits for the answer to each switch-on (one
+       VIEWER_CAMERA_POSE) before it sends the game's camera, so none may be folded into the next. */
+    private void ApplyCameraFollowsGame(bool follows)
+    {
+        if (follows == _cameraFollowsGame)
+            return;
+        //Packets from an editor that has gone can still be waiting in the queue after its disconnect let go of the camera:
+        //only a connected editor turns following on (the next one says so again as it syncs)
+        if (follows && !IsWebSocketConnected)
+            return;
+
+        _cameraFollowsGame = follows;
+        ViewerLog.Print(follows
+            ? "[Viewer] The camera follows the game's (LiveLink Camera)"
+            : "[Viewer] The camera no longer follows the game's (LiveLink Camera)");
+        Callable.From(() => SetCameraFollowsGame(follows)).CallDeferred();
+    }
+
+    private void SetCameraFollowsGame(bool follows)
+    {
+        try
+        {
+            if (FindCamera() is LevelViewerCamera camera)
+                camera.SetFollowingGameCamera(follows);
+        }
+        catch (Exception ex)
+        {
+            ViewerLog.PrintErr("[Viewer] Switching the camera to follow the game or not failed: " + ex);
+        }
+    }
+
+    /* The game's camera while the viewport follows it (VIEWPORT_SET_CAMERA with camera_follows_game on): kept as the
+       newest, for one deferred call to put on the camera however many came before it ran. */
+    private void QueueFollowedCameraPose(Packet packet)
+    {
+        lock (_followedCameraPoseLock)
+        {
+            _pendingFollowedCameraPose = packet;
+            if (_followedCameraPoseApplyQueued)
+                return;
+            _followedCameraPoseApplyQueued = true;
+        }
+
+        Callable.From(ApplyPendingFollowedCameraPose).CallDeferred();
+    }
+
+    private void ApplyPendingFollowedCameraPose()
+    {
+        Packet packet;
+        lock (_followedCameraPoseLock)
+        {
+            packet = _pendingFollowedCameraPose;
+            _pendingFollowedCameraPose = null;
+            _followedCameraPoseApplyQueued = false;
+        }
+
+        if (packet == null)
+            return;
+
+        try
+        {
+            if (FindCamera() is LevelViewerCamera camera)
+                camera.FollowGamePose(
+                    new Vector3(packet.camera_position.X, packet.camera_position.Y, packet.camera_position.Z),
+                    new Vector3(packet.camera_forward.X, packet.camera_forward.Y, packet.camera_forward.Z),
+                    new Vector3(packet.camera_up.X, packet.camera_up.Y, packet.camera_up.Z),
+                    packet.camera_fov);
+        }
+        catch (Exception ex)
+        {
+            ViewerLog.PrintErr("[Viewer] Following the game camera failed: " + ex);
+        }
+    }
+
+    /// <summary>
+    /// Where the viewport camera is, for the running game to follow (VIEWER_CAMERA_POSE): in the game's world space
+    /// when <paramref name="inLevelSpace"/> (the level whose root composite is <paramref name="levelRoot"/>), with the
+    /// vertical field of view in degrees. The camera calls this, rate limited, while <see cref="IsStreamingCameraPose"/>,
+    /// and once when camera_follows_game comes on (the answer that says it can follow). Main thread.
+    /// </summary>
+    public void SendCameraPose(Vector3 position, Vector3 forward, Vector3 up, float fov, bool inLevelSpace, uint levelRoot)
+    {
+        Packet packet = new Packet(PacketEvent.VIEWER_CAMERA_POSE)
+        {
+            camera_position = new System.Numerics.Vector3(position.X, position.Y, position.Z),
+            camera_forward = new System.Numerics.Vector3(forward.X, forward.Y, forward.Z),
+            camera_up = new System.Numerics.Vector3(up.X, up.Y, up.Z),
+            camera_fov = fov,
+            camera_in_level_space = inLevelSpace,
+            camera_level_root = levelRoot,
+        };
+
+        lock (_cameraPoseLock)
+        {
+            _pendingCameraPose = packet;
+            if (_cameraPoseSendRunning)
+                return;
+            _cameraPoseSendRunning = true;
+        }
+
+        _ = SendPendingCameraPosesAsync();
+    }
+
+    /* Sends the newest pending pose until none is left - one in flight at a time (see _pendingCameraPose). */
+    private async Task SendPendingCameraPosesAsync()
+    {
+        // Fire-and-forget: an escaping exception would be unobserved, and the running flag must always be let go of
+        try
+        {
+            while (true)
+            {
+                Packet packet;
+                lock (_cameraPoseLock)
+                {
+                    packet = _pendingCameraPose;
+                    _pendingCameraPose = null;
+                    if (packet == null)
+                    {
+                        _cameraPoseSendRunning = false;
+                        return;
+                    }
+                }
+
+                await SendMessageAsync(packet);
+            }
+        }
+        catch (Exception ex)
+        {
+            ViewerLog.PrintErr("Failed to send the camera pose: " + ex.Message);
+            lock (_cameraPoseLock)
+                _cameraPoseSendRunning = false;
+        }
+    }
+
     /// <summary>
     /// Ask OpenCAGE to undo. The stack is over there, and this window is a separate process, so with
     /// the viewport focused its Ctrl+Z never reaches the editor's own chords (issue 667).
@@ -2272,6 +2497,8 @@ public partial class CommandsEditorConnection : Node3D
                     //Whatever menu the last editor had up went with it
                     _editorContextMenuOpen = false;
                     _editorContextMenuRequestedMsec = 0;
+                    //...and so did the camera stream it asked for: off until this one's settings turn it on, which sends a pose straight away
+                    _streamCameraPose = false;
                 }
 
                 Interlocked.Exchange(ref _lastConnectedTicks, DateTime.UtcNow.Ticks);
@@ -2298,6 +2525,11 @@ public partial class CommandsEditorConnection : Node3D
                 break;
 
             ViewerLog.Print("Disconnected from Commands Editor!");
+
+            /* The camera was following the game for the editor that went: its own controls come back now, rather than
+               wait on poses that are not coming. The next editor's settings turn it on again if they say so. */
+            lock (_lock)
+                ApplyCameraFollowsGame(false);
 
             //Giving up is the watchdog thread's job - see StartEditorWatchdog. Keeping the deadline out
             //of this loop is the whole point: this loop can stall, and the deadline must not stall with it.

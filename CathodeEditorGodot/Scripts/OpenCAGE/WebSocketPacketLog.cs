@@ -24,9 +24,18 @@ namespace OpenCAGE.UnityConnection
 
         private static void Log(string direction, Packet packet, int jsonLength)
         {
-            if (!Enabled)
+            if (!Enabled || IsStreamed(packet))
                 return;
         }
+
+        /// <summary>
+        /// Sent many times a second for as long as it runs (the live link's camera poses, ~30 a second: the viewport's
+        /// to OpenCAGE, and the game's back while the viewport follows it), so a line each would bury everything else
+        /// in the log.
+        /// </summary>
+        public static bool IsStreamed(Packet packet)
+            => packet != null
+                && (packet.packet_event == PacketEvent.VIEWER_CAMERA_POSE || packet.packet_event == PacketEvent.VIEWPORT_SET_CAMERA);
 
         public static string FormatSummary(Packet packet)
         {

@@ -496,12 +496,10 @@ public static class ModelReferenceMaterialOverrides
 
 			1f);
 
-		vertexColourScale = ClampVector3Components(vertexColourScale, 0f, 1f);
-		vertexOpacityScale = Mathf.Clamp(vertexOpacityScale, 0f, 1f);
 		diffuseColourScale = ClampVector3Components(diffuseColourScale, 0f, 255f);
 		diffuseOpacityScale = Mathf.Clamp(diffuseOpacityScale, 0f, 255f);
 
-		Vector4 vertex = new Vector4(vertexColourScale.X, vertexColourScale.Y, vertexColourScale.Z, vertexOpacityScale);
+		Vector4 vertex = GetVertexColourTint(material, vertexColourScale, vertexOpacityScale);
 
 		Vector4 diffuse = new Vector4(
 
@@ -519,6 +517,47 @@ public static class ModelReferenceMaterialOverrides
 
 	}
 
+
+
+	/// <summary>
+	/// What vertex_colour_scale / vertex_opacity_scale do to this material's diffuse. The viewer's meshes carry no
+	/// vertex colours, so every vertex is taken as white.
+	/// </summary>
+	/// <remarks>
+	/// Retail copies the two, unclamped, into the instance's first GPU constant (CA_ENVIRONMENT instances only), and
+	/// the environment vertex shader's only use of it is <c>vcol = COLOR0 * scale</c> - so it does nothing at all to a
+	/// material without VERTEX_COLOUR. Where the vertex colour does exist it tints the diffuse only when nothing else
+	/// claims those lanes: ALPHABLEND_NOISE and DIRT_MAPPING turn x/y into the noise/dirt blend amount, and with
+	/// VERTEX_AMBIENT_OCCLUSION only z is used, as the AO term 1 - (1 - vcol.z * z) * (1 - VERT_AO_TINT). Drawn as a
+	/// plain tint, the cutting panel's (1, 0.1, 1) - a dirt/noise blend mask that scripts animate from (4, 1, 1) -
+	/// came out magenta.
+	/// The AO term is left out too: the viewer draws neither the AO baked into the vertex colours nor the emissive
+	/// that retail pairs with a darkened AO (the only retail use, ENG_REACTORCORE's upper core at z = 0, glows in the
+	/// game but came out as a black silhouette here).
+	/// </remarks>
+	private static Vector4 GetVertexColourTint(Materials.Material material, Vector3 scale, float opacity)
+	{
+		Shaders.Shader shader = material.Shader;
+		if (!HasFeature(shader, CA_ENVIRONMENT.FEATURES.VERTEX_COLOUR))
+			return Vector4.One;
+
+		float alpha = Mathf.Clamp(opacity, 0f, 1f);
+		if (HasFeature(shader, CA_ENVIRONMENT.FEATURES.VERTEX_AMBIENT_OCCLUSION)
+			|| HasFeature(shader, CA_ENVIRONMENT.FEATURES.ALPHABLEND_NOISE)
+			|| HasFeature(shader, CA_ENVIRONMENT.FEATURES.DIRT_MAPPING)
+			|| HasFeature(shader, CA_ENVIRONMENT.FEATURES.AMBIENT_OCCLUSION_MAPPING))
+		{
+			return new Vector4(1f, 1f, 1f, alpha);
+		}
+
+		Vector3 tint = ClampVector3Components(scale, 0f, 1f);
+		return new Vector4(tint.X, tint.Y, tint.Z, alpha);
+	}
+
+	private static bool HasFeature(Shaders.Shader shader, CA_ENVIRONMENT.FEATURES feature)
+	{
+		return (shader.UbershaderFeatureFlags & (1L << (int)feature)) != 0;
+	}
 
 
 	private static Vector3 ClampVector3Components(Vector3 value, float min, float max)

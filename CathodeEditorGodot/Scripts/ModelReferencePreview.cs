@@ -63,6 +63,8 @@ public partial class ModelReferencePreview : FunctionEntityPreview
 		_scene.ClearRenderableChildren(renderTarget);
 		SpawnAllRenderables(renderTarget);
 		RegisterPickablesWithOwner();
+		//The new meshes come in their own material: a placement that is greyed out has to be greyed out again
+		_scene.ReapplyCompositeFocusTo(renderTarget);
 	}
 
 	/// <summary>First bulk spawn after deferred setup — render target has no mesh children yet.</summary>

@@ -39,6 +39,9 @@ public static class LevelViewerCompositeFocus
 	private static Node _scopeContentRoot;
 	//Show Zones has the level's materials: nothing is greyed out, though the scope is still kept (see Refresh)
 	private static bool _dimmingStoodDown;
+	/* Owners a pass left as they were because they were selected. Their grey-out was never worked out for the scope they
+	   are in now; ReapplyToOwnersLeftBySelection does it once the selection has moved off them. */
+	private static readonly HashSet<Node3D> _ownersPassedOverForSelection = new();
 	public static bool HasActiveComposite => PreviewVisibilitySettings.ActiveCompositeId != 0;
 	//Zones are (or were) on and the grey-out is off for it; a zones-off refresh has to bring it back
 	public static bool DimmingStoodDown => _dimmingStoodDown;
@@ -294,11 +297,137 @@ public static class LevelViewerCompositeFocus
 		LevelViewerPick.InvalidateScopedPickables();
 	}
 
+	/// <summary>
+	/// Gives the entities under <paramref name="root"/> (itself included) the grey-out their place in the scope calls for,
+	/// as they are now. <see cref="Refresh"/> only works the focus out when the scope changes, so anything that rebuilds or
+	/// recolours an entity's meshes in place has to come back here: a ModelReference parameter or resource edit respawns
+	/// the entity in EVERY placement of its composite - the greyed-out sibling placements too - and the new meshes arrive
+	/// in their own material; a preview recolour writes its colour over the grey. Left alone they stayed bright until the
+	/// active composite changed, and an incremental focus change passed them by as "unchanged".
+	/// </summary>
+	public static void ReapplyToSubtree(Node3D root, Commands commands)
+	{
+		if (root == null || !GodotObject.IsInstanceValid(root) || !PrepareForReapply(commands))
+			return;
+
+		uint[] focusPath = PreviewVisibilitySettings.CompositeFocusInstancePath ?? Array.Empty<uint>();
+		List<MeshInstance3D> meshes = new List<MeshInstance3D>();
+		int dimmed = 0, undimmed = 0, unchanged = 0;
+		Stack<Node3D> pending = new Stack<Node3D>();
+		pending.Push(root);
+		while (pending.Count > 0)
+		{
+			Node3D owner = pending.Pop();
+			if (owner == null || !GodotObject.IsInstanceValid(owner))
+				continue;
+
+			//Same rules as ApplyFocusToPickOwners: one decision per registered pick owner; the selection is left alone
+			if (LevelViewerSelection.IsUnderSelection(owner))
+				_ownersPassedOverForSelection.Add(owner);
+			else
+				ApplyCurrentFocusToOwner(owner, focusPath, meshes, ref dimmed, ref undimmed, ref unchanged);
+
+			int childCount = owner.GetChildCount();
+			for (int i = 0; i < childCount; i++)
+			{
+				if (owner.GetChild(i) is Node3D child && AlienScene.HasOwnerComposite(child))
+					pending.Push(child);
+			}
+		}
+	}
+
+	/// <summary>
+	/// The selection has just moved or been cleared: the owners a pass left alone while they were selected get the
+	/// grey-out their place in the scope calls for. On a step into another placement the focus is applied BEFORE the new
+	/// selection, so whatever was selected in the placement being left - one entity, or a composite instance holding the
+	/// whole level - kept its old look. Only the owners actually passed over are judged, so moving the selection off a
+	/// large instance without a scope change in between costs nothing.
+	/// </summary>
+	public static void ReapplyToOwnersLeftBySelection(Commands commands)
+	{
+		if (_ownersPassedOverForSelection.Count == 0)
+			return;
+
+		List<Node3D> released = null;
+		foreach (Node3D owner in _ownersPassedOverForSelection)
+		{
+			if (owner == null || !GodotObject.IsInstanceValid(owner) || !LevelViewerSelection.IsUnderSelection(owner))
+				(released ??= new List<Node3D>()).Add(owner);
+		}
+		if (released == null)
+			return;
+
+		for (int i = 0; i < released.Count; i++)
+			_ownersPassedOverForSelection.Remove(released[i]);
+		//Stood down or not worked out yet: the full pass that brings the grey-out back covers these too
+		if (!PrepareForReapply(commands))
+			return;
+
+		uint[] focusPath = PreviewVisibilitySettings.CompositeFocusInstancePath ?? Array.Empty<uint>();
+		List<MeshInstance3D> meshes = new List<MeshInstance3D>();
+		int dimmed = 0, undimmed = 0, unchanged = 0;
+		for (int i = 0; i < released.Count; i++)
+		{
+			Node3D owner = released[i];
+			if (owner != null && GodotObject.IsInstanceValid(owner))
+				ApplyCurrentFocusToOwner(owner, focusPath, meshes, ref dimmed, ref undimmed, ref unchanged);
+		}
+	}
+
+	/// <summary>Whether a reapply can judge against the current scope (rebuilding its cache when that was invalidated).</summary>
+	private static bool PrepareForReapply(Commands commands)
+	{
+		if (!HasActiveComposite || _dimmingStoodDown || commands == null)
+			return false;
+		//Nothing has been worked out since the scene was (re)built or cleared: the Refresh that does it covers this too
+		if (_scopeContentRoot == null || _scopeNodeEntities == null)
+			return false;
+		//The scope cache may have been invalidated (a composite instance added): judging against an empty set would
+		//grey the active composite's own placements
+		if (_scopeCacheActiveCompositeId != PreviewVisibilitySettings.ActiveCompositeId || _compositesInScope.Count == 0)
+			RebuildScopeCache(commands);
+		return true;
+	}
+
+	/// <summary>One owner's grey-out for the scope as it is now (the decision ApplyFocusToPickOwners makes).</summary>
+	private static void ApplyCurrentFocusToOwner(
+		Node3D owner,
+		uint[] focusPath,
+		List<MeshInstance3D> meshes,
+		ref int dimmed,
+		ref int undimmed,
+		ref int unchanged)
+	{
+		meshes.Clear();
+		if (!LevelViewerPick.TryCopyPickMeshesForOwner(owner, meshes))
+			return;
+
+		bool inScope = IsOwnerCompositeInScopeForOwner(owner) && MatchesFocusInstancePath(owner, focusPath);
+		//In scope and never greyed (a fresh respawn, mostly): nothing to undo, and no state worth keeping for it -
+		//the per-mesh state is only pruned on a scope change, so a slider drag would pile entries up
+		if (inScope)
+			meshes.RemoveAll(mesh => !_meshDimmedState.ContainsKey(mesh) && !_savedMaterialOverrides.ContainsKey(mesh));
+		ApplyOwnerMeshFocusState(meshes, !inScope, ref dimmed, ref undimmed, ref unchanged);
+	}
+
+	/// <summary>The grey this class put on is what the mesh is drawn with now (nothing has written over it since).</summary>
+	private static bool IsShowingDimmedMaterial(MeshInstance3D mesh)
+	{
+		Material current = mesh.MaterialOverride;
+		return current != null
+			&& (current == _cachedDimmedOpaque
+				|| current == _cachedDimmedOpaqueDoubleSided
+				|| current == _cachedDimmedTransparent
+				|| current == _cachedDimmedTransparentDoubleSided);
+	}
+
 	/// <summary>Clears all dimmed materials/pick state before re-applying a new drill scope.</summary>
 	private static void ResetDimStateForScopeChange()
 	{
 		RestoreAllDimmedMeshes();
 		_meshDimmedState.Clear();
+		//Everything is judged again by the full pass that follows (or when zones go off), the selection noted afresh
+		_ownersPassedOverForSelection.Clear();
 	}
 
 	/// <summary>True when composite focus has this mesh greyed out (used to avoid re-pickable registration).</summary>
@@ -318,6 +447,7 @@ public static class LevelViewerCompositeFocus
 		_meshDimmedState.Clear();
 		_dimmedMaterialBySource.Clear();
 		_ownerEntityChainCache.Clear();
+		_ownersPassedOverForSelection.Clear();
 		ClearScopeEvaluationContext();
 	}
 
@@ -373,6 +503,8 @@ public static class LevelViewerCompositeFocus
 			for (int i = 0; i < staleOwners.Count; i++)
 				_ownerEntityChainCache.Remove(staleOwners[i]);
 		}
+
+		_ownersPassedOverForSelection.RemoveWhere(owner => owner == null || !GodotObject.IsInstanceValid(owner));
 	}
 
 	private static void ApplyFocusFromPickRegistry(Commands commands)
@@ -417,7 +549,10 @@ public static class LevelViewerCompositeFocus
 		LevelViewerPick.ForEachPickOwner((owner, meshes) =>
 		{
 			if (LevelViewerSelection.IsUnderSelection(owner))
+			{
+				_ownersPassedOverForSelection.Add(owner);
 				return;
+			}
 
 			bool compositeInScope = IsOwnerCompositeInScopeForOwner(owner);
 			bool nowInScope = compositeInScope && MatchesFocusInstancePath(owner, evaluatePath);
@@ -562,7 +697,9 @@ public static class LevelViewerCompositeFocus
 	{
 		if (shouldDim)
 		{
-			if (_meshDimmedState.TryGetValue(mesh, out bool wasDimmed) && wasDimmed)
+			//Greyed before and still drawn grey. One that something has drawn over since is greyed again (DimMesh).
+			if (_meshDimmedState.TryGetValue(mesh, out bool wasDimmed) && wasDimmed
+				&& (!_savedMaterialOverrides.ContainsKey(mesh) || IsShowingDimmedMaterial(mesh)))
 				return MeshFocusChange.Unchanged;
 
 			SetMeshDimmed(mesh, true);
@@ -623,7 +760,13 @@ public static class LevelViewerCompositeFocus
 			return;
 
 		if (_savedMaterialOverrides.ContainsKey(meshInstance))
-			return;
+		{
+			if (IsShowingDimmedMaterial(meshInstance))
+				return;
+			//Written over since it was greyed (a preview recoloured, a material remapped in place): that is now
+			//what it goes back to, and the grey goes on over it again
+			_savedMaterialOverrides.Remove(meshInstance);
+		}
 
 		try
 		{

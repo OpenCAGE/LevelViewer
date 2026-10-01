@@ -135,6 +135,22 @@ public static class LevelViewerSelection
         if (_selectionRoots.Count == 0)
             return;
 
+        /* A selected ModelReference respawned in place (a parameter or resource edit) has new meshes; the marked ones
+           are on their way out. The highlight goes on the meshes the selection has now. */
+        bool stale = false;
+        for (int i = 0; i < _selectionMeshes.Count && !stale; i++)
+        {
+            MeshInstance3D mesh = _selectionMeshes[i];
+            stale = mesh == null || !GodotObject.IsInstanceValid(mesh) || mesh.IsQueuedForDeletion();
+        }
+        if (stale)
+        {
+            _selectionMeshes.Clear();
+            for (int i = 0; i < _selectionRoots.Count; i++)
+                CollectSelectionMeshes(_selectionRoots[i], append: true);
+            _selectionMeshes.RemoveAll(mesh => mesh == null || !GodotObject.IsInstanceValid(mesh) || mesh.IsQueuedForDeletion());
+        }
+
         for (int i = 0; i < _selectionMeshes.Count; i++)
         {
             MeshInstance3D mesh = _selectionMeshes[i];

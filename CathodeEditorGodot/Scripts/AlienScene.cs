@@ -462,6 +462,7 @@ public partial class AlienScene : Node3D
 		_selectedEntityIds.Clear();
 		_markedWithSelection.Clear();
 		LevelViewerSelection.Clear();
+		ReapplyCompositeFocusLeftBySelection();
 		LevelViewerLightRadius.Clear();
 		RefreshAliasHighlights(forceRebuild: false);
 		RefreshProxyHighlights(forceRebuild: false);
@@ -2010,6 +2011,13 @@ public partial class AlienScene : Node3D
 				LevelViewerCompositeFocus.InvalidateScopeCache();
 				LevelViewerPick.InvalidateScopedPickables();
 			}
+
+			//Spawned into every placement of the composite: the greyed-out placements get it greyed out too
+			if (TryGetCachedEntityNodes(composite, entity, out List<Node3D> spawned))
+			{
+				foreach (Node3D node in spawned.ToArray())
+					ReapplyCompositeFocusTo(node);
+			}
 		}
 	}
 
@@ -2549,6 +2557,48 @@ public partial class AlienScene : Node3D
 		}
 	}
 
+	/// <summary>
+	/// The focus pass leaves whatever is selected alone (LevelViewerSelection.IsUnderSelection), and on a step into another
+	/// placement it runs BEFORE the new selection is applied - so what was selected in the placement being left was never
+	/// greyed, and stayed bright once the selection moved off it (with a composite instance holding the whole level
+	/// selected, nothing at all greyed). What a pass passed over is judged now that it is no longer selected.
+	/// </summary>
+	private void ReapplyCompositeFocusLeftBySelection()
+	{
+		//A populate applies the whole focus when it ends; a preview batch has it stood down and puts it back itself
+		if (_isBulkPopulating || _previewOverlaysStoodDown || !_content.Loaded)
+			return;
+
+		try
+		{
+			LevelViewerCompositeFocus.ReapplyToOwnersLeftBySelection(_content.Level.Commands);
+		}
+		catch (System.Exception ex)
+		{
+			ViewerLog.PrintErr("[Viewer] Composite focus reapply failed: " + ex);
+		}
+	}
+
+	/// <summary>
+	/// The grey-out for one entity (and everything spawned under it) after its meshes were rebuilt or recoloured in place.
+	/// RefreshCompositeFocus only acts on a scope change; see <see cref="LevelViewerCompositeFocus.ReapplyToSubtree"/>.
+	/// </summary>
+	internal void ReapplyCompositeFocusTo(Node3D root)
+	{
+		//A populate applies the whole focus when it ends; a preview batch has it stood down and puts it back itself
+		if (_isBulkPopulating || _previewOverlaysStoodDown || root == null || !_content.Loaded)
+			return;
+
+		try
+		{
+			LevelViewerCompositeFocus.ReapplyToSubtree(root, _content.Level.Commands);
+		}
+		catch (System.Exception ex)
+		{
+			ViewerLog.PrintErr("[Viewer] Composite focus reapply failed: " + ex);
+		}
+	}
+
 	public void SelectEntity(List<uint> entityPath, List<uint> compositePath, bool entitySelected, SelectionOrigin origin = SelectionOrigin.Remote)
 	{
 		SelectEntity(entityPath, compositePath, entitySelected, null, origin);
@@ -2607,6 +2657,7 @@ public partial class AlienScene : Node3D
 			LevelViewerAliasHighlight.ReleaseNode(entityNode);
 			LevelViewerZoneHighlight.ReleaseNode(entityNode);
 			LevelViewerSelection.Apply(highlightNodes);
+			ReapplyCompositeFocusLeftBySelection();
 
 			try
 			{
@@ -3448,6 +3499,10 @@ public partial class AlienScene : Node3D
 			if (selectedEntityNode == entityNode)
 				RefreshSelectedLightRadiusVisual();
 		}
+
+		/* Every preview above came back in its own material - a ModelReference respawned, a marker recoloured - and this
+		   runs for every placement of the entity, the greyed-out ones included. */
+		ReapplyCompositeFocusTo(entityNode);
 	}
 
 	/// <summary>
@@ -3482,6 +3537,7 @@ public partial class AlienScene : Node3D
 		Level level = _content.Level;
 		Commands commands = level.Commands;
 		ShortGuid changedId = new ShortGuid(changedMappingId);
+		HashSet<Node3D> remappedOwners = new HashSet<Node3D>();
 
 		foreach (KeyValuePair<MeshInstance3D, Materials.Material> entry in _modelReferenceMeshes.ToArray())
 		{
@@ -3541,7 +3597,12 @@ public partial class AlienScene : Node3D
 					overrideParameterEntity,
 					fallbackParameterEntity);
 			}
+			remappedOwners.Add(owner);
 		}
+
+		//Written straight over the grey on a greyed-out mesh: the remapped material is kept as what it returns to
+		foreach (Node3D owner in remappedOwners)
+			ReapplyCompositeFocusTo(owner);
 	}
 
 	private void ReapplyAllAliasInstanceMappingMeta()
@@ -4162,8 +4223,10 @@ public partial class AlienScene : Node3D
 
 			mesh.Visible = shown;
 			MeshInstance3D overlay = FindWireframeOverlay(mesh);
+			//A greyed-out mesh keeps its overlay hidden, as UpdateWireframeOverlay does
 			if (overlay != null)
-				overlay.Visible = shown && ModelReferenceRenderSettings.WireframeEnabled;
+				overlay.Visible = shown && ModelReferenceRenderSettings.WireframeEnabled
+					&& !LevelViewerCompositeFocus.IsMeshVisuallyDimmed(mesh);
 
 			if (mesh.GetParent() is Node3D owner && GodotObject.IsInstanceValid(owner))
 				owners.Add(owner);
@@ -4207,6 +4270,9 @@ public partial class AlienScene : Node3D
 
 			preview.Refresh();
 			preview.SyncPickablesWithVisibility();
+			//A refresh recolours the preview (PreviewVisualUtility.ApplyColor) over the grey of a greyed-out one
+			if (preview.GetParent() is Node3D previewOwner)
+				ReapplyCompositeFocusTo(previewOwner);
 		}
 
 		RefreshCompositeFocus();
@@ -4261,14 +4327,22 @@ public partial class AlienScene : Node3D
 		RefreshSplinePathPreviews(context.EntityNode);
 	}
 
-	private static void RefreshSplinePathPreviews(Node3D entityNode)
+	private void RefreshSplinePathPreviews(Node3D entityNode)
 	{
 		if (entityNode == null)
 			return;
 
 		SplinePathPreview[] previews = EntityNodeUtil.FindPreviews<SplinePathPreview>(entityNode);
 		for (int i = 0; i < previews.Length; i++)
+		{
 			previews[i].Refresh();
+			//The refresh rebuilds the segment lines (unregistered until now) and recolours the markers over the grey
+			previews[i].SyncPickablesWithVisibility();
+		}
+
+		//Runs for every placement of the entity, the greyed-out ones included (as RefreshFunctionEntityPreviews does)
+		if (previews.Length > 0)
+			ReapplyCompositeFocusTo(entityNode);
 	}
 
 	private static ulong MakeEntityCacheKey(ShortGuid compositeId, ShortGuid entityId)
@@ -5341,7 +5415,8 @@ public partial class AlienScene : Node3D
 				fallbackParameterEntity);
 			if (wireframe != null)
 				overlay.MaterialOverride = wireframe;
-			overlay.Visible = true;
+			//A greyed-out mesh keeps its overlay hidden; LevelViewerCompositeFocus shows it again when the grey comes off
+			overlay.Visible = !LevelViewerCompositeFocus.IsMeshVisuallyDimmed(solidMesh);
 		}
 	}
 

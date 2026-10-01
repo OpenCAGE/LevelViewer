@@ -4,6 +4,7 @@ using System.Runtime.InteropServices;
 
 /// <summary>
 /// Free camera: WASD/QE move; RMB drag look, RMB click context menu; MMB pan; LMB select entity, LMB drag box-select (Ctrl adds, Shift toggles); Ctrl+MMB step into composite instance; - step back hierarchy; 0/8/9 set regular/deep/advanced deep select; 1-4 transform/rotate world/local, 5 none; Alt+1-4 set the selection highlight mode; H hide selected; Shift+H unhide all; scroll adjusts speed; Z frames selection; Ctrl+D duplicates the selection; Ctrl+Z/Ctrl+Y undo/redo in OpenCAGE.
+/// While measuring (OpenCAGE's Measure) LMB puts down the ruler's points instead (Shift: the selected entity's origin, V: the nearest vertex), and Escape stops.
 /// MoveSpeed is world units per second (framerate-independent via delta).
 /// While it follows the running game's camera (LiveLink Camera, <see cref="IsFollowingGameCamera"/>) none of these move it.
 /// </summary>
@@ -305,8 +306,9 @@ public partial class LevelViewerCamera : Camera3D
                 }
                 else if (keyEvent.Keycode == Key.Escape)
                 {
-                    // Escape leaves creation mode; with no mode to leave, it clears the selection. Mid-press
-                    // (a box being drawn, or a click not yet let go) it abandons the press instead, and a
+                    // Escape leaves creation mode, or measuring (clearing the ruler); with no mode to leave, it
+                    // clears the selection. Mid-press (a box being drawn, or a click not yet let go) it
+                    // abandons the press instead, and a
                     // handle held puts back what its drag moved - clearing the selection under a drag left
                     // the entity shown where the level no longer had it (issue 718) - and a shift-clone's
                     // copies are taken back rather than left stacked unseen on the originals.
@@ -316,6 +318,8 @@ public partial class LevelViewerCamera : Camera3D
                     else if (gizmo != null && (gizmo.IsDragging || gizmo.IsHandoverArmed))
                         gizmo.CancelDrag();
                     else if (ExitCreateModeIfActive())
+                        _commandsEditorConnection?.SendViewportModeToEditor();
+                    else if (ExitMeasureModeIfActive())
                         _commandsEditorConnection?.SendViewportModeToEditor();
                     else
                         TryClearEntitySelection();
@@ -391,6 +395,16 @@ public partial class LevelViewerCamera : Camera3D
         catch (Exception ex)
         {
             ViewerLog.PrintErr("[Viewer] Following the game camera failed: " + ex);
+        }
+
+        //The ruler, drawn where the camera now puts it - and cleared once the scene it was in has gone, idle or not
+        try
+        {
+            _measure.Update(this, _alienScene, _hudLayer);
+        }
+        catch (Exception ex)
+        {
+            ViewerLog.PrintErr("[Viewer] Measuring failed: " + ex);
         }
 
         /* After ProcessInternal rather than in it: that returns early while the viewer idles, and the pose the game is
@@ -814,6 +828,16 @@ public partial class LevelViewerCamera : Camera3D
                 if (_commandsEditorConnection != null && _commandsEditorConnection.CreateModeActive)
                 {
                     _commandsEditorConnection.TryCreateEntityAtScreen(this, mouseButton.Position);
+                    GetViewport().SetInputAsHandled();
+                    break;
+                }
+                /* Measuring: clicks put down the ruler's points instead of selecting. A gizmo handle still
+                   takes its press, so what is measured from can be moved and the ruler follows it - but not
+                   with Shift held, which here is the selected entity's origin rather than a shift-clone. */
+                if (_commandsEditorConnection != null && _commandsEditorConnection.MeasureModeActive)
+                {
+                    if (mouseButton.ShiftPressed || !TryGizmoMouseDown(mouseButton.Position, duplicate: false))
+                        MeasureAt(mouseButton.Position, mouseButton.ShiftPressed);
                     GetViewport().SetInputAsHandled();
                     break;
                 }
@@ -1416,21 +1440,6 @@ public partial class LevelViewerCamera : Camera3D
         _positionPanel.OffsetRight = 280f;
         _positionPanel.Visible = false;
         hudRoot.AddChild(_positionPanel);
-
-        //Just above the position, sized to its text: shown for as long as the camera follows the game's (UpdateFollowHint)
-        _followLabel = CreateHudLabel();
-        _followPanel = WrapHudPanel(_followLabel);
-        _followPanel.MouseFilter = Control.MouseFilterEnum.Ignore;
-        _followPanel.SetAnchorsPreset(Control.LayoutPreset.BottomLeft);
-        _followPanel.GrowVertical = Control.GrowDirection.Begin;
-        _followPanel.OffsetLeft = 12f;
-        _followPanel.OffsetRight = 12f;
-        _followPanel.OffsetTop = -56f;
-        _followPanel.OffsetBottom = -56f;
-        _followPanel.Visible = false;
-        hudRoot.AddChild(_followPanel);
-        _followHintState = FollowHintHidden;
-        UpdateFollowHint(otherComposite: false);
     }
 
     private static Label CreateHudLabel()
@@ -1861,6 +1870,10 @@ public partial class LevelViewerCamera : Camera3D
             return;
         }
 
+        //Measuring with the first point down: the line runs to what a click here would put down (not mid look or pan)
+        if (_measure.Active && (motion.ButtonMask & (MouseButtonMask.Right | MouseButtonMask.Middle)) == 0)
+            _measure.Hover(motion.Position, motion.ShiftPressed, LevelViewerTransformSnap.VertexAlways || IsVertexSnapKeyDown());
+
         // Fall through to camera look / pan (embedded mode polls Win32 input in _Process instead).
         if (!EmbeddedInOpenCage && (_mouseLookActive || _panning))
         {
@@ -1913,6 +1926,53 @@ public partial class LevelViewerCamera : Camera3D
             return false;
 
         _commandsEditorConnection.ExitCreateMode();
+        return true;
+    }
+
+    // -------------------------------------------------------------------------
+    //  Measuring (OpenCAGE's Measure, issue 722)
+    // -------------------------------------------------------------------------
+
+    private readonly LevelViewerMeasure _measure = new LevelViewerMeasure();
+
+    /// <summary>
+    /// Measuring came on or went off (CommandsEditorConnection's measure_mode setting). Either way the ruler starts
+    /// empty: on, it waits for the first click; off, the line comes off the screen. Main thread.
+    /// </summary>
+    public void SetMeasureMode(bool measure)
+    {
+        if (measure == _measure.Active)
+            return;
+
+        _measure.SetActive(measure);
+        LevelViewerRenderIdleThrottle.NotifyUserActivity();
+        if (!IsProcessing())
+            SetProcess(true);
+    }
+
+    /* A left click while measuring: the next point of the ruler where it landed - or, with Shift, at the selected
+       entity's origin. Vertex snapping (V held, or the Transform Snap menu's) takes the nearest vertex, as it does
+       for a drag. */
+    private void MeasureAt(Vector2 screenPosition, bool selectedOrigin)
+    {
+        if (!_measure.Active)
+            _measure.SetActive(true);
+
+        _measure.Click(this, _alienScene, screenPosition, selectedOrigin,
+            LevelViewerTransformSnap.VertexAlways || IsVertexSnapKeyDown());
+    }
+
+    /// <summary>Stop measuring, clearing the ruler. False if it wasn't on, so callers can fall through.</summary>
+    private bool ExitMeasureModeIfActive()
+    {
+        if (_commandsEditorConnection == null || !GodotObject.IsInstanceValid(_commandsEditorConnection))
+            _commandsEditorConnection = GetNodeOrNull<CommandsEditorConnection>(CommandsEditorConnectionPath);
+
+        if (_commandsEditorConnection == null || !_commandsEditorConnection.MeasureModeActive)
+            return false;
+
+        _commandsEditorConnection.ExitMeasureMode();
+        _measure.SetActive(false);
         return true;
     }
 
@@ -2142,13 +2202,6 @@ public partial class LevelViewerCamera : Camera3D
     private uint _followPoseLevelRoot; //the level it is a pose in (its root composite)
     private float _followFov;          //the game's vertical field of view in degrees; 0 while none has come
 
-    private const int FollowHintHidden = -1;
-    private const int FollowHintInLevel = 0;
-    private const int FollowHintOtherComposite = 1;
-    private PanelContainer _followPanel;
-    private Label _followLabel;
-    private int _followHintState = FollowHintHidden;
-
     /// <summary>Whether the camera follows the running game's (LiveLink Camera), and takes no control of its own.</summary>
     public bool IsFollowingGameCamera => _followingGameCamera;
 
@@ -2179,14 +2232,12 @@ public partial class LevelViewerCamera : Camera3D
             _panning = false;
             ReleaseEmbeddedMouseCapture();
             ReleaseMouse(this);
-            UpdateFollowHint(otherComposite: false);
             SendFollowingGameCameraAnswer();
             return;
         }
 
         Fov = _fovBeforeFollowing;
         SyncAnglesFromTransform();
-        UpdateFollowHint(otherComposite: false);
     }
 
     /* The answer to camera_follows_game coming on: where the camera is now, as the pose stream would send it. With no
@@ -2243,16 +2294,15 @@ public partial class LevelViewerCamera : Camera3D
         HoldFollowedGamePose();
     }
 
-    /* While following the game's camera: the camera on the game's last pose and field of view, if it has come off them,
-       and the hint saying why it will not move. Only while the scene on screen is the level root the pose is in. */
+    /* While following the game's camera: the camera on the game's last pose and field of view, if it has come off them.
+       Only while the scene on screen is the level root the pose is in. */
     private void HoldFollowedGamePose()
     {
         if (!_followingGameCamera)
             return;
 
-        bool levelOnScreen = TryGetLevelRootOnScreen(out Node3D root, out bool otherComposite);
-        UpdateFollowHint(otherComposite);
-        if (!levelOnScreen || !_followPoseHeld || _followPoseLevelRoot != PreviewVisibilitySettings.LevelRootCompositeId)
+        if (!TryGetLevelRootOnScreen(out Node3D root) || !_followPoseHeld
+            || _followPoseLevelRoot != PreviewVisibilitySettings.LevelRootCompositeId)
             return;
 
         Transform3D target = root.GlobalTransform * _followPose;
@@ -2267,25 +2317,19 @@ public partial class LevelViewerCamera : Camera3D
     }
 
     /* Whether the scene on screen is the level root (so in the game's world space), and its root node. Not while nothing
-       is loaded or a preview batch has the scene. otherComposite: a composite other than the level root is on screen,
-       which the game's pose means nothing in. */
-    private bool TryGetLevelRootOnScreen(out Node3D root, out bool otherComposite)
+       is loaded or a preview batch has the scene, or while another composite is on screen - the game's pose means
+       nothing in that. */
+    private bool TryGetLevelRootOnScreen(out Node3D root)
     {
         root = null;
-        otherComposite = false;
 
         AlienScene scene = _alienScene;
         if (scene == null || !GodotObject.IsInstanceValid(scene) || !scene.Content.Loaded || scene.IsPreviewBatchRunning)
             return false;
 
         uint compositeId = scene.CompositeID;
-        if (compositeId == 0)
+        if (compositeId == 0 || compositeId != PreviewVisibilitySettings.LevelRootCompositeId)
             return false;
-        if (compositeId != PreviewVisibilitySettings.LevelRootCompositeId)
-        {
-            otherComposite = true;
-            return false;
-        }
 
         root = scene.ParentNode;
         return root != null && GodotObject.IsInstanceValid(root) && root.IsInsideTree();
@@ -2312,30 +2356,6 @@ public partial class LevelViewerCamera : Camera3D
 
         if (!Mathf.IsEqualApprox(Fov, fov))
             Fov = fov;
-    }
-
-    /* The hint while following: that the camera is the game's, and - with another composite on screen - where to see
-       it. Only touched when what it says changes. */
-    private void UpdateFollowHint(bool otherComposite)
-    {
-        int state = !_followingGameCamera ? FollowHintHidden
-            : otherComposite ? FollowHintOtherComposite
-            : FollowHintInLevel;
-        if (state == _followHintState || _followPanel == null || _followLabel == null)
-            return;
-
-        _followHintState = state;
-        if (state == FollowHintHidden)
-        {
-            _followPanel.Visible = false;
-            return;
-        }
-
-        _followLabel.Text = state == FollowHintOtherComposite
-            ? "Following the game camera (LiveLink Camera) - open the level's root composite to see it"
-            : "Following the game camera (LiveLink Camera)";
-        _followPanel.Visible = true;
-        _followPanel.Modulate = Colors.White;
     }
 
     /// <summary>

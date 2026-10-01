@@ -204,6 +204,12 @@ public partial class CommandsEditorConnection : Node3D
     private static Texture2D _penCursorTexture;
     public bool CreateModeActive => _createFunctionType != 0;
 
+    /* Measuring (the measure_mode setting, the toolbar's Measure): a left click puts down a point of the camera's ruler
+       (LevelViewerMeasure) instead of selecting. Written from the settings a packet carries, read by the camera's input
+       on the main thread: volatile, like _streamCameraPose. */
+    private volatile bool _measureMode;
+    public bool MeasureModeActive => _measureMode;
+
     /// <summary>Block resync echo from our own outbound transform packets.</summary>
     private bool _suppressParameterResync;
     private bool _compositeFocusDirty;
@@ -1618,6 +1624,7 @@ public partial class CommandsEditorConnection : Node3D
         ApplyDeepSelectModeFromPacket(packet.deep_select_mode);
         ApplyGizmoModeFromPacket(packet.gizmo_mode);
         ApplyCreateModeFromPacket(packet.create_function_type);
+        ApplyMeasureModeFromPacket(packet.measure_mode);
 
         if (packet.model_reference_wireframe != ModelReferenceRenderSettings.WireframeEnabled)
             _scene.SetModelReferenceWireframe(packet.model_reference_wireframe);
@@ -1694,6 +1701,12 @@ public partial class CommandsEditorConnection : Node3D
             else
                 Input.SetDefaultCursorShape(Input.CursorShape.Cross);
         }
+        //Measuring: a crosshair, for putting the ruler's points down
+        else if (_measureMode)
+        {
+            Input.SetCustomMouseCursor(null);
+            Input.SetDefaultCursorShape(Input.CursorShape.Cross);
+        }
         else
         {
             Input.SetCustomMouseCursor(null);
@@ -1710,6 +1723,41 @@ public partial class CommandsEditorConnection : Node3D
         _createFunctionType = 0;
         ApplyCreateModeCursor();
         SyncTransformGizmoToSelection();
+    }
+
+    /* measure_mode, from the settings a packet carries. The camera keeps the ruler, and clears it as measuring comes on
+       or goes off: on the main thread, a deferred call later, which also wakes it to take the line off the screen. */
+    private void ApplyMeasureModeFromPacket(bool measure)
+    {
+        if (_measureMode == measure)
+            return;
+
+        _measureMode = measure;
+        ApplyCreateModeCursor();
+        Callable.From(() => SetCameraMeasureMode(measure)).CallDeferred();
+    }
+
+    private void SetCameraMeasureMode(bool measure)
+    {
+        try
+        {
+            if (FindCamera() is LevelViewerCamera camera)
+                camera.SetMeasureMode(measure);
+        }
+        catch (Exception ex)
+        {
+            ViewerLog.PrintErr("[Viewer] Switching measuring on or off failed: " + ex);
+        }
+    }
+
+    /// <summary>Stop measuring (Escape in the viewport). The camera clears its ruler itself. Main thread.</summary>
+    public void ExitMeasureMode()
+    {
+        if (!_measureMode)
+            return;
+
+        _measureMode = false;
+        ApplyCreateModeCursor();
     }
 
     /// <summary>
@@ -2140,8 +2188,8 @@ public partial class CommandsEditorConnection : Node3D
 
         _cameraFollowsGame = follows;
         ViewerLog.Print(follows
-            ? "[Viewer] The camera follows the game's (LiveLink Camera)"
-            : "[Viewer] The camera no longer follows the game's (LiveLink Camera)");
+            ? "[Viewer] The camera follows the game's (Live Link Camera)"
+            : "[Viewer] The camera no longer follows the game's (Live Link Camera)");
         Callable.From(() => SetCameraFollowsGame(follows)).CallDeferred();
     }
 
@@ -2711,6 +2759,7 @@ public partial class CommandsEditorConnection : Node3D
             gizmo_mode = gizmoMode,
             create_function_type = _createFunctionType,
             selection_highlight_mode = (int)PreviewVisibilitySettings.SelectionHighlightMode,
+            measure_mode = _measureMode,
         });
     }
 

@@ -481,5 +481,11 @@ namespace OpenCAGE.UnityConnection
         // their own time, so a pose is only passed on to the game for the level OpenCAGE has open. 0 = not in level space,
         // or a viewer from before this (taken as the level OpenCAGE has open).
         public uint camera_level_root = 0;
+
+        // OpenCAGE -> Level Viewer, as a setting like the ones above: the viewport is measuring (the toolbar's Measure) - a
+        // left click puts down a point of a ruler on the level's geometry instead of selecting, and two points show the
+        // distance between them. Level Viewer -> OpenCAGE, on VIEWPORT_MODE_CHANGED: whether it still is (Escape stops it
+        // in the viewport). False is also what either side from before this sends, so an older viewer never measures.
+        public bool measure_mode = false;
     }
 }

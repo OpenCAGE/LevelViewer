@@ -334,6 +334,7 @@ public partial class CommandsEditorConnection : Node3D
         _transformGizmo.OnTransformChanged = OnGizmoTransformChanged;
         _transformGizmo.OnDragCommitted = OnGizmoDragCommitted;
         _transformGizmo.OnDuplicateRequested = SendEntityDuplicateRequest;
+        _transformGizmo.OnCloneCancelled = SendGestureCancelRequest;
         _transformGizmo.VertexSnapProvider = ProvideNearestVertex;
         GetTree().CurrentScene?.AddChild(_transformGizmo);
     }
@@ -372,10 +373,10 @@ public partial class CommandsEditorConnection : Node3D
         if (camera == null)
             return;
 
-        //Mid drag - including a shift-clone's copies being selected in and handed the drag - the user
-        //is already looking at what they are moving; do not fly the camera off to it.
+        //Mid drag - including a shift-clone's copies being selected in and handed the drag, even one let go
+        //before they came - the user is already looking at what they are moving; do not fly the camera off to it.
         if (_transformGizmo != null && GodotObject.IsInstanceValid(_transformGizmo)
-            && (_transformGizmo.IsDragging || _transformGizmo.IsHandoverArmed))
+            && (_transformGizmo.IsDragging || _transformGizmo.IsHandoverArmed || _transformGizmo.TookHandover))
             return;
 
         if (selectedNode == null || !GodotObject.IsInstanceValid(selectedNode) || !_focusOnSelected || _scene == null
@@ -2267,6 +2268,19 @@ public partial class CommandsEditorConnection : Node3D
     public void SendUndoRequest()
     {
         SendMessage(new Packet(PacketEvent.UNDO_REQUEST));
+    }
+
+    /// <summary>
+    /// A shift-clone was called off (Escape mid drag, or the selection changing under it) after its copies
+    /// were asked for: ask OpenCAGE to take back the step that made them - which it does only while that
+    /// step, made under this <paramref name="gesture"/>, is still the latest. Otherwise the copies stay
+    /// where they were made, stacked unseen on the originals.
+    /// </summary>
+    public void SendGestureCancelRequest(uint gesture)
+    {
+        if (gesture == 0)
+            return;
+        SendMessage(new Packet(PacketEvent.GESTURE_CANCEL_REQUEST) { gesture = gesture });
     }
 
     public void SendSaveRequest()

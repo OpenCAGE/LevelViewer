@@ -306,9 +306,15 @@ public partial class LevelViewerCamera : Camera3D
                 else if (keyEvent.Keycode == Key.Escape)
                 {
                     // Escape leaves creation mode; with no mode to leave, it clears the selection. Mid-press
-                    // (a box being drawn, or a click not yet let go) it abandons the press instead.
+                    // (a box being drawn, or a click not yet let go) it abandons the press instead, and a
+                    // handle held puts back what its drag moved - clearing the selection under a drag left
+                    // the entity shown where the level no longer had it (issue 718) - and a shift-clone's
+                    // copies are taken back rather than left stacked unseen on the originals.
+                    LevelViewerTransformGizmo gizmo = GetGizmo();
                     if (_boxSelect.IsArmed)
                         _boxSelect.End();
+                    else if (gizmo != null && (gizmo.IsDragging || gizmo.IsHandoverArmed))
+                        gizmo.CancelDrag();
                     else if (ExitCreateModeIfActive())
                         _commandsEditorConnection?.SendViewportModeToEditor();
                     else
@@ -838,12 +844,13 @@ public partial class LevelViewerCamera : Camera3D
             {
                 /* A click (the context menu) until the mouse moves or the camera flies; then the look it always
                    was. Pressed while a left press is still waiting to become a click or a box, or mid gizmo
-                   drag, it is there to call that off and opens nothing. */
-                bool interrupts = _boxSelect.IsArmed
-                    || (_commandsEditorConnection != null && GodotObject.IsInstanceValid(_commandsEditorConnection)
-                        && _commandsEditorConnection.TransformGizmo != null
-                        && _commandsEditorConnection.TransformGizmo.IsDragging);
+                   drag, it is there to call that off and opens nothing. A press on a handle not yet a drag is
+                   let go like a box's: the look puts the cursor back in the middle of the view every frame,
+                   and those moves, with the left button still down, would otherwise drag the handle there. */
+                LevelViewerTransformGizmo heldGizmo = GetHeldGizmo();
+                bool interrupts = _boxSelect.IsArmed || heldGizmo != null;
                 _boxSelect.End();
+                heldGizmo?.DropPendingPress();
                 _rightPressed = true;
                 _rightClickPending = !interrupts;
                 _rightDragStarted = false;
@@ -858,6 +865,7 @@ public partial class LevelViewerCamera : Camera3D
             }
             case MouseButton.Middle:
                 _boxSelect.End();
+                GetHeldGizmo()?.DropPendingPress(); //a pan moves the view under it just as a look does
                 if (mouseButton.CtrlPressed)
                 {
                     TryPickDrillIntoComposite(mouseButton.Position);
@@ -1796,6 +1804,19 @@ public partial class LevelViewerCamera : Camera3D
         _commandsEditorConnection?.SendViewportModeToEditor();
     }
 
+    /// <summary>The gizmo, when one of its handles is held (a press, a drag, or a shift-clone waiting on its copies); else null.</summary>
+    private LevelViewerTransformGizmo GetHeldGizmo()
+    {
+        if (_commandsEditorConnection == null || !GodotObject.IsInstanceValid(_commandsEditorConnection))
+            return null;
+
+        LevelViewerTransformGizmo gizmo = _commandsEditorConnection.TransformGizmo;
+        if (gizmo == null || !GodotObject.IsInstanceValid(gizmo))
+            return null;
+
+        return gizmo.IsDragging || gizmo.IsHandoverArmed ? gizmo : null;
+    }
+
     private bool TryGizmoMouseDown(Vector2 pos, bool duplicate)
     {
         LevelViewerTransformGizmo gizmo = GetGizmo();
@@ -1831,7 +1852,7 @@ public partial class LevelViewerCamera : Camera3D
         if (!boxConsumed && gizmo != null && gizmo.Visible)
         {
             gizmo.VertexSnapActive = LevelViewerTransformSnap.VertexAlways || IsVertexSnapKeyDown();
-            gizmoConsumed = gizmo.HandleMouseMotion(motion.Position);
+            gizmoConsumed = gizmo.HandleMouseMotion(motion.Position, (motion.ButtonMask & MouseButtonMask.Left) != 0);
         }
 
         if (gizmoConsumed)

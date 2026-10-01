@@ -159,6 +159,14 @@ namespace OpenCAGE.UnityConnection
         // `camera_up` as up, in the same space VIEWER_CAMERA_POSE uses (the level's, CATHODE's axes) - e.g. where the
         // game's camera is. A viewer from before this ignores it.
         VIEWPORT_SET_CAMERA,
+
+        // Level Viewer -> OpenCAGE: the viewport gesture `gesture` was called off after it made an undo step of its
+        // own - a shift-clone whose copies were asked for, then Escape pressed (or the selection changed) before its
+        // drag was let go. OpenCAGE takes that step back, and forgets it, only if it is still the latest step and was
+        // made under this gesture; otherwise it does nothing. An OpenCAGE from before this ignores it, which leaves the
+        // copies where they were made, as it always did.
+        // Appended, not inserted: these travel as numbers, so an existing event's value must not move.
+        GESTURE_CANCEL_REQUEST,
     }
 
     /// <summary>

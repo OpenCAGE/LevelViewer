@@ -2615,7 +2615,10 @@ public partial class AlienScene : Node3D
 	{
 		if (!entitySelected || entityPath == null || entityPath.Count == 0)
 		{
-			if (_selectedEntity == null)
+			/* A TriggerSequence (or Zone) is script logic with no node of its own, so _selectedEntity stays null while its
+			   members - or the rest of a multi-selection - are drawn as the selection. Returning on that alone left them
+			   green, and held back from the zone colours and the grey-out, until the level was reloaded. */
+			if (_selectedEntity == null && _selectedEntities.Count == 0 && _markedWithSelection.Count == 0)
 				return;
 
 			ClearSelectedEntity();

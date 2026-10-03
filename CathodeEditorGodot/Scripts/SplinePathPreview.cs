@@ -38,6 +38,58 @@ public partial class SplinePathPreview : FunctionEntityPreview
         public Node3D Arrow;
     }
 
+    /* The spline editor's Edit in Viewport: the points it is working on are drawn in place of the entity's own, in every
+       placement of it, as they would be once saved. Nothing is written to the entity, so clearing this puts the saved
+       spline back. Godot space, local to the entity like the stored points. */
+    private static FunctionEntity _editEntity;
+    private static readonly List<Vector3> _editPoints = new List<Vector3>();
+    private static bool _editLoop;
+    private static readonly HashSet<SplinePathPreview> _live = new HashSet<SplinePathPreview>();
+
+    public static void SetEditOverride(FunctionEntity entity, IReadOnlyList<Vector3> points, bool loop)
+    {
+        FunctionEntity previous = _editEntity;
+        _editEntity = entity;
+        _editPoints.Clear();
+        if (points != null)
+            _editPoints.AddRange(points);
+        _editLoop = loop;
+        if (previous != null && previous != entity)
+            RefreshPreviewsOf(previous);
+        RefreshPreviewsOf(entity);
+    }
+
+    public static void ClearEditOverride()
+    {
+        FunctionEntity previous = _editEntity;
+        _editEntity = null;
+        _editPoints.Clear();
+        RefreshPreviewsOf(previous);
+    }
+
+    private static void RefreshPreviewsOf(FunctionEntity entity)
+    {
+        if (entity == null)
+            return;
+        foreach (SplinePathPreview preview in _live)
+        {
+            if (preview.Entity == entity && GodotObject.IsInstanceValid(preview))
+                preview.Refresh();
+        }
+    }
+
+    public override void _EnterTree()
+    {
+        base._EnterTree();
+        _live.Add(this);
+    }
+
+    public override void _ExitTree()
+    {
+        _live.Remove(this);
+        base._ExitTree();
+    }
+
     protected override Node3D GetVisibilityRoot() => _root;
 
     public override void CleanupPreviewVisuals()
@@ -61,7 +113,8 @@ public partial class SplinePathPreview : FunctionEntityPreview
         if (Entity == null)
             return;
 
-        bool visible = PreviewVisualUtility.IsPreviewVisible(Entity, OwnerCompositeId);
+        //The spline being edited shows whatever the filters say, or there would be nothing to edit
+        bool visible = Entity == _editEntity || PreviewVisualUtility.IsPreviewVisible(Entity, OwnerCompositeId);
         if (!visible)
         {
             if (_root != null)
@@ -106,6 +159,12 @@ public partial class SplinePathPreview : FunctionEntityPreview
     private void ReadSplinePoints(List<Vector3> destination)
     {
         destination.Clear();
+        if (Entity == _editEntity)
+        {
+            destination.AddRange(_editPoints);
+            return;
+        }
+
         Parameter pointsParam = Entity.GetParameter(PointsParameter);
         if (pointsParam?.content == null || pointsParam.content.dataType != DataType.SPLINE)
             return;
@@ -126,6 +185,9 @@ public partial class SplinePathPreview : FunctionEntityPreview
 
     private bool IsLoopClosed()
     {
+        if (Entity == _editEntity)
+            return _editLoop;
+
         Parameter loopParam = Entity.GetParameter(LoopParameter);
         return loopParam?.content is cBool loopValue && loopValue.value;
     }

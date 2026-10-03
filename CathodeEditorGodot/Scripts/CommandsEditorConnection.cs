@@ -346,6 +346,50 @@ public partial class CommandsEditorConnection : Node3D
         _transformGizmo.OnCloneCancelled = SendGestureCancelRequest;
         _transformGizmo.VertexSnapProvider = ProvideNearestVertex;
         GetTree().CurrentScene?.AddChild(_transformGizmo);
+
+        SplineEdit.RetargetGizmo = () => SyncTransformGizmoToSelection();
+        SplineEdit.IsGizmoDragging = () => _transformGizmo != null && GodotObject.IsInstanceValid(_transformGizmo) && _transformGizmo.IsDragging;
+    }
+
+    /// <summary>The spline editor's Edit in Viewport mode (SPLINE_EDIT): its handles, and the point the gizmo moves.</summary>
+    public LevelViewerSplineEdit SplineEdit { get; } = new LevelViewerSplineEdit();
+    public bool SplineEditActive => SplineEdit.Active;
+
+    /* A left click while editing a spline: the point whose handle it landed on becomes the editor's selected point. The
+       editor owns the working copy, so it is asked rather than told, and answers with the whole spline. False when the
+       click was not on another point's handle, for the gizmo to have. */
+    public bool SplineEditClickAt(Camera3D camera, Vector2 screenPosition)
+    {
+        if (!SplineEdit.TryPick(camera, screenPosition, out int index))
+            return false;
+        SendMessage(new Packet(PacketEvent.SPLINE_EDIT_POINT_PICKED)
+        {
+            spline_edit_entity = SplineEdit.EntityId,
+            spline_edit_selected = index,
+        });
+        return true;
+    }
+
+    /// <summary>Delete while editing a spline: the selected point goes, not the SplinePath. False if there is none.</summary>
+    public bool RequestSplineEditPointDelete()
+    {
+        if (!SplineEdit.Active || SplineEdit.Selected < 0)
+            return false;
+        SendMessage(new Packet(PacketEvent.SPLINE_EDIT_POINT_DELETE_REQUEST)
+        {
+            spline_edit_entity = SplineEdit.EntityId,
+            spline_edit_selected = SplineEdit.Selected,
+        });
+        return true;
+    }
+
+    /// <summary>Escape while editing a spline: ask the editor to leave Edit in Viewport. False if it isn't on.</summary>
+    public bool RequestSplineEditExit()
+    {
+        if (!SplineEdit.Active)
+            return false;
+        SendMessage(new Packet(PacketEvent.SPLINE_EDIT_EXIT_REQUEST) { spline_edit_entity = SplineEdit.EntityId });
+        return true;
     }
 
     private Camera3D FindCamera()
@@ -457,6 +501,18 @@ public partial class CommandsEditorConnection : Node3D
         if (CreateModeActive)
         {
             _transformGizmo.ClearTarget();
+            return;
+        }
+
+        //Editing a spline in the viewport: the gizmo moves its selected point, never the entity
+        if (SplineEdit.Active)
+        {
+            _gizmoTargetEntityIds = new List<uint>();
+            Node3D point = SplineEdit.GizmoTarget;
+            if (point != null)
+                _transformGizmo.SetTarget(point, camera ?? FindCamera());
+            else
+                _transformGizmo.ClearTarget();
             return;
         }
 
@@ -995,6 +1051,31 @@ public partial class CommandsEditorConnection : Node3D
                 catch (Exception ex)
                 {
                     ViewerLog.PrintErr("[Viewer] Animation preview failed: " + ex);
+                }
+            }).CallDeferred();
+            return;
+        }
+
+        if (packet.packet_event == PacketEvent.SPLINE_EDIT)
+        {
+            /* The spline editor's working copy. The selection it carries is only for viewers from before this, which take
+               the packet as a re-sync: the spline being edited is the selected entity already, so it is left alone. */
+            bool splineActive = packet.spline_edit_active;
+            uint splineEntity = packet.spline_edit_entity;
+            uint splineComposite = packet.composite;
+            List<SplineEditPoint> splinePoints = packet.spline_edit_points;
+            bool splineLoop = packet.spline_edit_loop;
+            int splineSelected = packet.spline_edit_selected;
+            Callable.From(() =>
+            {
+                try
+                {
+                    SplineEdit.Apply(_scene, splineActive, splineEntity, splineComposite, splinePoints, splineLoop, splineSelected);
+                    LevelViewerRenderIdleThrottle.NotifyUserActivity();
+                }
+                catch (Exception ex)
+                {
+                    ViewerLog.PrintErr("[Viewer] Spline edit failed: " + ex);
                 }
             }).CallDeferred();
             return;
@@ -4208,6 +4289,22 @@ public partial class CommandsEditorConnection : Node3D
        it one undo step over there. */
     private void OnGizmoTransformChanged(int targetIndex, Vector3 godotPos, Vector3 godotRotDeg, uint gesture)
     {
+        /* Editing a spline in the viewport: the gizmo was on one of its points. The point goes to the spline editor's
+           working copy - nothing is written to the entity, here or over there, until the editor saves. */
+        if (SplineEdit.Active)
+        {
+            if (SplineEdit.TryCommitMove(godotPos, godotRotDeg, out int pointIndex, out SplineEditPoint point))
+            {
+                SendMessage(new Packet(PacketEvent.SPLINE_EDIT_POINT_MOVED)
+                {
+                    spline_edit_entity = SplineEdit.EntityId,
+                    spline_edit_selected = pointIndex,
+                    spline_edit_points = new List<SplineEditPoint> { point },
+                });
+            }
+            return;
+        }
+
         List<uint> pathEntities;
         List<uint> pathComposites;
         bool entitySelected;

@@ -167,6 +167,21 @@ namespace OpenCAGE.UnityConnection
         // copies where they were made, as it always did.
         // Appended, not inserted: these travel as numbers, so an existing event's value must not move.
         GESTURE_CANCEL_REQUEST,
+
+        // OpenCAGE -> Level Viewer: the spline editor's Edit in Viewport mode. The SplinePath being edited (where it is
+        // selected) shows the editor's working points, each with a numbered handle, and the transform gizmo moves the
+        // selected one. Nothing is written to the viewer's copy of the level; spline_edit_active = false puts the saved
+        // spline back. Built like OpenCAGE's other packets, with the selection on it, so a viewer from before this takes
+        // it as a re-sync of what it has. See spline_edit_*.
+        SPLINE_EDIT,
+        // Level Viewer -> OpenCAGE: a point's handle was clicked (spline_edit_selected).
+        SPLINE_EDIT_POINT_PICKED,
+        // Level Viewer -> OpenCAGE: the gizmo moved the selected point: spline_edit_selected, and the point in spline_edit_points.
+        SPLINE_EDIT_POINT_MOVED,
+        // Level Viewer -> OpenCAGE: Delete was pressed with a point selected (spline_edit_selected).
+        SPLINE_EDIT_POINT_DELETE_REQUEST,
+        // Level Viewer -> OpenCAGE: Escape was pressed - leave Edit in Viewport.
+        SPLINE_EDIT_EXIT_REQUEST,
     }
 
     /// <summary>
@@ -487,5 +502,24 @@ namespace OpenCAGE.UnityConnection
         // distance between them. Level Viewer -> OpenCAGE, on VIEWPORT_MODE_CHANGED: whether it still is (Escape stops it
         // in the viewport). False is also what either side from before this sends, so an older viewer never measures.
         public bool measure_mode = false;
+
+        // The spline editor's Edit in Viewport (SPLINE_EDIT and the SPLINE_EDIT_* replies). OpenCAGE -> Level Viewer: whether
+        // the mode is on, the SplinePath it is editing (the viewer edits it where it is selected, which is the placement the
+        // user is looking at), the editor's WORKING points in the same Cathode space the points parameter stores them in,
+        // whether the spline loops, and the point the editor has selected (-1 = none). The whole spline travels every time,
+        // like ANIMATION_PREVIEW's set. Level Viewer -> OpenCAGE: spline_edit_selected is the point a reply is about, and a
+        // move carries that one point in spline_edit_points. Off and empty is what a packet from before this carries.
+        public bool spline_edit_active = false;
+        public uint spline_edit_entity = 0;
+        public List<SplineEditPoint> spline_edit_points = new List<SplineEditPoint>();
+        public bool spline_edit_loop = false;
+        public int spline_edit_selected = -1;
+    }
+
+    /// <summary>One point of a spline being edited in the viewport: a position and a rotation (degrees), in Cathode space.</summary>
+    public class SplineEditPoint
+    {
+        public float[] position = new float[3];
+        public float[] rotation = new float[3];
     }
 }

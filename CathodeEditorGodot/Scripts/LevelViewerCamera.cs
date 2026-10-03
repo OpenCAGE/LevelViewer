@@ -317,6 +317,10 @@ public partial class LevelViewerCamera : Camera3D
                         _boxSelect.End();
                     else if (gizmo != null && (gizmo.IsDragging || gizmo.IsHandoverArmed))
                         gizmo.CancelDrag();
+                    else if (GetConnection() is CommandsEditorConnection splineConnection && splineConnection.RequestSplineEditExit())
+                    {
+                        //Leaving Edit in Viewport is the spline editor's to do; it answers by switching the mode off
+                    }
                     else if (ExitCreateModeIfActive())
                         _commandsEditorConnection?.SendViewportModeToEditor();
                     else if (ExitMeasureModeIfActive())
@@ -328,7 +332,11 @@ public partial class LevelViewerCamera : Camera3D
                 }
                 else if (keyEvent.Keycode == Key.Delete)
                 {
-                    TryDeleteEntitySelection();
+                    //Editing a spline in the viewport, Delete takes out its selected point - never the SplinePath
+                    if (GetConnection() is CommandsEditorConnection splineConnection && splineConnection.SplineEditActive)
+                        splineConnection.RequestSplineEditPointDelete();
+                    else
+                        TryDeleteEntitySelection();
                     GetViewport().SetInputAsHandled();
                 }
                 else if (keyEvent.Keycode == Key.H)
@@ -405,6 +413,17 @@ public partial class LevelViewerCamera : Camera3D
         catch (Exception ex)
         {
             ViewerLog.PrintErr("[Viewer] Measuring failed: " + ex);
+        }
+
+        //The handles of a spline being edited in the viewport, likewise
+        try
+        {
+            if (GetConnection() is CommandsEditorConnection splineConnection)
+                splineConnection.SplineEdit.Update(this, _alienScene, _hudLayer);
+        }
+        catch (Exception ex)
+        {
+            ViewerLog.PrintErr("[Viewer] Spline edit handles failed: " + ex);
         }
 
         /* After ProcessInternal rather than in it: that returns early while the viewer idles, and the pose the game is
@@ -850,6 +869,17 @@ public partial class LevelViewerCamera : Camera3D
                 {
                     if (mouseButton.ShiftPressed || !TryGizmoMouseDown(mouseButton.Position, duplicate: false))
                         MeasureAt(mouseButton.Position, mouseButton.ShiftPressed);
+                    GetViewport().SetInputAsHandled();
+                    break;
+                }
+                /* Editing a spline in the viewport (the spline editor's Edit in Viewport): a click on another point's handle
+                   picks that point - ahead of the gizmo, whose arms reach over the neighbouring points of a short spline -
+                   and otherwise the gizmo on the selected point takes the press. Nothing else gets selected meanwhile: the
+                   spline editor closes once the selection moves off its SplinePath. */
+                if (_commandsEditorConnection != null && _commandsEditorConnection.SplineEditActive)
+                {
+                    if (!_commandsEditorConnection.SplineEditClickAt(this, mouseButton.Position))
+                        TryGizmoMouseDown(mouseButton.Position, duplicate: false);
                     GetViewport().SetInputAsHandled();
                     break;
                 }
@@ -1972,6 +2002,14 @@ public partial class LevelViewerCamera : Camera3D
 
         _measure.Click(this, _alienScene, screenPosition, selectedOrigin,
             LevelViewerTransformSnap.VertexAlways || IsVertexSnapKeyDown());
+    }
+
+    /* The connection to OpenCAGE, looked up again if it has gone (as the click and Escape handlers do inline). */
+    private CommandsEditorConnection GetConnection()
+    {
+        if (_commandsEditorConnection == null || !GodotObject.IsInstanceValid(_commandsEditorConnection))
+            _commandsEditorConnection = GetNodeOrNull<CommandsEditorConnection>(CommandsEditorConnectionPath);
+        return _commandsEditorConnection;
     }
 
     /// <summary>Stop measuring, clearing the ruler. False if it wasn't on, so callers can fall through.</summary>

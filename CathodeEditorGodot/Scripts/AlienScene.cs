@@ -21,12 +21,14 @@ public partial class AlienScene : Node3D
 	/// <summary>
 	/// Where a selection was made. The camera treats them differently: a viewport pick already has the
 	/// thing on screen, so "focus on selected" must not move the view; a selection arriving from
-	/// OpenCAGE is the case that setting exists for.
+	/// OpenCAGE is the case that setting exists for. A selection put back on a scene built again under
+	/// it (a rebuild, the view put back after previews) is not a new one, so it leaves the view alone too.
 	/// </summary>
 	public enum SelectionOrigin
 	{
 		Remote,
 		ViewportPick,
+		Restore,
 	}
 
 	private string _levelName = "";
@@ -112,6 +114,8 @@ public partial class AlienScene : Node3D
 
 	/// <summary>Subtracted from Cathode world space so geometry sits near the origin (reduces float jitter / cull pops).</summary>
 	private Vector3 _contentOrigin = Vector3.Zero;
+	//The origin a rebuild of the scene on screen puts the content back at, rather than centring it afresh (ExecutePopulateComposite)
+	private Vector3? _contentOriginToKeep;
 
 	private Dictionary<ShortGuid, List<Node3D>> _compositeNodes = new Dictionary<ShortGuid, List<Node3D>>();
 	private Dictionary<Node3D, Entity> _nodeEntities = new Dictionary<Node3D, Entity>();
@@ -986,6 +990,24 @@ public partial class AlienScene : Node3D
 		ViewerPopulateBridge.NotifyStarted(GetPopulateDisplayLabel(comp));
 		ReleaseFocusForLongWork();
 
+		/* The composite on screen built again - a scene batch's end, an add too big to spawn one entity at a time, a
+		   COMPOSITE_RELOADED of it, a rebuild owed to it: the user is looking at that scene, so the view stays exactly
+		   where it is, as when a preview batch puts it back. The content goes back to the origin it had and the camera
+		   is neither moved nor framed - framing put it on the composite's first entity, stepped down or not - and what
+		   was hidden in the viewport stays hidden. Speed and the rest are the camera's own and outlive any populate.
+		   Only another composite, the first after a level load (which forgets the one on screen), or one whose own
+		   framing has yet to happen, is framed afresh. */
+		LevelViewerCamera keepViewOf = null;
+		List<NodePath> keptHides = null;
+		if (IsRebuildOfSceneOnScreen(comp, out LevelViewerCamera camera))
+		{
+			_contentOriginToKeep = _contentOrigin;
+			keptHides = LevelViewerEntityHide.CapturePaths(_parentNode);
+			keepViewOf = camera;
+			if (keepViewOf != null)
+				keepViewOf.SkipNextCompositeFraming = true;
+		}
+
 		_isBulkPopulating = true;
 		_deferMeshTreeActivation = true;
 		FunctionEntityPreview.DeferVisualRefresh = true;
@@ -999,10 +1021,15 @@ public partial class AlienScene : Node3D
 			//everything spawned afterwards would skip its preview refresh and never show
 			ViewerLog.PrintErr("[Viewer] Populating " + GetPopulateDisplayLabel(comp) + " failed: " + e);
 		}
+		_contentOriginToKeep = null;
 
 		_loadStep = LoadPipelineStep.None;
 		UpdateLoadPipelineProcessing();
 		CompletePopulate();
+		//Taken by the camera as the populate finished - unless that threw first, and the next populate is another composite
+		if (keepViewOf != null && GodotObject.IsInstanceValid(keepViewOf))
+			keepViewOf.SkipNextCompositeFraming = false;
+		RestoreHidesAfterRebuild(keptHides);
 
 		//A level load that arrived while this populate was on its way: it rebuilds everything, forced populate included
 		if (RunLevelLoadDeferredByPopulate())
@@ -1088,6 +1115,33 @@ public partial class AlienScene : Node3D
 		}
 		if (timer.ElapsedMilliseconds > 500)
 			ViewerLog.Print("Freed the previous scene (" + freed + " nodes) in " + (timer.ElapsedMilliseconds / 1000.0).ToString("0.0") + " s");
+	}
+
+	/* Whether populating comp builds again the scene the user has on screen (by id: an import that replaced the composite
+	   has the same one back under a new object). Not while its own framing is still to come: that scene was never shown. */
+	private bool IsRebuildOfSceneOnScreen(Composite comp, out LevelViewerCamera camera)
+	{
+		camera = GetViewport()?.GetCamera3D() as LevelViewerCamera;
+		if (comp == null || _loadedComposite == null || _loadedComposite.shortGUID != comp.shortGUID)
+			return false;
+		if (_parentNode == null || !GodotObject.IsInstanceValid(_parentNode))
+			return false;
+		return camera == null || !camera.IsContentFramingPending;
+	}
+
+	/* What was hidden in the viewport (H) on the scene just built again, hidden again on the new one (null: not a rebuild
+	   that keeps the view) */
+	private void RestoreHidesAfterRebuild(List<NodePath> hides)
+	{
+		if (hides == null || !LevelViewerEntityHide.HasAny)
+			return;
+
+		if (LevelViewerEntityHide.Restore(_parentNode, hides) == 0)
+			return;
+
+		LevelViewerAliasHighlight.InvalidateCache();
+		LevelViewerProxyHighlight.InvalidateCache();
+		RefreshEntityHighlights(forceRebuild: true);
 	}
 
 	private static string GetPopulateDisplayLabel(Composite comp)
@@ -1357,7 +1411,17 @@ public partial class AlienScene : Node3D
 			//Nothing here may stop the meshes being registered and shown below
 			try
 			{
-				RecenterContentOrigin();
+				//A rebuild of the scene on screen: back where it was, so nothing moves under the camera
+				if (_contentOriginToKeep is Vector3 keptOrigin)
+				{
+					_contentOrigin = keptOrigin;
+					_parentNode.Position = -keptOrigin;
+					LevelViewerPick.InvalidateAllPickBounds();
+				}
+				else
+				{
+					RecenterContentOrigin();
+				}
 			}
 			catch (Exception e)
 			{
@@ -3033,8 +3097,10 @@ public partial class AlienScene : Node3D
 	{
 		try
 		{
+			//A path that runs out (its target is not in the scene, or not yet while populating) is common: answered
+			//here rather than by the catch, which cost a thrown exception per lookup - hundreds on every populate
 			Node current = parent;
-			for (int i = 0; i < path.Count; i++)
+			for (int i = 0; i < path.Count && current != null; i++)
 				current = current.GetNodeOrNull(path[i].ToString());
 			return current as Node3D;
 		}
@@ -4205,6 +4271,12 @@ public partial class AlienScene : Node3D
 				continue;
 			}
 			preview.RefreshVisibility();
+			/* Shown again, a preview is drawn again in its own colour (or was only now made, above), and this runs for every
+			   placement of the composite: the ones outside the focus came out bright over their grey, and the focus refresh
+			   that follows does nothing when the scope has not changed since the navigation already applied it. Model
+			   references are not gated by hide-nested and are left as they are. */
+			if (preview is not ModelReferencePreview && preview.GetParent() is Node3D previewOwner)
+				ReapplyCompositeFocusTo(previewOwner);
 		}
 	}
 

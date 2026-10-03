@@ -33,6 +33,10 @@ public static class LevelViewerCompositeFocus
 	private static readonly List<uint> _entityChainBuildBuffer = new();
 	private static readonly HashSet<uint> _compositesInScope = new();
 	private static uint _scopeCacheActiveCompositeId;
+	/* The active composite the last Refresh worked the grey-out out for; 0 when none has since the scene was built or the
+	   grey-out cleared. Kept apart from the scope cache's id: picking and the reapplies rebuild that cache on their own, and
+	   one doing it between a navigation and its Refresh would make the step read as no change of composite. */
+	private static uint _appliedActiveCompositeId;
 	private static uint[] _lastFocusInstancePath = Array.Empty<uint>();
 	private static Node3D _scopeAnchorNode;
 	private static IReadOnlyDictionary<Node3D, Entity> _scopeNodeEntities;
@@ -243,14 +247,21 @@ public static class LevelViewerCompositeFocus
 		uint activeId = PreviewVisibilitySettings.ActiveCompositeId;
 		uint[] instancePath = PreviewVisibilitySettings.CompositeFocusInstancePath ?? Array.Empty<uint>();
 		uint[] previousFocusPath = _lastFocusInstancePath;
-		uint previousScopeComposite = _scopeCacheActiveCompositeId;
-		bool activeCompositeChanged = previousScopeComposite != 0 && previousScopeComposite != activeId;
+		uint previousActiveComposite = _appliedActiveCompositeId;
+		bool activeCompositeChanged = previousActiveComposite != 0 && previousActiveComposite != activeId;
 		bool focusPathChanged = !PreviewVisibilitySettings.InstancePathsEqual(previousFocusPath, instancePath);
+		/* No scope has been applied to the scene on screen yet: it has just been built (a populate - the composite on screen
+		   rebuilt, the level read again by a restarted viewer) or the grey-out was taken off all of it (Clear, before a preview
+		   batch). An incremental change has nothing to be measured against then. Measured from the empty path Clear leaves,
+		   every owner of a composite outside the new scope read as out of scope before as well as after, and was never
+		   greyed: stepped down, a rebuild left everything but the other placements of the stepped-into composite bright. */
+		bool nothingApplied = previousActiveComposite == 0;
 
 		if (activeCompositeChanged)
 			ResetDimStateForScopeChange();
 
 		RebuildScopeCache(commands);
+		_appliedActiveCompositeId = activeId;
 		_scopeAnchorNode = scopeAnchorOverride ?? ResolveScopeAnchorNode(contentRoot, instancePath);
 		_lastFocusInstancePath = (uint[])instancePath.Clone();
 
@@ -284,6 +295,7 @@ public static class LevelViewerCompositeFocus
 		{
 			if (!dimmingReturns
 				&& !activeCompositeChanged
+				&& !nothingApplied
 				&& focusPathChanged
 				&& TryApplyIncrementalFocusPathChange(previousFocusPath, instancePath, commands))
 			{
@@ -441,6 +453,7 @@ public static class LevelViewerCompositeFocus
 		RestoreAllDimmedMeshes();
 		_compositesInScope.Clear();
 		_scopeCacheActiveCompositeId = 0;
+		_appliedActiveCompositeId = 0;
 		_lastFocusInstancePath = Array.Empty<uint>();
 		_scopeAnchorNode = null;
 		_dimmingStoodDown = false;

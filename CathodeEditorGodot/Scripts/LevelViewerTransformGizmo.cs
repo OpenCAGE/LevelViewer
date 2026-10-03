@@ -1072,6 +1072,12 @@ public partial class LevelViewerTransformGizmo : Node3D
         if (_camera == null || !Visible)
             return DragAxis.None;
 
+        /* Behind the camera nothing of the gizmo is drawn, but a point behind it still projects - mirrored
+           through the middle of the view. Turned away from a selection, its handles sat unseen in the middle of
+           the screen and took the press, and the click there selected nothing. */
+        if (IsBehindCamera(GlobalPosition))
+            return DragAxis.None;
+
         DragAxis bestAxis = DragAxis.None;
         float bestDist    = float.MaxValue;
 
@@ -1104,8 +1110,13 @@ public partial class LevelViewerTransformGizmo : Node3D
         ref DragAxis bestAxis, ref float bestDist)
     {
         Vector3 worldAxis = GetOrientationBasis() * localAxisDir;
+        Vector3 worldEnd  = GlobalPosition + worldAxis * axisLength;
+        //Only what is in front of the camera can be hit (see HitTest); the centre already is
+        if (IsBehindCamera(worldEnd))
+            return;
+
         Vector2 centre = WorldToScreen(GlobalPosition);
-        Vector2 end    = WorldToScreen(GlobalPosition + worldAxis * axisLength);
+        Vector2 end    = WorldToScreen(worldEnd);
         float dist     = ScreenDistToSegment(mouse, centre, end);
         if (dist < AxisScreenPickPx && dist < bestDist)
         {
@@ -1126,6 +1137,8 @@ public partial class LevelViewerTransformGizmo : Node3D
         Vector3 c10 = centre + ( u - v) * halfSize;
         Vector3 c11 = centre + ( u + v) * halfSize;
         Vector3 c01 = centre + (-u + v) * halfSize;
+        if (IsBehindCamera(c00) || IsBehindCamera(c10) || IsBehindCamera(c11) || IsBehindCamera(c01))
+            return;
 
         Vector2 s00 = WorldToScreen(c00);
         Vector2 s10 = WorldToScreen(c10);
@@ -1156,6 +1169,7 @@ public partial class LevelViewerTransformGizmo : Node3D
         Vector3 ringNormal = (GetOrientationBasis() * localRingNormal).Normalized();
         GetRingBasis(ringNormal, out Vector3 basisU, out Vector3 basisV);
         Vector2 prevScreen = WorldToScreen(GlobalPosition);
+        bool prevBehind = false;
         float minSegDist = float.MaxValue;
 
         for (int i = 0; i <= RingHitSamples; i++)
@@ -1164,11 +1178,14 @@ public partial class LevelViewerTransformGizmo : Node3D
             Vector3 worldPoint = GlobalPosition
                 + (basisU * Mathf.Cos(angle) + basisV * Mathf.Sin(angle)) * radius;
             Vector2 screenPoint = WorldToScreen(worldPoint);
+            bool behind = IsBehindCamera(worldPoint);
 
-            if (i > 0)
+            //A stretch of the ring that runs behind the camera is not drawn, so not hit either
+            if (i > 0 && !behind && !prevBehind)
                 minSegDist = Mathf.Min(minSegDist, ScreenDistToSegment(mouse, prevScreen, screenPoint));
 
             prevScreen = screenPoint;
+            prevBehind = behind;
         }
 
         if (minSegDist < RingScreenPickPx && minSegDist < bestDist)
@@ -1180,6 +1197,9 @@ public partial class LevelViewerTransformGizmo : Node3D
 
     private Vector2 WorldToScreen(Vector3 world)
         => _camera.UnprojectPosition(world);
+
+    private bool IsBehindCamera(Vector3 world)
+        => _camera.IsPositionBehind(world);
 
     private static float ScreenDistToSegment(Vector2 point, Vector2 segA, Vector2 segB)
     {

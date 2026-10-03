@@ -584,11 +584,18 @@ public partial class LevelViewerCamera : Camera3D
     }
 
     /// <summary>
-    /// Leave the camera where it is when the next composite finishes loading, once. A composite preview
-    /// batch sets it before it puts the composite the user had on screen back: the view is the user's,
-    /// and the batch restores it exactly rather than framing it afresh.
+    /// Leave the camera where it is when the next composite finishes loading, once. Set whenever the composite
+    /// the user has on screen is built again - a composite preview batch putting it back, or a rebuild of it
+    /// (AlienScene.ExecutePopulateComposite): the view is the user's, and is kept exactly rather than framed afresh.
     /// </summary>
     public bool SkipNextCompositeFraming { get; set; }
+
+    /// <summary>
+    /// A populate's framing is still waiting for its focus point (it gives it a few frames). The composite it is for has
+    /// not been put in front of the user yet, so a rebuild of it before then has no view of it to keep, and frames it.
+    /// </summary>
+    public bool IsContentFramingPending => _contentFramingsPending > 0;
+    private int _contentFramingsPending;
 
     private void OnCompositeLoaded()
     {
@@ -608,6 +615,7 @@ public partial class LevelViewerCamera : Camera3D
     private async void FrameLoadedContentWhenReadyAsync()
     {
         // async void: an escaping exception becomes unobserved and can terminate the process.
+        _contentFramingsPending++;
         try
         {
             await FrameLoadedContentWhenReadyCoreAsync();
@@ -615,6 +623,10 @@ public partial class LevelViewerCamera : Camera3D
         catch (Exception ex)
         {
             ViewerLog.PrintErr("[Viewer] FrameLoadedContentWhenReady failed: " + ex);
+        }
+        finally
+        {
+            _contentFramingsPending--;
         }
     }
 

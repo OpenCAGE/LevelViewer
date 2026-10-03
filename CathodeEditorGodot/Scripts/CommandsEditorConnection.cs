@@ -260,7 +260,10 @@ public partial class CommandsEditorConnection : Node3D
         ViewerLogBridge.RegisterConnection(this);
         ViewerPopulateBridge.RegisterConnection(this);
         if (_scene != null)
+        {
             _scene.OnSelectionChanged += OnSceneSelectionChanged;
+            _scene.OnLoaded += OnScenePopulated;
+        }
         Callable.From(EnsureTransformGizmo).CallDeferred();
         SetPhysicsProcess(false);
         Interlocked.Exchange(ref _lastConnectedTicks, DateTime.UtcNow.Ticks);
@@ -365,10 +368,29 @@ public partial class CommandsEditorConnection : Node3D
         }).CallDeferred();
     }
 
+    /* A populate takes the selection off with the scene it frees. Building the composite on screen again (a scene
+       batch's rebuild, an add too big to spawn one at a time, the view put back after the save's previews) leaves
+       OpenCAGE's selection as it was, so nothing more is sent - and the apply skipped it as the entity already shown:
+       the inspector kept the entity with nothing marked on screen and no gizmo. The selection held here goes back on
+       the new scene. Only while an entity is selected; one already on its way keeps its own origin. */
+    private void OnScenePopulated()
+    {
+        lock (_lock)
+        {
+            if (!_entitySelected)
+                return;
+            if (!_forceSelectionApply && _currentEntityGOID == _currentEntity)
+                _pendingSelectionOrigin = AlienScene.SelectionOrigin.Restore;
+            _forceSelectionApply = true;
+        }
+        WakePhysicsProcess();
+    }
+
     /// <summary>
     /// "Focus on selected" reframes the camera for a selection that arrives from OpenCAGE. A viewport
     /// pick is left alone - the user is already looking at what they clicked - though "fix camera to
-    /// selected" still starts following it from where the camera is. Either way the thing framed or
+    /// selected" still starts following it from where the camera is; so is a selection put back after a
+    /// rebuild, which is nothing new to look at. Either way the thing framed or
     /// followed is what <see cref="AlienScene.TryResolveFocusTarget"/> says. A remote selection always
     /// moves the camera to the thing; what varies is whether its bounds are fitted or the camera just
     /// goes and stands at it, because fitting the environment instance fits the whole level (issue 634).
@@ -392,7 +414,7 @@ public partial class CommandsEditorConnection : Node3D
             return;
         }
 
-        if (origin == AlienScene.SelectionOrigin.ViewportPick)
+        if (origin == AlienScene.SelectionOrigin.ViewportPick || origin == AlienScene.SelectionOrigin.Restore)
         {
             if (_fixCameraToSelected)
                 camera.FollowSelectionWithoutFraming(target);
@@ -472,7 +494,10 @@ public partial class CommandsEditorConnection : Node3D
         _connectionCts = null;
 
         if (_scene != null)
+        {
             _scene.OnSelectionChanged -= OnSceneSelectionChanged;
+            _scene.OnLoaded -= OnScenePopulated;
+        }
 
         if (_scene == null)
             return;
@@ -1038,6 +1063,7 @@ public partial class CommandsEditorConnection : Node3D
             uint previousEntity = _currentEntity;
             int previousCompositeDepth = _pathComposites?.Count ?? 0;
             List<uint> previousPathComposites = _pathComposites;
+            List<uint> previousPathEntities = _pathEntities;
 
             _pathComposites = packet.path_composites;
             _pathEntities = packet.path_entities;
@@ -1081,9 +1107,12 @@ public partial class CommandsEditorConnection : Node3D
             bool compositePathChanged = incomingCompositeDepth != previousCompositeDepth
                 || !PathsEqual(previousPathComposites, packet.path_composites);
             bool navigationChanged = activeCompositeChanged || instancePathChanged;
+            /* The same entity in another placement of its composite has the same id and the same composite
+               chain; only the instance path in to it differs. */
             bool selectionChanged = previousEntitySelected != _entitySelected
                 || previousEntity != _currentEntity
                 || compositePathChanged
+                || (_entitySelected && !PathsEqual(previousPathEntities, _pathEntities))
                 || !PathsEqual(previousSelectionEntities, _selectionEntities)
                 || !PathListsEqual(previousSelectionPaths, _selectionEntityPaths);
 
@@ -1173,8 +1202,14 @@ public partial class CommandsEditorConnection : Node3D
                 }
                 /* The editor is on a different composite from the one on screen: its selection (or the
                    reload the import ends with, held behind a resource sync) is on its way and rebuilds
-                   the scene as that composite - rebuilding the old one first would be thrown away. */
-                if (rebuild && packet.composite != 0 && _scene != null && _scene.CompositeID != 0 && packet.composite != _scene.CompositeID)
+                   the scene as that composite - rebuilding the old one first would be thrown away.
+                   Which composite the editor is on is where its path starts: stepped down, the composite
+                   it has open is one nested in the composite on screen, and taking that for a switch
+                   left whatever the batch added or removed off screen until the next populate. With
+                   nothing open (composite 0) the path is only what the closed view left behind, so that
+                   always rebuilds, as it did before. */
+                uint editorRoot = packet.composite == 0 ? 0 : (packet.path_composites != null && packet.path_composites.Count > 0 ? packet.path_composites[0] : packet.composite);
+                if (rebuild && editorRoot != 0 && _scene != null && _scene.CompositeID != 0 && editorRoot != _scene.CompositeID)
                     rebuild = false;
                 if (rebuild)
                 {
@@ -1275,9 +1310,12 @@ public partial class CommandsEditorConnection : Node3D
                    It does this after an import: the composite was opened (and populated here, empty) before
                    its contents could go, and the entities that then arrived one by one leave a nested
                    instance's own contents off screen - only a populate walks them. Hierarchy navigation
-                   never comes this way (that is GENERIC_DATA_SYNC), so a root switch is all this can be. */
+                   never comes this way (that is GENERIC_DATA_SYNC), so a root switch is all this can be -
+                   or the composite a path starts from: an import that closed the editor's view while it was
+                   stepped down puts it back where it was and asks for the scene that path is in, the place
+                   to land in the same packet (already taken above, for the populate to land at). */
                 NameComposite(packet);
-                if (packet.composite != 0 && (packet.path_composites == null || packet.path_composites.Count <= 1))
+                if (packet.composite != 0 && (packet.path_composites == null || packet.path_composites.Count <= 1 || packet.path_composites[0] == packet.composite))
                 {
                     uint compositeId = packet.composite;
                     lock (_lock) { if (InSceneBatch) _sceneBatchRebuildQueued = true; }
@@ -3952,6 +3990,8 @@ public partial class CommandsEditorConnection : Node3D
             && pathComposites != null
             && pathComposites.Count == pathEntities.Count;
 
+        //Before the count is looked at: a release kept back here leaves the selection to go on its own
+        KeepPendingEphemeralDeepSelectReleasesStillSelected();
         if (_pendingEphemeralDeepSelectReleases.Count != 0)
         {
             SendPendingEphemeralDeepSelectAliasRelease(
@@ -3973,6 +4013,7 @@ public partial class CommandsEditorConnection : Node3D
         bool includeSelection,
         List<uint> selectionEntities = null)
     {
+        KeepPendingEphemeralDeepSelectReleasesStillSelected();
         if (_pendingEphemeralDeepSelectReleases.Count == 0)
             return;
 
@@ -4055,6 +4096,33 @@ public partial class CommandsEditorConnection : Node3D
     private void ClearPendingEphemeralDeepSelectRelease()
     {
         _pendingEphemeralDeepSelectReleases.Clear();
+    }
+
+    /* An alias let go of but selected again before the release went is in use again, so it goes back to being
+       tracked rather than offered back. A part picked, deselected (the release waits for the next selection) and
+       picked again finds the alias it made the first time; sent, the release carried the very selection that named
+       it, OpenCAGE deleted what it had just selected, and its inspector clearing reached this side as nothing
+       selected - the click blinked and ended with nothing (issue 724). */
+    private void KeepPendingEphemeralDeepSelectReleasesStillSelected()
+    {
+        if (_pendingEphemeralDeepSelectReleases.Count == 0)
+            return;
+
+        lock (_lock)
+        {
+            if (!_entitySelected)
+                return;
+
+            for (int i = _pendingEphemeralDeepSelectReleases.Count - 1; i >= 0; i--)
+            {
+                (uint compositeId, uint entityId) = _pendingEphemeralDeepSelectReleases[i];
+                if (!IsInCurrentSelection(compositeId, entityId, _currentEntity, _currentComposite))
+                    continue;
+
+                _pendingEphemeralDeepSelectReleases.RemoveAt(i);
+                TrackEphemeralDeepSelectAlias(compositeId, entityId);
+            }
+        }
     }
 
     private void RemoveDeletedEntity(Packet packet)

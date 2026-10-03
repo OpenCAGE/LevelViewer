@@ -164,6 +164,7 @@ public partial class AlienScene
 		uint viewActiveComposite = PreviewVisibilitySettings.ActiveCompositeId;
 		LevelViewerCamera camera = GetViewport()?.GetCamera3D() as LevelViewerCamera;
 		Transform3D viewCamera = camera != null ? camera.GlobalTransform : Transform3D.Identity;
+		List<NodePath> viewHides = LevelViewerEntityHide.CapturePaths(_parentNode);
 		bool sceneRebuilt = false;
 		bool abandoned = false;
 		bool stoppedForSync = false;
@@ -330,7 +331,7 @@ public partial class AlienScene
 				if (restoreView && viewComposite != null && _content.Loaded && _loadStep == LoadPipelineStep.None)
 				{
 					Stopwatch restore = Stopwatch.StartNew();
-					RestoreViewAfterPreviews(viewComposite, viewOrigin, camera, viewCamera);
+					RestoreViewAfterPreviews(viewComposite, viewOrigin, camera, viewCamera, viewHides);
 					restoreSeconds = restore.Elapsed.TotalSeconds;
 				}
 				else
@@ -415,9 +416,10 @@ public partial class AlienScene
 
 	/// <summary>
 	/// The composite the user had on screen, built again as a populate of it would build it, with
-	/// the content origin and the camera exactly where they were rather than framed afresh.
+	/// the content origin and the camera exactly where they were rather than framed afresh, and
+	/// what was hidden in the viewport hidden again.
 	/// </summary>
-	private void RestoreViewAfterPreviews(Composite composite, Vector3 origin, LevelViewerCamera camera, Transform3D cameraTransform)
+	private void RestoreViewAfterPreviews(Composite composite, Vector3 origin, LevelViewerCamera camera, Transform3D cameraTransform, List<NodePath> hides)
 	{
 		string label = GetPopulateDisplayLabel(composite);
 		ShowLoading("Loading " + label + "...");
@@ -456,11 +458,14 @@ public partial class AlienScene
 			LevelViewerPick.InvalidateAllPickBounds();
 		}
 
-		if (cameraValid)
+		//Only if something moved it: the same transform set again comes back with its basis a rounding off
+		if (cameraValid && camera.GlobalTransform != cameraTransform)
 		{
 			camera.GlobalTransform = cameraTransform;
 			camera.SyncAnglesFromTransform();
 		}
+
+		RestoreHidesAfterRebuild(hides);
 	}
 
 	/* The last composite captured stays on screen (the one-off run over every level, whose viewer is

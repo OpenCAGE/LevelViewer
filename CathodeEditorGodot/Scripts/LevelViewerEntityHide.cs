@@ -99,6 +99,43 @@ public static class LevelViewerEntityHide
 		LevelViewerPick.InvalidateScopedPickables();
 	}
 
+	/// <summary>Where each hidden entity is under <paramref name="root"/> (the content root), for <see cref="Restore"/>.</summary>
+	public static List<NodePath> CapturePaths(Node3D root)
+	{
+		List<NodePath> paths = new List<NodePath>();
+		if (root == null || !GodotObject.IsInstanceValid(root))
+			return paths;
+
+		for (int i = 0; i < _hiddenEntries.Count; i++)
+		{
+			Node3D visualRoot = _hiddenEntries[i].VisualRoot;
+			if (visualRoot != null && GodotObject.IsInstanceValid(visualRoot) && root.IsAncestorOf(visualRoot))
+				paths.Add(root.GetPathTo(visualRoot));
+		}
+		return paths;
+	}
+
+	/// <summary>
+	/// The scene was built again with the scope unchanged (a rebuild of the composite on screen, the view put back after
+	/// previews): the hides go on the new nodes at the same paths, and the old entries - their nodes went with the old
+	/// scene, as did the pick registry - are dropped. Returns how many came back.
+	/// </summary>
+	public static int Restore(Node3D root, List<NodePath> paths)
+	{
+		_hiddenEntries.Clear();
+		int restored = 0;
+		if (root != null && GodotObject.IsInstanceValid(root) && paths != null)
+		{
+			for (int i = 0; i < paths.Count; i++)
+			{
+				if (root.GetNodeOrNull(paths[i]) is Node3D node && TryHide(node))
+					restored++;
+			}
+		}
+		LevelViewerPick.InvalidateScopedPickables();
+		return restored;
+	}
+
 	private static bool ShouldSuppressPickOwner(
 		Node3D owner,
 		Node3D visualRoot,

@@ -4,7 +4,8 @@ using OpenCAGE.UnityConnection;
 using System.Collections.Generic;
 
 /// <summary>
-/// Draws the level's geometry in the colour of the zone it belongs to, one colour per zone.
+/// Draws the level's geometry in the colour of the zone it belongs to, one colour per zone - and
+/// white where no zone reaches.
 /// </summary>
 /// <remarks>
 /// The zones themselves come from OpenCAGE (ZONES_CHANGED): membership is made entirely of links,
@@ -25,9 +26,9 @@ public static class LevelViewerZoneHighlight
 {
 	/// <summary>What one mesh is carrying for us, and what it was carrying before.</summary>
 	/// <remarks>
-	/// A mesh is in here only while a zone claims it. <see cref="Applied"/> is false while the mesh
-	/// has been handed back to the selection, which is drawn in its own material - it is still ours
-	/// to re-take when the selection moves on.
+	/// A mesh is in here while it is coloured - by its zone, or white for none. <see cref="Applied"/>
+	/// is false while the mesh has been handed back to the selection, which is drawn in its own
+	/// material - it is still ours to re-take when the selection moves on.
 	/// </remarks>
 	private sealed class Tint
 	{
@@ -40,6 +41,18 @@ public static class LevelViewerZoneHighlight
 
 	private static List<SyncedZone> _zones = new();
 
+	/* Whether OpenCAGE has sent a table for this level - an empty one included, as a level with no zones (a new one, say)
+	   has everything unzoned. Until it has, nothing is coloured: the level is still loading, and painting it all white
+	   only to recolour it a moment later would flash. */
+	private static bool _haveTable = false;
+
+	/// <summary>
+	/// What no zone reaches is drawn white: left in its own material it looked as though nothing had been worked out for
+	/// it, when being in no zone is an answer in itself. No zone's colour comes near white - they are kept well saturated
+	/// (ZoneDefinitions.GetColour).
+	/// </summary>
+	public static readonly Color UnzonedColour = new Color(1f, 1f, 1f, 1f);
+
 	/// <summary>Whether anything is currently coloured - not whether a table has arrived.</summary>
 	public static bool HasAny => _tinted.Count != 0;
 
@@ -47,6 +60,7 @@ public static class LevelViewerZoneHighlight
 	public static void SetZones(List<SyncedZone> zones)
 	{
 		_zones = zones ?? new List<SyncedZone>();
+		_haveTable = true;
 	}
 
 	public static void Clear()
@@ -62,6 +76,7 @@ public static class LevelViewerZoneHighlight
 	{
 		Clear();
 		_zones = new List<SyncedZone>();
+		_haveTable = false;
 	}
 
 	/// <remarks>
@@ -84,7 +99,7 @@ public static class LevelViewerZoneHighlight
 	{
 		Node3D root = scene?.ParentNode;
 		if (root == null || !GodotObject.IsInstanceValid(root)
-			|| !PreviewVisibilitySettings.ShowZones || _zones.Count == 0)
+			|| !PreviewVisibilitySettings.ShowZones || !_haveTable)
 		{
 			Clear();
 			return;
@@ -127,12 +142,12 @@ public static class LevelViewerZoneHighlight
 		}
 
 		HashSet<MeshInstance3D> claimed = new HashSet<MeshInstance3D>();
-		int recoloured = TintScene(root, coloursByRootNode, claimed, out int walked);
+		int recoloured = TintScene(root, coloursByRootNode, claimed, out int walked, out int unzoned);
 		int released = DropUnclaimed(claimed);
 
-		ViewerLog.Print("[Zones] " + _tinted.Count + " of " + walked + " meshes across " + drawnZones + " of "
-			+ _zones.Count + " zones in " + timer.ElapsedMilliseconds + "ms (" + recoloured + " recoloured, "
-			+ released + " released, " + (walked - _tinted.Count) + " in no zone)"
+		ViewerLog.Print("[Zones] " + (walked - unzoned) + " of " + walked + " meshes across " + drawnZones + " of "
+			+ _zones.Count + " zones, " + unzoned + " in no zone (white), in " + timer.ElapsedMilliseconds + "ms ("
+			+ recoloured + " recoloured, " + released + " released)"
 			+ (unresolvedRoots != 0 ? " (" + unresolvedRoots + " roots not in the scene)" : "") + ".");
 	}
 
@@ -140,14 +155,12 @@ public static class LevelViewerZoneHighlight
 		Node3D root,
 		Dictionary<Node, Color> coloursByRootNode,
 		HashSet<MeshInstance3D> claimed,
-		out int walked)
+		out int walked,
+		out int unzoned)
 	{
-		walked = 0;
-		if (coloursByRootNode.Count == 0)
-			return 0;
-
 		int recoloured = 0;
 		int seen = 0;
+		int outside = 0;
 
 		//Explicit stack: composite nesting can run deep and this covers the whole level
 		Stack<(Node Node, Color Colour, bool InZone)> pending = new Stack<(Node, Color, bool)>();
@@ -178,7 +191,9 @@ public static class LevelViewerZoneHighlight
 			if (node is MeshInstance3D mesh)
 			{
 				seen++;
-				if (inZone && TintMesh(mesh, colour, claimed))
+				if (!inZone)
+					outside++;
+				if (TintMesh(mesh, inZone ? colour : UnzonedColour, claimed))
 					recoloured++;
 			}
 
@@ -190,6 +205,7 @@ public static class LevelViewerZoneHighlight
 		}
 
 		walked = seen;
+		unzoned = outside;
 		return recoloured;
 	}
 

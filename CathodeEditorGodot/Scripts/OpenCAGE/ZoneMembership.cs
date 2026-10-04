@@ -57,9 +57,16 @@ namespace OpenCAGE
         /// </remarks>
         public static List<SyncedZone> CalculateFrom(Level level, Composite from)
         {
+            return CalculateFrom(level?.Commands, from);
+        }
+
+        /// <summary>
+        /// The same, from the script alone: zones are worked out from Commands, so nothing else of the level is needed.
+        /// </summary>
+        public static List<SyncedZone> CalculateFrom(Commands commands, Composite from)
+        {
             List<SyncedZone> zones = new List<SyncedZone>();
 
-            Commands commands = level?.Commands;
             if (commands == null || from == null)
                 return zones;
 
@@ -233,7 +240,14 @@ namespace OpenCAGE
                 }
                 else if (linked is VariableEntity pin)
                 {
-                    AddPinRoots(compositeStack, path, pin, synced);
+                    AddPinRoots(commands, compositeStack, path, pin, synced, relativePathsOnly);
+                }
+                else if (linked is AliasEntity alias)
+                {
+                    //An alias stands in for the entity it names, and that entity is what gets streamed
+                    if (EntityInstancePath.TryResolve(commands, composite, path, alias.alias,
+                            out List<uint> full, out bool relativeToHere) && (relativeToHere || !relativePathsOnly))
+                        synced.roots.Add(full);
                 }
                 else
                 {
@@ -250,7 +264,7 @@ namespace OpenCAGE
         /// A zone inside a reusable composite takes its contents through one of that composite's pins,
         /// so the entities it claims are named by whatever placed the composite - one composite up.
         /// </summary>
-        private static void AddPinRoots(List<Composite> compositeStack, List<uint> path, VariableEntity pin, SyncedZone synced)
+        private static void AddPinRoots(Commands commands, List<Composite> compositeStack, List<uint> path, VariableEntity pin, SyncedZone synced, bool relativePathsOnly)
         {
             //Nothing placed the level root, so a pin there is fed by nothing
             if (path.Count == 0 || compositeStack.Count < 2)
@@ -274,6 +288,15 @@ namespace OpenCAGE
                 List<uint> full = new List<uint>(path.Count);
                 for (int i = 0; i < path.Count - 1; i++)
                     full.Add(path[i]);
+
+                if (target is AliasEntity alias)
+                {
+                    if (EntityInstancePath.TryResolve(commands, parent, full, alias.alias,
+                            out List<uint> aliased, out bool relativeToHere) && (relativeToHere || !relativePathsOnly))
+                        synced.roots.Add(aliased);
+                    continue;
+                }
+
                 full.Add(target.shortGUID.AsUInt32);
                 synced.roots.Add(full);
             }

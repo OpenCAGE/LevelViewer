@@ -885,10 +885,12 @@ public partial class LevelViewerCamera : Camera3D
                 }
                 // Let the gizmo consume LMB before the pick/select logic. Shift on a handle means
                 // shift-clone (duplicate then drag the copy) - except in Animation Mode, where a drag
-                // is a keyframe and Shift stays a plain drag.
+                // is a keyframe and Shift stays a plain drag. Ctrl+Shift on a translate handle moves the
+                // handles alone (what the selection turns about), and a click with it puts them back.
                 bool duplicateDrag = mouseButton.ShiftPressed && !mouseButton.CtrlPressed
                     && !mouseButton.AltPressed && !AnimationPreview.Active;
-                if (TryGizmoMouseDown(mouseButton.Position, duplicateDrag))
+                bool movePivot = mouseButton.ShiftPressed && mouseButton.CtrlPressed && !mouseButton.AltPressed;
+                if (TryGizmoMouseDown(mouseButton.Position, duplicateDrag, movePivot))
                 {
                     GetViewport().SetInputAsHandled();
                     break;
@@ -1868,13 +1870,13 @@ public partial class LevelViewerCamera : Camera3D
         return gizmo.IsDragging || gizmo.IsHandoverArmed ? gizmo : null;
     }
 
-    private bool TryGizmoMouseDown(Vector2 pos, bool duplicate)
+    private bool TryGizmoMouseDown(Vector2 pos, bool duplicate, bool movePivot = false)
     {
         LevelViewerTransformGizmo gizmo = GetGizmo();
         if (gizmo == null || !gizmo.Visible)
             return false;
         gizmo.VertexSnapActive = LevelViewerTransformSnap.VertexAlways || IsVertexSnapKeyDown();
-        return gizmo.HandleMouseButtonDown(pos, duplicate);
+        return gizmo.HandleMouseButtonDown(pos, duplicate, movePivot);
     }
 
     private bool TryGizmoMouseUp(Vector2 pos)

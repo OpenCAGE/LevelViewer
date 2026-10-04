@@ -113,6 +113,17 @@ public partial class LevelViewerTransformGizmo : Node3D
     private bool    _isDragging;
     private bool    _dragFromPress;    // the live drag grew out of a press on the originals: a quick one is still a click
     private bool    _dragIsClone;      // the live drag is a shift-clone's, on its copies: calling it off takes them back
+    private bool    _dragIsPivot;      // the live drag moves the handles alone (Ctrl+Shift): the selection stays where it is
+
+    /* Where the handles sit, once they have been moved off the selection (Ctrl+Shift-drag a translate handle):
+       what the selection then turns about. Held in the anchor's own frame, so it goes wherever the selection
+       is taken - moved, it moves with it; turned about it, it stays put - and forgotten as soon as the
+       selection changes. */
+    private bool    _pivotMoved;
+    private Vector3 _pivotInAnchor;
+    private bool    _dragStartPivotMoved;      // as they stood at the press, to put back if the drag is called off
+    private Vector3 _dragStartPivotInAnchor;
+    private static readonly List<Node3D> NoTargets = new List<Node3D>();
 
     /* A handle pressed but not yet dragged. Nothing moves, snaps, duplicates or commits until the mouse has
        gone LevelViewerBoxSelect.DragThresholdPixels from the press - a click on a handle is not a drag
@@ -124,6 +135,7 @@ public partial class LevelViewerTransformGizmo : Node3D
     private float   _pressMaxTravel;   // the furthest the held cursor has been from _pressPos
     private Vector2 _lastHeldPos;      // where the cursor last was with the button known to be down
     private bool    _pressDuplicate;   // shift was held: the drag, once it is one, is a shift-clone
+    private bool    _pressPivot;       // Ctrl+Shift was held: the drag, once it is one, moves the handles alone; a click puts them back
 
     /* Let go this soon, having been no further than this from the press, a press is a click however it
        moved in between. Clicking while the mouse is still travelling (issue 718's second report) covers
@@ -156,6 +168,7 @@ public partial class LevelViewerTransformGizmo : Node3D
     private DragAxis      _handoverAxis;
     private uint          _handoverGesture;
     private bool          _handoverVertexSnap;
+    private Vector3?      _handoverPivot;      // world: where the handles had been moved to, which the copies keep
     private readonly List<Node3D> _handoverOriginals = new List<Node3D>();
     private readonly List<Vector3> _handoverOriginalPositions = new List<Vector3>(); // world, where the copies will be made
     private const ulong HandoverTimeoutMs = 2000;
@@ -195,6 +208,12 @@ public partial class LevelViewerTransformGizmo : Node3D
     /// <summary>True when a visible gizmo handle would be hit at this screen position (ignores depth).</summary>
     public bool HitsAtScreen(Vector2 mousePos)
         => Visible && HitTest(mousePos) != DragAxis.None;
+
+    /// <summary>The handles have been moved off the selection (Ctrl+Shift-drag), and it turns about where they are.</summary>
+    public bool PivotMoved => _pivotMoved;
+
+    /// <summary>Where the handles are, in world space: the middle of the selection, unless they have been moved.</summary>
+    public Vector3 Pivot => GetPivot();
 
     // ─────────────────────────────────────────────────────────────────────────
     public override void _Ready()
@@ -261,6 +280,8 @@ public partial class LevelViewerTransformGizmo : Node3D
         {
             AbandonDrag();
             _pressArmed = false;
+            //Handles moved off the old selection mean nothing to the new one
+            _pivotMoved = false;
         }
 
         _camera  = camera;
@@ -276,7 +297,7 @@ public partial class LevelViewerTransformGizmo : Node3D
         }
 
         if (!_isDragging)
-            GlobalPosition = GetTargetsCentre();
+            GlobalPosition = GetPivot();
         RefreshVisibility();
 
         TryBeginHandover();
@@ -310,6 +331,13 @@ public partial class LevelViewerTransformGizmo : Node3D
 
         _handoverArmed = false;
         TookHandover = true;
+
+        //The copies stand where the originals did, so moved handles go where they were on those
+        if (_handoverPivot.HasValue)
+        {
+            SetPivot(_handoverPivot.Value);
+            GlobalPosition = GetPivot();
+        }
 
         //Let go before they came - or the release never reached this window - so they go where it was let go
         if (_handoverReleased || !Input.IsMouseButtonPressed(MouseButton.Left))
@@ -417,6 +445,7 @@ public partial class LevelViewerTransformGizmo : Node3D
         _target = null;
         _targets.Clear();
         _pressArmed = false;
+        _pivotMoved = false;
         TookHandover = false;
         Visible = false;
     }
@@ -477,6 +506,10 @@ public partial class LevelViewerTransformGizmo : Node3D
             if (GodotObject.IsInstanceValid(_targets[i]))
                 _targets[i].Transform = _dragStartTransforms[i];
         }
+
+        //Handles a Ctrl+Shift drag was moving go back too
+        _pivotMoved    = _dragStartPivotMoved;
+        _pivotInAnchor = _dragStartPivotInAnchor;
     }
 
     private void EndDragState()
@@ -484,6 +517,7 @@ public partial class LevelViewerTransformGizmo : Node3D
         _isDragging    = false;
         _dragFromPress = false;
         _dragIsClone   = false;
+        _dragIsPivot   = false;
         _dragAxis      = DragAxis.None;
     }
 
@@ -504,6 +538,40 @@ public partial class LevelViewerTransformGizmo : Node3D
 
         return count == 0 ? GlobalPosition : total / count;
     }
+
+    /// <summary>Where the handles sit and what the selection turns about: the middle of it, unless they have been moved.</summary>
+    private Vector3 GetPivot()
+    {
+        if (_pivotMoved && _target != null && GodotObject.IsInstanceValid(_target))
+            return _target.GlobalTransform * _pivotInAnchor;
+        return GetTargetsCentre();
+    }
+
+    /// <summary>Move the handles to <paramref name="world"/>, held from now on in the anchor's frame.</summary>
+    private void SetPivot(Vector3 world)
+    {
+        if (_target == null || !GodotObject.IsInstanceValid(_target))
+            return;
+
+        Transform3D anchor = _target.GlobalTransform;
+        if (Mathf.Abs(anchor.Basis.Determinant()) < 1e-12f)
+            return;
+
+        _pivotInAnchor = anchor.AffineInverse() * world;
+        _pivotMoved    = true;
+    }
+
+    /// <summary>The handles go back to the middle of the selection (a Ctrl+Shift click on one).</summary>
+    private void ResetPivot()
+    {
+        _pivotMoved = false;
+        if (!_isDragging)
+            GlobalPosition = GetTargetsCentre();
+    }
+
+    /* A single entity turns where it stands; a group, or handles moved off the selection, turn about the
+       handles - every target swinging round them as well as turning */
+    private bool TurnsAboutPivot => _targets.Count > 1 || _pivotMoved;
 
     // ─────────────────────────────────────────────────────────────────────────
     public override void _Process(double delta)
@@ -546,13 +614,14 @@ public partial class LevelViewerTransformGizmo : Node3D
             BeginPressedDrag(_lastHeldPos);
 
         if (!_isDragging)
-            GlobalPosition = GetTargetsCentre();
+            GlobalPosition = GetPivot();
 
         GlobalBasis = GetOrientationBasis();
 
         UpdateWorldScale();
         Scale   = Vector3.One * _worldScale;
         Visible = true;
+        UpdatePivotGuide();
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -605,7 +674,14 @@ public partial class LevelViewerTransformGizmo : Node3D
 
     public bool HandleMouseButtonDown(Vector2 mousePos) => HandleMouseButtonDown(mousePos, duplicate: false);
 
-    public bool HandleMouseButtonDown(Vector2 mousePos, bool duplicate)
+    public bool HandleMouseButtonDown(Vector2 mousePos, bool duplicate) => HandleMouseButtonDown(mousePos, duplicate, movePivot: false);
+
+    /// <param name="duplicate">Shift: a drag on a translate handle is a shift-clone.</param>
+    /// <param name="movePivot">
+    /// Ctrl+Shift: a drag on a translate handle moves the handles alone - what the selection then turns
+    /// about - and a click on one puts them back in the middle of the selection.
+    /// </param>
+    public bool HandleMouseButtonDown(Vector2 mousePos, bool duplicate, bool movePivot)
     {
         //Still holding from a press whose release never arrived: that ended where it was last held, and
         //must not carry on under this press
@@ -630,7 +706,8 @@ public partial class LevelViewerTransformGizmo : Node3D
         _pressPos       = mousePos;
         _pressMs        = Time.GetTicksMsec();
         _pressMaxTravel = 0f;
-        _pressDuplicate = duplicate && IsTranslateMode;
+        _pressPivot     = movePivot && IsTranslateMode;
+        _pressDuplicate = duplicate && IsTranslateMode && !_pressPivot;
         return true;
     }
 
@@ -686,6 +763,9 @@ public partial class LevelViewerTransformGizmo : Node3D
             }
             else
             {
+                //A Ctrl+Shift click on a handle puts the handles back in the middle of the selection
+                if (_pressPivot)
+                    ResetPivot();
                 _pressArmed = false;
                 _dragAxis   = DragAxis.None;
             }
@@ -711,10 +791,16 @@ public partial class LevelViewerTransformGizmo : Node3D
         if (_dragFromPress)
             TrackHeld(mousePos);
 
-        if (_dragFromPress && PressIsClickSoFar())
+        bool click = _dragFromPress && PressIsClickSoFar();
+        if (click)
             RevertDrag();
-        else
+        //Moving the handles alone changes nothing in the level, so there is nothing to send
+        else if (!_dragIsPivot)
             CommitDrag();
+
+        //...and a Ctrl+Shift click, however it moved, puts them back in the middle
+        if (click && _dragIsPivot)
+            ResetPivot();
 
         EndDragState();
     }
@@ -739,6 +825,7 @@ public partial class LevelViewerTransformGizmo : Node3D
             _handoverAxis       = _dragAxis;
             _handoverGesture    = _gesture;
             _handoverVertexSnap = VertexSnapActive;
+            _handoverPivot      = _pivotMoved ? GetPivot() : (Vector3?)null;
             _handoverOriginals.Clear();
             _handoverOriginalPositions.Clear();
             for (int i = 0; i < _targets.Count; i++)
@@ -755,6 +842,7 @@ public partial class LevelViewerTransformGizmo : Node3D
         _isDragging    = true;
         _dragFromPress = true;
         _dragIsClone   = false;
+        _dragIsPivot   = _pressPivot;
         BeginDrag(_pressPos);
         DragUpdate(mousePos);
     }
@@ -764,8 +852,10 @@ public partial class LevelViewerTransformGizmo : Node3D
     // ─────────────────────────────────────────────────────────────────────────
     private void BeginDrag(Vector2 mousePos)
     {
-        //The whole group turns about where the handles are, which for one entity is the entity itself
-        _dragPivot    = GetTargetsCentre();
+        //The whole group turns about where the handles are, which for one entity is the entity itself - unless they were moved
+        _dragPivot    = GetPivot();
+        _dragStartPivotMoved    = _pivotMoved;
+        _dragStartPivotInAnchor = _pivotInAnchor;
         _dragStartPos = _target.GlobalPosition;
         _dragStartRot = _target.RotationDegrees;
 
@@ -843,18 +933,28 @@ public partial class LevelViewerTransformGizmo : Node3D
 
             //Vertex snap: put the anchor's pivot on the nearest vertex under the cursor, still held to
             //the handle's axis or plane so the gizmo behaves as it looks. The others keep their offset.
+            //Handles moved off the selection are what lands on the vertex instead, and moving the handles
+            //alone they may land on the selection's own vertices - a door's hinge, say - so none are left out.
             _vertexSnappedThisMove = false;
             if (VertexSnapActive && VertexSnapProvider != null)
             {
-                Vector3? vertex = VertexSnapProvider(mousePos, _targets);
+                Vector3? vertex = VertexSnapProvider(mousePos, _dragIsPivot ? NoTargets : _targets);
                 if (vertex.HasValue)
                 {
-                    Vector3 want = vertex.Value - _dragStartPositions[0];
+                    Vector3 want = vertex.Value - (_dragIsPivot || _pivotMoved ? _dragPivot : _dragStartPositions[0]);
                     delta = IsPlane(_dragAxis)
                         ? want - _dragPlaneNormal * want.Dot(_dragPlaneNormal)
                         : _dragAxisDir * want.Dot(_dragAxisDir);
                     _vertexSnappedThisMove = true;
                 }
+            }
+
+            //Moving the handles alone: the selection stays where it is, so nothing is snapped to the grid either
+            if (_dragIsPivot)
+            {
+                GlobalPosition = _dragPivot + delta;
+                SetPivot(GlobalPosition);
+                return;
             }
 
             for (int i = 0; i < _targets.Count; i++)
@@ -877,10 +977,11 @@ public partial class LevelViewerTransformGizmo : Node3D
             _dragAccumAngleRad += deltaRad;
 
             /* A group rotates by whole steps of the snap, rather than each entity being snapped to
-               its own angle afterwards - that would pull the group apart. */
+               its own angle afterwards - that would pull the group apart. So does anything turning about
+               handles moved off it: snapping its angle afterwards would leave it where the unsnapped turn put it. */
             float angleRad = _dragAccumAngleRad;
             float rotationStep = LevelViewerTransformSnap.RotationDegrees;
-            if (_targets.Count > 1 && rotationStep > 0f)
+            if (TurnsAboutPivot && rotationStep > 0f)
             {
                 angleRad = Mathf.DegToRad(
                     LevelViewerTransformSnap.SnapValue(Mathf.RadToDeg(angleRad), rotationStep));
@@ -912,10 +1013,12 @@ public partial class LevelViewerTransformGizmo : Node3D
     /// Turn the group rigidly by one world rotation about the pivot - where the rings are. Every
     /// target, the anchor included, turns by it and swings round the pivot by it, so the group keeps
     /// its shape; the anchor turning on the spot while the rest orbited (issue 694) left the pivot
-    /// nowhere in particular. One entity is its own pivot, so it turns where it stands.
+    /// nowhere in particular. One entity is its own pivot, so it turns where it stands - unless the
+    /// handles have been moved off it, when it swings round them like a group.
     /// </summary>
     private void ApplyGroupRotation(Quaternion worldDelta)
     {
+        bool orbit = TurnsAboutPivot;
         for (int i = 0; i < _targets.Count; i++)
         {
             Node3D target = _targets[i];
@@ -924,7 +1027,7 @@ public partial class LevelViewerTransformGizmo : Node3D
 
             SetGlobalQuaternion(target, worldDelta * _dragStartQuaternions[i]);
             //One entity is its own pivot: its position is left alone, as it always was (no round trip through its parent)
-            if (_targets.Count > 1)
+            if (orbit)
                 target.GlobalPosition = _dragPivot + worldDelta * (_dragStartPositions[i] - _dragPivot);
         }
     }
@@ -957,11 +1060,11 @@ public partial class LevelViewerTransformGizmo : Node3D
                 }
             }
 
-            GlobalPosition = GetTargetsCentre();
+            GlobalPosition = GetPivot();
         }
 
-        //A group's rotation is snapped as one angle while it turns, not per entity afterwards
-        float rotationStep = _targets.Count > 1 ? 0f : LevelViewerTransformSnap.RotationDegrees;
+        //A group's rotation is snapped as one angle while it turns, not per entity afterwards (and so is a turn about moved handles)
+        float rotationStep = TurnsAboutPivot ? 0f : LevelViewerTransformSnap.RotationDegrees;
         if (rotationStep > 0f && IsRotateMode)
         {
             Vector3 rot = _target.RotationDegrees;
@@ -1235,6 +1338,53 @@ public partial class LevelViewerTransformGizmo : Node3D
             BuildTranslateMeshes();
         else if (IsRotateMode)
             BuildRotateMeshes();
+        BuildPivotGuide();
+    }
+
+    /* Handles moved off the selection: a line from them back to its middle (its origin, for one entity) and a
+       dot there, so it is plain that the handles are not where the selection is, and where they go back to. */
+    private MeshInstance3D _pivotGuideLine;
+    private MeshInstance3D _pivotGuideDot;
+    private ImmediateMesh  _pivotGuideMesh;
+    private const float    PivotGuideDotRadius = 0.06f;
+    private static readonly Color ColPivotGuide = new Color(1f, 1f, 1f, 0.8f);
+
+    private void BuildPivotGuide()
+    {
+        StandardMaterial3D material = UnlitMat(ColPivotGuide);
+        _pivotGuideMesh = new ImmediateMesh();
+        //Placed in world space, not scaled and turned with the handles
+        _pivotGuideLine = new MeshInstance3D { Mesh = _pivotGuideMesh, MaterialOverride = material, TopLevel = true, Visible = false };
+        AddChild(_pivotGuideLine);
+        _pivotGuideDot = new MeshInstance3D
+        {
+            Mesh = new SphereMesh { Radius = PivotGuideDotRadius, Height = PivotGuideDotRadius * 2f, RadialSegments = 12, Rings = 6 },
+            MaterialOverride = material,
+            TopLevel = true,
+            Visible = false,
+        };
+        AddChild(_pivotGuideDot);
+    }
+
+    private void UpdatePivotGuide()
+    {
+        if (_pivotGuideLine == null || !GodotObject.IsInstanceValid(_pivotGuideLine))
+            return;
+
+        Vector3 home = GetTargetsCentre();
+        bool show = _pivotMoved && GlobalPosition.DistanceTo(home) > PivotGuideDotRadius * _worldScale;
+        _pivotGuideLine.Visible = show;
+        _pivotGuideDot.Visible  = show;
+        if (!show)
+            return;
+
+        _pivotGuideMesh.ClearSurfaces();
+        _pivotGuideMesh.SurfaceBegin(Mesh.PrimitiveType.Lines);
+        _pivotGuideMesh.SurfaceAddVertex(GlobalPosition);
+        _pivotGuideMesh.SurfaceAddVertex(home);
+        _pivotGuideMesh.SurfaceEnd();
+        _pivotGuideLine.GlobalTransform = Transform3D.Identity;
+        _pivotGuideDot.GlobalTransform  = new Transform3D(Basis.Identity.Scaled(Vector3.One * _worldScale), home);
     }
 
     private void BuildTranslateMeshes()

@@ -6129,6 +6129,10 @@ public class LevelContent
 	public void Reset()
 	{
 		Level = null;
+		//Keyed by the old level's entities (and through their resource parameters, some of its data): nothing removed
+		//them, so they piled up with every level loaded. A new dictionary rather than Clear(), so anything still
+		//enumerating the old one is unaffected
+		RemappedResources = new Dictionary<Entity, List<Tuple<int, int>>>();
 	}
 
 	public bool Loaded => Level?.Commands != null && Level.Commands.Loaded;

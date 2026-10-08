@@ -77,6 +77,8 @@ public static class LevelViewerZoneHighlight
 		Clear();
 		_zones = new List<SyncedZone>();
 		_haveTable = false;
+		//After Clear: its restore still needs to recognise them
+		AlienSceneMaterials.ClearZoneTintMaterials();
 	}
 
 	/// <remarks>

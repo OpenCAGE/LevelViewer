@@ -289,8 +289,7 @@ public partial class AlienScene
 			if (preview == null || !GodotObject.IsInstanceValid(preview) || !preview.IsInsideTree())
 				continue;
 
-			ForgetRenderableChildren(preview.GetPopulateRenderTarget());
-			preview.Refresh();
+			preview.Refresh(); //ClearRenderableChildren takes the old meshes out of the bookkeeping first
 			preview.SyncPickablesWithVisibility();
 			refreshed++;
 		}
@@ -929,7 +928,7 @@ public partial class AlienScene
 			}
 		}
 
-		foreach (KeyValuePair<ulong, Materials.Material> entry in _modelReferenceOverrideMaterialSources.ToArray())
+		foreach (KeyValuePair<ModelReferenceOverrideKey, Materials.Material> entry in _modelReferenceOverrideMaterialSources.ToArray())
 		{
 			if (!materials.Contains(entry.Value))
 				continue;
@@ -940,6 +939,7 @@ public partial class AlienScene
 				retired.Add(overridden);
 			}
 			_modelReferenceOverrideMaterialSources.Remove(entry.Key);
+			_modelReferenceOverrideMaterialScalars.Remove(entry.Key);
 		}
 
 		return retired;
@@ -999,9 +999,10 @@ public partial class AlienScene
 
 		//A model reference renders onto its own entity node, or onto the node an alias points at; the
 		//preview is a child of the entity node either way
-		foreach (Node child in renderTarget.GetChildren())
+		int childCount = renderTarget.GetChildCount();
+		for (int i = 0; i < childCount; i++)
 		{
-			if (child is ModelReferencePreview preview)
+			if (renderTarget.GetChild(i) is ModelReferencePreview preview)
 				affected.Add(preview);
 		}
 	}
@@ -1061,6 +1062,7 @@ public partial class AlienScene
 			_modelReferenceMeshes.Remove(mesh);
 			_meshBindings.Remove(mesh);
 			_sceneFilterMeshes.Remove(mesh);
+			LevelViewerCompositeFocus.ForgetNode(mesh);
 			if (LevelViewerPick.TryGetPickOwner(mesh, out Node3D owner))
 				LevelViewerPick.UnregisterPickableMesh(mesh, owner);
 		}

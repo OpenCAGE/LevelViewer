@@ -42,8 +42,10 @@ public static class LevelViewerView
 				hasBounds = true;
 			}
 
-			foreach (Node child in node.GetChildren())
-				pending.Push(child);
+			//By index: GetChildren() is a native array per node, and this walks whole levels when framing
+			int childCount = node.GetChildCount();
+			for (int i = 0; i < childCount; i++)
+				pending.Push(node.GetChild(i));
 		}
 	}
 

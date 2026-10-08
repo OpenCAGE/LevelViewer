@@ -37,6 +37,72 @@ public partial class AlienScene
 	private bool _previewOverlaysStoodDown;
 	//The composite the batch last built as the one open, to tell its own setting of the active composite from anyone else's
 	private uint _previewBatchActiveCompositeId;
+	//The active composite OpenCAGE's editor moved to while the batch ran (0: it did not): what the batch puts back
+	private uint _editorActiveCompositeDuringPreviews;
+
+	/// <summary>
+	/// The editor's packets set the active composite while a batch runs (a step out during a save's capture), and the next
+	/// preview's populate writes over it: noted here, so the batch puts that back and not the one it started from - which
+	/// the grey-out would otherwise judge the rebuilt scene by until the next packet.
+	/// </summary>
+	public void NoteEditorActiveComposite(uint activeCompositeId)
+	{
+		if (_previewBatchRunning)
+			_editorActiveCompositeDuringPreviews = activeCompositeId;
+	}
+
+	//The scene the batch puts back when it is done, and a root switch OpenCAGE asked for while it ran (built instead)
+	private Composite _previewBatchViewComposite;
+	private ShortGuid _previewBatchRequestedRoot = ShortGuid.Invalid;
+
+	/// <summary>
+	/// A root switch (a composite opened from the browser) while a batch has the scene: a populate now would free what the
+	/// batch is capturing, or - asked for the composite being captured - be skipped as the one on screen, and the switch
+	/// was lost: the batch put its old scene back with the editor somewhere else. Noted, and built in place of the old
+	/// scene once the batch is done. Back to the scene the batch restores is noted too: a batch that is abandoned puts
+	/// nothing back, and the request is then made again.
+	/// </summary>
+	private bool TryDeferRootSwitchDuringPreviews(ShortGuid composite)
+	{
+		if (!_previewBatchRunning)
+			return false;
+		_previewBatchRequestedRoot = composite;
+		if (_previewBatchViewComposite != null && _previewBatchViewComposite.shortGUID == composite)
+			ViewerPopulateBridge.NotifySkipped();
+		return true;
+	}
+
+	/* The scene on screen is still the batch's own (nothing has loaded or populated over it since its last preview), so whatever
+	   ends the batch builds the scene again from the script: the restore, the root switch it deferred, or the load that takes
+	   the scene from it. Edits that arrive meanwhile are already in the script, and are not built into a preview about to go. */
+	private int _previewBatchGeneration = int.MinValue;
+	private bool PreviewBatchHasScene => _previewBatchRunning && _loadStep == LoadPipelineStep.None && _contentGeneration == _previewBatchGeneration;
+
+	/* The view the last batch took down: its composite, content origin and viewport hides. Good for as long as that batch's
+	   last preview is the scene (BatchPreviewOnScreen), during the batch or after one that was abandoned or left it there. */
+	private ShortGuid _previewBatchViewId = ShortGuid.Invalid;
+	private Vector3 _previewBatchViewOrigin;
+	private List<NodePath> _previewBatchViewHides;
+	private bool BatchPreviewOnScreen => _contentGeneration == _previewBatchGeneration;
+
+	/// <summary>
+	/// A populate while a batch's lean preview is the scene (never framed, origin 0): the user's own composite built again gets
+	/// the view the batch took down, as the batch's restore would put it back; any other composite is framed afresh. Taken for a
+	/// rebuild of the scene on screen instead, the user's composite came back at the preview's origin under their camera.
+	/// </summary>
+	private bool TryKeepViewTakenByBatch(Composite comp, out Vector3 origin, out List<NodePath> hides)
+	{
+		origin = _previewBatchViewOrigin;
+		hides = _previewBatchViewHides;
+		return comp != null && _previewBatchViewId != ShortGuid.Invalid && _previewBatchViewId == comp.shortGUID
+			&& _parentNode != null && GodotObject.IsInstanceValid(_parentNode);
+	}
+
+	private void DropDeferredRootSwitch()
+	{
+		if (_previewBatchRunning)
+			_previewBatchRequestedRoot = ShortGuid.Invalid;
+	}
 
 	private const int PreviewProgressEvery = 50;
 	/// <summary>
@@ -170,6 +236,13 @@ public partial class AlienScene
 		bool stoppedForSync = false;
 
 		_previewBatchRunning = true;
+		_editorActiveCompositeDuringPreviews = 0;
+		_previewBatchViewComposite = viewComposite;
+		_previewBatchViewId = viewComposite?.shortGUID ?? ShortGuid.Invalid;
+		_previewBatchViewOrigin = viewOrigin;
+		_previewBatchViewHides = viewHides;
+		_previewBatchRequestedRoot = ShortGuid.Invalid;
+		_previewBatchGeneration = int.MinValue; //the user's scene, until the first preview is built over it
 		LevelViewerRenderIdleThrottle.SetLoadActive(true);
 		try
 		{
@@ -259,7 +332,7 @@ public partial class AlienScene
 						populateSeconds += populate.Elapsed.TotalSeconds;
 						populated++;
 						//The populate is this batch's own; a generation change from anywhere else is what the check above is for
-						generation = _contentGeneration;
+						generation = _previewBatchGeneration = _contentGeneration;
 
 						if (!built)
 						{
@@ -274,7 +347,16 @@ public partial class AlienScene
 							   tagged for it: whatever came back is of nothing, not of this composite, and a
 							   marker for it would say the composite draws nothing. */
 							if (_contentGeneration != generation)
+							{
 								status = CompositePreviewStatus.Failed;
+								//...and that scene is on screen now, not the batch's: as when the next job finds it (above), nothing is put back
+								if (!abandoned)
+								{
+									abandoned = true;
+									ViewerLog.PrintErr("[Preview] The level changed under the batch while composite " + (i + 1) + " of " + jobs.Length
+										+ " was being captured; the rest are marked failed and nothing is put back.");
+								}
+							}
 							else
 								RecordEmptyMarker(job.File, status);
 						}
@@ -319,19 +401,30 @@ public partial class AlienScene
 			/* Put back only while it is still the batch's own: a load or populate that arrived part way
 			   through set it for its scene, and that scene is what is on screen now. */
 			if (populated > 0 && PreviewVisibilitySettings.ActiveCompositeId == _previewBatchActiveCompositeId)
-				PreviewVisibilitySettings.ActiveCompositeId = viewActiveComposite;
+				PreviewVisibilitySettings.ActiveCompositeId = _editorActiveCompositeDuringPreviews != 0 ? _editorActiveCompositeDuringPreviews : viewActiveComposite;
+			_editorActiveCompositeDuringPreviews = 0;
 			_previewOverlaysStoodDown = false;
 		}
 
 		double restoreSeconds = 0;
+		ShortGuid requestedRoot = _previewBatchRequestedRoot;
+		//Deleted while the batch ran (an undo of its creation; the editor closed its view): nothing to switch to, the old scene goes back
+		if (requestedRoot != ShortGuid.Invalid && _content.Level?.Commands?.GetComposite(requestedRoot) == null)
+			requestedRoot = ShortGuid.Invalid;
+		bool rootSwitched = requestedRoot != ShortGuid.Invalid && (viewComposite == null || viewComposite.shortGUID != requestedRoot);
 		try
 		{
 			if (sceneRebuilt && !abandoned)
 			{
-				if (restoreView && viewComposite != null && _content.Loaded && _loadStep == LoadPipelineStep.None)
+				//The editor went to another root while the batch ran: that is built next, not the old scene put back
+				if (rootSwitched)
+					FinishLastPreviewPopulate();
+				else if (restoreView && viewComposite != null && _content.Loaded && _loadStep == LoadPipelineStep.None)
 				{
 					Stopwatch restore = Stopwatch.StartNew();
-					RestoreViewAfterPreviews(viewComposite, viewOrigin, camera, viewCamera, viewHides);
+					//The composite as the script holds it now: deleted and put back (an undo) while the batch ran, it is another object
+					Composite restoreTo = _content.Level?.Commands?.GetComposite(viewComposite.shortGUID) ?? viewComposite;
+					RestoreViewAfterPreviews(restoreTo, viewOrigin, camera, viewCamera, viewHides);
 					restoreSeconds = restore.Elapsed.TotalSeconds;
 				}
 				else
@@ -347,12 +440,37 @@ public partial class AlienScene
 		finally
 		{
 			_previewBatchRunning = false;
+			_previewBatchViewComposite = null;
+			_previewBatchRequestedRoot = ShortGuid.Invalid;
 			RestoreOverlaysAfterPreviews();
 			//A load or populate that arrived part way through showed the overlay for itself and hides it when it is done;
 			//a load that failed shows its message there, which stays until the next load
 			if (_loadStep == LoadPipelineStep.None && !_levelLoadFailedShown)
 				HideLoading();
 			LevelViewerRenderIdleThrottle.SetLoadActive(false);
+		}
+
+		/* The batch's last preview is still the scene, with a composite populate on its way (it abandoned the batch, or kept the
+		   restore from running). That preview is not the user's scene: left as the loaded composite, a forced rebuild of it would
+		   keep the preview's origin under the user's camera, and a switch to it would be merged away as already on screen. */
+		if (populated > 0 && _contentGeneration == _previewBatchGeneration && _loadStep == LoadPipelineStep.WaitUiBeforeCompositePopulate)
+			_loadedComposite = null;
+
+		/* The root the editor switched to while the batch ran, built as a root switch builds it (framed, reported to OpenCAGE).
+		   The scene on screen may be that composite already, as the batch's last preview: forgotten as the loaded one, or the
+		   populate would take itself for a rebuild of it and keep the preview's origin and camera. */
+		if (rootSwitched && !abandoned && _content.Loaded && _loadStep == LoadPipelineStep.None)
+		{
+			if (_loadedComposite != null && _loadedComposite.shortGUID == requestedRoot)
+				_loadedComposite = null;
+			QueuePopulateComposite(requestedRoot, true);
+		}
+		/* A load or populate took the scene from the batch (abandoned, nothing put back), or is on its way now: the switch
+		   asked for after it is made again as an ordinary switch - merged into the pending one, or from what it built. One
+		   that came before it was dropped when it arrived (see QueuePopulateComposite, QueueLoadLevel). */
+		else if (requestedRoot != ShortGuid.Invalid && (abandoned || _loadStep != LoadPipelineStep.None))
+		{
+			QueuePopulateComposite(requestedRoot, false);
 		}
 
 		int blank = 0;

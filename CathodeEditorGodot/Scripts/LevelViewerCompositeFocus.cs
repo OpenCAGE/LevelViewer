@@ -28,7 +28,9 @@ public static class LevelViewerCompositeFocus
 	private static ShaderMaterial _cachedDimmedTransparentDoubleSided;
 	private static readonly Dictionary<MeshInstance3D, Material> _savedMaterialOverrides = new();
 	private static readonly Dictionary<MeshInstance3D, bool> _meshDimmedState = new();
-	private static readonly Dictionary<Material, Material> _dimmedMaterialBySource = new();
+	//Which of the four shared dimmed materials a source maps to, remembered without keeping the source alive: an override
+	//material replaced by an edit (each tick of a colour drag on a greyed-out placement) was held here until the next populate
+	private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<Material, Material> _dimmedMaterialBySource = new();
 	private static readonly Dictionary<Node3D, uint[]> _ownerEntityChainCache = new();
 	private static readonly List<uint> _entityChainBuildBuffer = new();
 	private static readonly HashSet<uint> _compositesInScope = new();
@@ -232,7 +234,8 @@ public static class LevelViewerCompositeFocus
 		Node contentRoot,
 		Commands commands,
 		Node3D scopeAnchorOverride = null,
-		IReadOnlyDictionary<Node3D, Entity> nodeEntities = null)
+		IReadOnlyDictionary<Node3D, Entity> nodeEntities = null,
+		uint sceneRootCompositeId = 0)
 	{
 		if (!HasActiveComposite || sceneRoot == null || !GodotObject.IsInstanceValid(sceneRoot) || commands == null)
 		{
@@ -261,6 +264,10 @@ public static class LevelViewerCompositeFocus
 			ResetDimStateForScopeChange();
 
 		RebuildScopeCache(commands);
+		/* Nothing applied since the scene was built, and with no path there is no path change to go by either: a scene whose
+		   root composite lies outside the active composite's scope (the level's root built while the editor shows a composite
+		   opened on its own) has everything outside that scope to grey, which the "no change" test below left bright. */
+		bool unscopedScene = nothingApplied && instancePath.Length == 0 && sceneRootCompositeId != 0 && !_compositesInScope.Contains(sceneRootCompositeId);
 		_appliedActiveCompositeId = activeId;
 		_scopeAnchorNode = scopeAnchorOverride ?? ResolveScopeAnchorNode(contentRoot, instancePath);
 		_lastFocusInstancePath = (uint[])instancePath.Clone();
@@ -291,7 +298,7 @@ public static class LevelViewerCompositeFocus
 		bool dimmingReturns = _dimmingStoodDown;
 		_dimmingStoodDown = false;
 
-		if (dimmingReturns || activeCompositeChanged || focusPathChanged)
+		if (dimmingReturns || activeCompositeChanged || focusPathChanged || unscopedScene)
 		{
 			if (!dimmingReturns
 				&& !activeCompositeChanged
@@ -440,6 +447,26 @@ public static class LevelViewerCompositeFocus
 		_meshDimmedState.Clear();
 		//Everything is judged again by the full pass that follows (or when zones go off), the selection noted afresh
 		_ownersPassedOverForSelection.Clear();
+	}
+
+	/// <summary>
+	/// A node about to be freed (a removed subtree, a refreshed preview's old meshes): its per-mesh and per-owner state
+	/// goes with it. Only a scope change cleared these, and the state of a mesh never greyed was never pruned at all - an
+	/// instance deleted in place left an entry for each of its meshes. Never for a node that stays: a greyed mesh would
+	/// lose the material it goes back to.
+	/// </summary>
+	public static void ForgetNode(Node3D node)
+	{
+		if (node == null)
+			return;
+
+		if (node is MeshInstance3D mesh)
+		{
+			_meshDimmedState.Remove(mesh);
+			_savedMaterialOverrides.Remove(mesh);
+		}
+		_ownerEntityChainCache.Remove(node);
+		_ownersPassedOverForSelection.Remove(node);
 	}
 
 	/// <summary>True when composite focus has this mesh greyed out (used to avoid re-pickable registration).</summary>
@@ -833,7 +860,7 @@ public static class LevelViewerCompositeFocus
 			dimmed = _cachedDimmedOpaque;
 		}
 
-		_dimmedMaterialBySource[original] = dimmed;
+		_dimmedMaterialBySource.AddOrUpdate(original, dimmed);
 		return dimmed;
 	}
 
@@ -936,8 +963,11 @@ public static class LevelViewerCompositeFocus
 
 	private static void SetWireframeOverlayVisible(MeshInstance3D solidMesh, bool visible)
 	{
-		foreach (Node child in solidMesh.GetChildren())
+		//By index: this runs for every mesh in a focus pass, and GetChildren() is a native array each time
+		int childCount = solidMesh.GetChildCount();
+		for (int i = 0; i < childCount; i++)
 		{
+			Node child = solidMesh.GetChild(i);
 			if (child is Node3D node3D && child.IsInGroup(LevelViewerPick.WireframeOverlayGroupName))
 				node3D.Visible = visible;
 		}

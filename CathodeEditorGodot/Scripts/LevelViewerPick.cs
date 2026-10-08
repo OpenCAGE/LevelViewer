@@ -139,8 +139,11 @@ public static class LevelViewerPick
 
 		TryCopyPickMeshesForOwner(root, destination);
 
-		foreach (Node child in root.GetChildren())
+		//By index: GetChildren() is a native array per node, and under an environment instance this is the whole level
+		int childCount = root.GetChildCount();
+		for (int i = 0; i < childCount; i++)
 		{
+			Node child = root.GetChild(i);
 			if (child is not Node3D child3D || !GodotObject.IsInstanceValid(child3D))
 				continue;
 
@@ -352,7 +355,11 @@ public static class LevelViewerPick
 				continue;
 
 			if (mesh != null)
+			{
 				_registeredPickables.Remove(mesh);
+				//A freed wrapper is still a usable key; left here, every refresh's old meshes stayed until the next populate
+				_pickOwners.Remove(mesh);
+			}
 
 			meshes.RemoveAt(i);
 		}
@@ -368,6 +375,10 @@ public static class LevelViewerPick
 	public static void RegisterPickableMesh(MeshInstance3D meshInstance, Node3D ownerNode)
 	{
 		if (meshInstance == null || ownerNode == null || !GodotObject.IsInstanceValid(meshInstance))
+			return;
+
+		//A refresh queues its old meshes and registers the owner's subtree straight away, while they are still attached
+		if (meshInstance.IsQueuedForDeletion())
 			return;
 
 		if (meshInstance.IsInGroup(WireframeOverlayGroupName))
@@ -413,6 +424,12 @@ public static class LevelViewerPick
 
 	private static void RegisterPickableRecursive(Node node, Node3D ownerEntityNode)
 	{
+		/* A subtree queued for freeing is still attached until the end of the frame, and only its root says so: a preview's
+		   Refresh frees its old geometry this way (a spline's segment arrows and lines, every settings packet) and the meshes
+		   under it were registered again, greyed by the reapply that follows, and freed with the grey-out still holding them */
+		if (node.IsQueuedForDeletion())
+			return;
+
 		if (node.IsInGroup(WireframeOverlayGroupName) || node.IsInGroup(SceneFilterGroupName))
 			goto children;
 
@@ -422,8 +439,8 @@ public static class LevelViewerPick
 			RegisterPickableVisual(visual, ownerEntityNode);
 
 		children:
-		foreach (Node child in node.GetChildren())
-			RegisterPickableRecursive(child, ownerEntityNode);
+		for (int i = 0, childCount = node.GetChildCount(); i < childCount; i++)
+			RegisterPickableRecursive(node.GetChild(i), ownerEntityNode);
 	}
 
 	private static void UnregisterPickableRecursive(Node node, Node3D ownerEntityNode)
@@ -433,13 +450,14 @@ public static class LevelViewerPick
 		else if (node is VisualInstance3D visual)
 			UnregisterPickableVisual(visual);
 
-		foreach (Node child in node.GetChildren())
-			UnregisterPickableRecursive(child, ownerEntityNode);
+		int childCount = node.GetChildCount();
+		for (int i = 0; i < childCount; i++)
+			UnregisterPickableRecursive(node.GetChild(i), ownerEntityNode);
 	}
 
 	private static void RegisterPickableVisual(VisualInstance3D visual, Node3D ownerEntityNode)
 	{
-		if (visual == null || visual.IsInGroup(WireframeOverlayGroupName))
+		if (visual == null || visual.IsInGroup(WireframeOverlayGroupName) || visual.IsQueuedForDeletion())
 			return;
 
 		Aabb bounds = visual.GetAabb();
@@ -473,6 +491,52 @@ public static class LevelViewerPick
 			_ownerGlobalBounds.Remove(ownerEntityNode);
 			_scopedPickablesDirty = true;
 		}
+	}
+
+	/// <summary>
+	/// Forget a node that is leaving the scene: as a pickable, and as an owner along with the meshes registered against
+	/// it. Called for every node of a removed subtree (a delete, an undo, an instance taken out) while it is still valid.
+	/// Removals used to leave all of it here until the next populate, and every pick pass, bounds invalidation and scope
+	/// rebuild walked the dead owners.
+	/// </summary>
+	public static void ForgetNode(Node3D node)
+	{
+		if (node == null)
+			return;
+
+		bool forgot = false;
+		if (node is MeshInstance3D mesh)
+		{
+			_registeredPickables.Remove(mesh);
+			//Registered against an owner outside the removed subtree (an alias's override mesh): out of that owner's list too
+			if (_pickOwners.TryGetValue(mesh, out Node3D meshOwner) && meshOwner != node
+				&& _pickablesByOwner.TryGetValue(meshOwner, out List<MeshInstance3D> ownerMeshes) && ownerMeshes.Remove(mesh))
+			{
+				_ownerGlobalBounds.Remove(meshOwner);
+				forgot = true;
+			}
+		}
+		forgot |= _pickOwners.Remove(node);
+
+		if (_pickablesByOwner.TryGetValue(node, out List<MeshInstance3D> meshes))
+		{
+			//An alias's meshes sit under the node it points at, outside the subtree: only those still recorded as its own
+			foreach (MeshInstance3D owned in meshes)
+			{
+				if (owned != null && _pickOwners.TryGetValue(owned, out Node3D owner) && owner == node)
+				{
+					_pickOwners.Remove(owned);
+					_registeredPickables.Remove(owned);
+				}
+			}
+			_pickablesByOwner.Remove(node);
+			forgot = true;
+		}
+
+		forgot |= _ownerGlobalBounds.Remove(node);
+		forgot |= _suppressedPickOwners.Remove(node);
+		if (forgot)
+			_scopedPickablesDirty = true;
 	}
 
 	private static void EnsureScopedPickOwners(Node contentRoot, Commands commands)

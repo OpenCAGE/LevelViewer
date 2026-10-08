@@ -175,6 +175,17 @@ public static class AlienSceneMaterials
 		return material != null && _zoneTintMaterialSet.Contains(material);
 	}
 
+	/// <summary>
+	/// Let go of every zone tint. Colours are per zone placement, so each level shown with zones on added a set of its own
+	/// and nothing ever removed them. Only once no mesh still wears one (the zone overlay restored, the level going): until
+	/// then <see cref="IsZoneTintMaterial"/> is how a restore recognises them. The shaders stay - two, for the process.
+	/// </summary>
+	public static void ClearZoneTintMaterials()
+	{
+		_zoneTintMaterials.Clear();
+		_zoneTintMaterialSet.Clear();
+	}
+
 	private static Shader GetZoneTintShader(bool doubleSided)
 	{
 		if (doubleSided)

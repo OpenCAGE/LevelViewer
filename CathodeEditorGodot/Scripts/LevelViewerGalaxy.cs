@@ -352,7 +352,7 @@ void fragment() {
 			Array.Resize(ref indices, built * 6);
 		}
 
-		Godot.Collections.Array arrays = new Godot.Collections.Array();
+		using Godot.Collections.Array arrays = new Godot.Collections.Array();
 		arrays.Resize((int)Mesh.ArrayType.Max);
 		arrays[(int)Mesh.ArrayType.Vertex] = vertices;
 		arrays[(int)Mesh.ArrayType.TexUV] = corners;
@@ -361,7 +361,9 @@ void fragment() {
 		arrays[(int)Mesh.ArrayType.Index] = indices;
 
 		ArrayMesh mesh = new ArrayMesh();
-		mesh.AddSurfaceFromArrays(Mesh.PrimitiveType.Triangles, arrays);
+		//Through the helper, as every other surface build is: the two-argument call leaves the binding's default
+		//blend shape and LOD containers unrooted across the native call (the 0.18.0.35 access violation)
+		LevelViewerMeshUtil.AddSurface(mesh, Mesh.PrimitiveType.Triangles, arrays);
 		return mesh;
 	}
 

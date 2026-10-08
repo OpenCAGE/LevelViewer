@@ -68,6 +68,80 @@ public static class ModelReferenceMaterialMapping
 		EnsureAliasMappingIndex(commands);
 	}
 
+	/* The script copy changed under the index between populates: an entity added (an undo brings a deleted one back as a
+	   new object) or deleted. The index kept the deleted object until the next populate - holding it and its parameters,
+	   and handing it out for its id in place of the one the script now has. Ids are not unique - a composite variant
+	   shares its original's - so an add only fills an id nothing answers for (a removal hands the id on to another live
+	   entity that has it), and the entity the index already gives for an id stays the one it gives. */
+	public static void NoteEntityAdded(Composite composite, Entity entity)
+	{
+		if (entity == null || composite == null)
+			return;
+		ForgetAliasIndexIfItMaps(entity);
+
+		uint entityId = entity.shortGUID.AsUInt32;
+		if (EntityById.TryAdd(entityId, entity))
+			OwningCompositeByEntityId[entityId] = composite;
+	}
+
+	/// <summary>Before <paramref name="entity"/> leaves <paramref name="from"/>.</summary>
+	public static void NoteEntityRemoved(Commands commands, Composite from, Entity entity)
+	{
+		if (entity == null)
+			return;
+		ForgetAliasIndexIfItMaps(entity);
+
+		uint entityId = entity.shortGUID.AsUInt32;
+		//FindOwningComposite caches an owner per id on its own
+		if (OwningCompositeByEntityId.TryGetValue(entityId, out Composite owner) && owner == from)
+			OwningCompositeByEntityId.Remove(entityId);
+		if (!EntityById.TryGetValue(entityId, out Entity indexed) || indexed != entity)
+			return;
+
+		EntityById.Remove(entityId);
+		OwningCompositeByEntityId.Remove(entityId);
+		//Another composite with the id (a variant, or the original of one) answers for it now - the last, as the index is built
+		if (commands?.Entries == null)
+			return;
+		for (int i = commands.Entries.Count - 1; i >= 0; i--)
+		{
+			Composite other = commands.Entries[i];
+			if (other == null || other == from)
+				continue;
+			Entity survivor = other.GetEntityByID(entity.shortGUID);
+			if (survivor == null)
+				continue;
+			EntityById[entityId] = survivor;
+			OwningCompositeByEntityId[entityId] = other;
+			return;
+		}
+	}
+
+	/// <summary>Before <paramref name="composite"/> leaves the script (a variant or a refactor undone): its entities, as removed.</summary>
+	public static void NoteCompositeRemoved(Commands commands, Composite composite)
+	{
+		if (composite == null)
+			return;
+
+		foreach (Entity entity in composite.GetEntities())
+			NoteEntityRemoved(commands, composite, entity);
+	}
+
+	/* The alias index holds each alias object with the composite it sits in, and a resolve takes only a source whose composite
+	   is one of the chain it resolves for. An alias with a mapping that came or went - an undo brings one back as a new object,
+	   often in a composite that is new itself - left it answering with the old alias, or with nothing, until the next populate:
+	   a placement spawned afterwards was re-skinned by a deleted alias, or not by a restored one. It is built again from the
+	   script when it is next used, as a populate builds it. */
+	private static void ForgetAliasIndexIfItMaps(Entity entity)
+	{
+		if (entity is not AliasEntity || TryGetMappingParameter(entity) == null)
+			return;
+
+		AliasesByTargetEntityId.Clear();
+		ResolvedMappingCache.Clear();
+		_aliasMappingIndexBuilt = false;
+	}
+
 	public static Entity TryGetEntityById(uint entityId)
 	{
 		if (entityId == 0)

@@ -14,6 +14,9 @@ public static class ViewerLog
 	private static readonly object _fileLock = new object();
 	private static string _logFilePath;
 	private static bool _logFileResolved;
+	//Characters written since the file was (re)started: near enough its size, without asking the file system per line
+	private static long _logFileChars;
+	private const long MaxLogFileChars = 32L * 1024 * 1024;
 	private static bool _globalHandlersInstalled;
 
 	public static void InstallGlobalExceptionHandlers()
@@ -87,7 +90,26 @@ public static class ViewerLog
 				if (path == null)
 					return;
 
+				/* Embedded, every packet adds a breadcrumb, and the file was only started again by the next viewer: a long
+				   session grew it without limit. Past the cap the current file becomes viewer.log.1 (replacing the last
+				   one) and a new one starts, so the tail of a session - what a crash report wants - is always there. */
+				if (_logFileChars > MaxLogFileChars)
+				{
+					//Counted as started either way: a rotation that fails (viewer.log.1 held open, say) is tried again after
+					//another full file, not on every line - and the line below is written regardless
+					_logFileChars = 0;
+					try
+					{
+						System.IO.File.Move(path, path + ".1", true); //a rename, not a 32 MB copy under the lock
+						System.IO.File.WriteAllText(path, "=== Viewer log continued " + System.DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + " (earlier lines in viewer.log.1) ===\n");
+					}
+					catch
+					{
+					}
+				}
+
 				System.IO.File.AppendAllText(path, line);
+				_logFileChars += line.Length;
 			}
 		}
 		catch

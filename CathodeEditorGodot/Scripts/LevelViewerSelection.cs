@@ -130,14 +130,23 @@ public static class LevelViewerSelection
         return false;
     }
 
-    public static void ReapplyIfSelectionActive()
+    public static void ReapplyIfSelectionActive() => Reapply(recollectEmpty: false);
+
+    /// <summary>
+    /// After Edit in Viewport has redrawn the spline being edited: a selection that had nothing to mark looks again, as the
+    /// spline may have been drawn only now (its filter off when it was selected). Only here - the other callers run several
+    /// times a frame, and a selection with nothing to mark would be walked each time.
+    /// </summary>
+    public static void ReapplyAfterSplineEditRefresh() => Reapply(recollectEmpty: true);
+
+    private static void Reapply(bool recollectEmpty)
     {
         if (_selectionRoots.Count == 0)
             return;
 
         /* A selected ModelReference respawned in place (a parameter or resource edit) has new meshes; the marked ones
            are on their way out. The highlight goes on the meshes the selection has now. */
-        bool stale = false;
+        bool stale = recollectEmpty && _selectionMeshes.Count == 0;
         for (int i = 0; i < _selectionMeshes.Count && !stale; i++)
         {
             MeshInstance3D mesh = _selectionMeshes[i];
@@ -145,6 +154,10 @@ public static class LevelViewerSelection
         }
         if (stale)
         {
+            //What was saved for the outgoing meshes has nothing left to go back onto. Kept, every respawn of a selection
+            //that stays put (each tick of a slider) added a set until the selection changed
+            DropDeadKeys(_savedOverlays);
+            DropDeadKeys(_savedOverrides);
             _selectionMeshes.Clear();
             for (int i = 0; i < _selectionRoots.Count; i++)
                 CollectSelectionMeshes(_selectionRoots[i], append: true);
@@ -158,6 +171,21 @@ public static class LevelViewerSelection
                 continue;
 
             ApplyMeshHighlight(mesh); //each mode's apply is a no-op on a mesh it already marked
+        }
+    }
+
+    private static void DropDeadKeys(Dictionary<MeshInstance3D, Material> saved)
+    {
+        List<MeshInstance3D> dead = null;
+        foreach (MeshInstance3D mesh in saved.Keys)
+        {
+            if (mesh == null || !GodotObject.IsInstanceValid(mesh) || mesh.IsQueuedForDeletion())
+                (dead ??= new List<MeshInstance3D>()).Add(mesh);
+        }
+        if (dead != null)
+        {
+            foreach (MeshInstance3D mesh in dead)
+                saved.Remove(mesh);
         }
     }
 

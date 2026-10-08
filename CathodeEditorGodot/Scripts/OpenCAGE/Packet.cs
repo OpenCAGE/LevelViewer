@@ -413,6 +413,12 @@ namespace OpenCAGE.UnityConnection
         // OpenCAGE from before this sends - both keep the level that is loaded.
         public bool level_reload = false;
 
+        // OpenCAGE -> Level Viewer, on the LEVEL_LOADED a viewer that has just connected gets (it was started again, or its
+        // socket came back): the composite the editor's hierarchy starts from - the one it has open, or the one a stepped-into
+        // path begins at - for the load to build instead of the level's root. 0 (every other LEVEL_LOADED, which can be sent
+        // while the editor still shows the last level, and an OpenCAGE from before this) builds the root, as before.
+        public uint level_scene_root = 0;
+
         // Level Viewer -> OpenCAGE, on VIEWPORT_CONTEXT_MENU: where the right click landed, as a 0-1 fraction
         // of the viewport (like drop_viewport_x/y - the two sides need not share DPI). OpenCAGE puts it through
         // the panel the viewer is embedded in, whose coordinates are the only ones its menu can be placed in.

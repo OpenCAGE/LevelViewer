@@ -65,9 +65,15 @@ public partial class AlienScene : Node3D
 	private Dictionary<Materials.Material, ShaderMaterial> _materials = new Dictionary<Materials.Material, ShaderMaterial>();
 	private Dictionary<Materials.Material, ShaderMaterial> _wireframeMaterials = new Dictionary<Materials.Material, ShaderMaterial>();
 	private Dictionary<ShaderMaterial, bool> _materialSupport = new Dictionary<ShaderMaterial, bool>();
-	private readonly Dictionary<ulong, ShaderMaterial> _modelReferenceOverrideMaterials = new Dictionary<ulong, ShaderMaterial>();
+	/* What an override material is cached under: the entities themselves rather than their ids, which a composite variant
+	   keeps - its ModelReference may carry other colours than the original's, and the two shared one entry, replacing it
+	   back and forth. Entity has no equality of its own, so this is reference identity. */
+	private readonly record struct ModelReferenceOverrideKey(int MaterialWriteIndex, Entity ParameterEntity, Entity FallbackEntity, bool Wireframe);
+	private readonly Dictionary<ModelReferenceOverrideKey, ShaderMaterial> _modelReferenceOverrideMaterials = new Dictionary<ModelReferenceOverrideKey, ShaderMaterial>();
 	//Which material each override entry was built from, for retiring them when it changes (the key is a hash)
-	private readonly Dictionary<ulong, Materials.Material> _modelReferenceOverrideMaterialSources = new Dictionary<ulong, Materials.Material>();
+	private readonly Dictionary<ModelReferenceOverrideKey, Materials.Material> _modelReferenceOverrideMaterialSources = new Dictionary<ModelReferenceOverrideKey, Materials.Material>();
+	//And the colour values it was built with: an entry is reused only for the same values, and replaced for new ones
+	private readonly Dictionary<ModelReferenceOverrideKey, ModelReferenceMaterialOverrides.EnvironmentColourScalars> _modelReferenceOverrideMaterialScalars = new Dictionary<ModelReferenceOverrideKey, ModelReferenceMaterialOverrides.EnvironmentColourScalars>();
 	private Dictionary<MeshInstance3D, Materials.Material> _modelReferenceMeshes = new Dictionary<MeshInstance3D, Materials.Material>();
 
 	/// <summary>What a spawned mesh was built from, for remapping it later.</summary>
@@ -211,7 +217,20 @@ public partial class AlienScene : Node3D
 	public override void _Ready()
 	{
 		RegisterDefaultParameterVisualHandlers();
+		SplinePathPreview.AfterEditRefresh = OnSplinePreviewEditRefreshed;
+		SplinePathPreview.AfterEditRefreshAll = LevelViewerSelection.ReapplyAfterSplineEditRefresh;
 		Callable.From(EnsureLoadingScreen).CallDeferred();
+	}
+
+	/* Edit in Viewport draws the working points in every placement of the spline: the follow-up a spline parameter edit gets
+	   (RefreshSplinePathPreviews), per placement - not for a placement removed this frame (its node is untracked already, and
+	   freed at the end of it) */
+	private void OnSplinePreviewEditRefreshed(SplinePathPreview preview)
+	{
+		if (preview.GetParent() is not Node3D owner || !GodotObject.IsInstanceValid(owner) || !HasOwnerComposite(owner))
+			return;
+		preview.SyncPickablesWithVisibility();
+		ReapplyCompositeFocusTo(owner);
 	}
 
 	public override void _Process(double delta)
@@ -278,6 +297,11 @@ public partial class AlienScene : Node3D
 		_contentGeneration++;
 		_loadStep = LoadPipelineStep.None;
 		CancelLargeSceneRenderPolicy();
+		if (SplinePathPreview.AfterEditRefresh == OnSplinePreviewEditRefreshed)
+		{
+			SplinePathPreview.AfterEditRefresh = null;
+			SplinePathPreview.AfterEditRefreshAll = null;
+		}
 
 		ClearSelectedEntity();
 		LevelViewerSelection.Clear();
@@ -615,9 +639,14 @@ public partial class AlienScene : Node3D
 		_loadStep = LoadPipelineStep.None;
 		LevelViewerRenderIdleThrottle.SetLoadActive(false);
 
+		_sceneTeardown = true;
 		PreviewVisualUtility.CleanupAllFunctionEntityPreviews(this);
 		ClearSelectedEntity();
 		LevelViewerSelection.Clear();
+		//Before the scene goes, so their overlays come off meshes that still exist. Their rebuild key (composite, path, zones)
+		//would otherwise match the next level's first populate, which then kept the old meshes and tinted nothing
+		LevelViewerAliasHighlight.Clear();
+		LevelViewerProxyHighlight.Clear();
 		LevelViewerPick.ClearRegistry();
 		LevelViewerCompositeFocus.Clear();
 		LevelViewerEntityHide.ClearAll();
@@ -634,14 +663,23 @@ public partial class AlienScene : Node3D
 
 		_parentNode = null;
 
+		//Every entity id ever spawned had one, so across levels the table only grew (the nodes hold their own copies)
+		foreach (StringName name in _nodeNames.Values)
+			name.Dispose();
+		_nodeNames.Clear();
+
 		ClearPopulateMaterialCaches();
 		_modelReferenceMeshes.Clear();
 		_meshBindings.Clear();
 		_sceneFilterMeshes.Clear();
+		_sceneTeardown = false;
 		_collisionOverlay = null;
 		_stateInfoOverlay = null;
 		CancelLargeSceneRenderPolicy();
 		ModelReferenceRenderSettings.ResetForLevelLoad();
+		//Its tables are keyed by the old level's entities and composites: cleared now, not at the next populate, so the old
+		//script isn't held through the next level's load (or for good, if that load fails)
+		ModelReferenceMaterialMapping.ClearMappingCaches();
 
 		foreach (KeyValuePair<int, TexOrCube> kvp in _texturesLevelByIndex)
 		{
@@ -667,6 +705,12 @@ public partial class AlienScene : Node3D
 			kvp.Value.MainMesh?.Dispose();
 		_modelMeshesByWriteIndex.Clear();
 		_submeshWriteIndexByReference.Clear();
+		//Both point into the old level's model table (and through its submeshes, its materials and textures), which they
+		//kept alive through the next level's load: the next build/restore fills them again
+		_submeshOwners.Clear();
+		_modelWriteIndicesNotInFileTable = null;
+		_modelWriteIndicesNotInFilePath = null;
+		_modelWriteIndicesNotInFile.Clear();
 
 		_compositeNodes.Clear();
 		_nodeEntities.Clear();
@@ -675,7 +719,13 @@ public partial class AlienScene : Node3D
 		_bulkModelReferencePreviews.Clear();
 		_bulkMeshSpawnJobs.Clear();
 		_bulkPickableMeshes.Clear();
+		//The freed previews (and through them the old level's entities), and the alias index over freed nodes: both were
+		//only replaced by the next populate
+		_cachedFunctionEntityPreviews = Array.Empty<FunctionEntityPreview>();
+		InvalidateFunctionEntityPreviewCache();
 		_modelRefRenderablesByEntityId = null;
+		_aliasParameterEntityByRenderTarget = null;
+		_aliasParameterDepthByRenderTarget = null;
 		ClearEntityNodeCache();
 
 		_contentOrigin = Vector3.Zero;
@@ -692,6 +742,7 @@ public partial class AlienScene : Node3D
 
 		_queuedLevelName = level;
 		_queuedLevelPath = pathToAI;
+		DropDeferredRootSwitch(); //the load builds its own scene; a switch asked for before it is out of date
 
 		//A level load already on its way reads the names just set
 		if (_loadStep == LoadPipelineStep.WaitUiBeforeLevelLoad || _loadStep == LoadPipelineStep.LoadLevel)
@@ -710,6 +761,10 @@ public partial class AlienScene : Node3D
 	}
 
 	private bool _levelLoadAfterPopulate;
+	//The composite the next level load builds instead of the level's root: the scene OpenCAGE's editor is in, which a viewer
+	//that has just connected is told on its LEVEL_LOADED (Packet.level_scene_root). Invalid builds the root.
+	private ShortGuid _levelLoadSceneRoot = ShortGuid.Invalid;
+	public void SetSceneRootForLevelLoad(ShortGuid composite) => _levelLoadSceneRoot = composite;
 	//A switch replaced a pending forced rebuild of the composite on screen; switching straight back must still rebuild it
 	private bool _pendingRebuildDisplaced;
 	//The overlay is saying a level failed to load: nothing that finishes afterwards takes it down (the preview batch did)
@@ -738,11 +793,22 @@ public partial class AlienScene : Node3D
 	{
 		if (_loadedComposite == null || _loadedComposite.shortGUID == ShortGuid.Invalid)
 			return;
-		QueuePopulateComposite(_loadedComposite.shortGUID, true);
+		//On screen is a preview the batch is about to replace; what replaces it is built from the script, edits and all
+		if (PreviewBatchHasScene)
+			return;
+		QueuePopulateComposite(_loadedComposite.shortGUID, true, supersedesDeferredSwitch: false);
 	}
 
-	public void QueuePopulateComposite(ShortGuid guid, bool force)
+	public void QueuePopulateComposite(ShortGuid guid, bool force) => QueuePopulateComposite(guid, force, supersedesDeferredSwitch: force);
+
+	private void QueuePopulateComposite(ShortGuid guid, bool force, bool supersedesDeferredSwitch)
 	{
+		if (!force && TryDeferRootSwitchDuringPreviews(guid))
+			return;
+		//A forced populate OpenCAGE asks for is newer than a switch deferred by the batch, and takes the scene from it. A rebuild
+		//of the scene on screen, or a forced request replayed after its populate, is not newer than the switch
+		if (supersedesDeferredSwitch)
+			DropDeferredRootSwitch();
 		_queuedCompositeGuid = guid;
 		/* A forced request that lands while a populate is on its way (the wait-UI frames before it
 		   runs) would otherwise be dropped - the pending populate goes ahead with whatever the script
@@ -887,6 +953,10 @@ public partial class AlienScene : Node3D
 		ViewerLog.PrintErr("[Viewer] Loading level " + failed + " failed: " + e);
 		_contentGeneration++;
 		_content.Reset();
+		_sceneTeardown = false;
+		//A load that got as far as indexing its submeshes left them pointing into the model table it just dropped
+		_submeshWriteIndexByReference.Clear();
+		_submeshOwners.Clear();
 		_loadedComposite = null;
 		_queuedComposite = null;
 		_queuedCompositeGuid = ShortGuid.Invalid;
@@ -928,10 +998,14 @@ public partial class AlienScene : Node3D
 		{
 			PreviewVisibilitySettings.LevelRootCompositeId = _content.Level.Commands.EntryPoints[0].shortGUID.AsUInt32;
 			Composite levelRoot = _content.Level.Commands.EntryPoints[0];
-			//Also when the composite asked for belongs to another level (a load that waited behind a populate)
+			//Also when the composite asked for belongs to another level (a load that waited behind a populate). A viewer that
+			//has just connected builds the scene OpenCAGE's editor is in, when it was told one and the level has it.
 			if (_queuedCompositeGuid == ShortGuid.Invalid || _content.Level.Commands.GetComposite(_queuedCompositeGuid) == null)
-				_queuedCompositeGuid = levelRoot.shortGUID;
+				_queuedCompositeGuid = _levelLoadSceneRoot != ShortGuid.Invalid && _content.Level.Commands.GetComposite(_levelLoadSceneRoot) != null
+					? _levelLoadSceneRoot
+					: levelRoot.shortGUID;
 		}
+		_levelLoadSceneRoot = ShortGuid.Invalid;
 
 		if (_queuedCompositeGuid != ShortGuid.Invalid && _content.Loaded)
 		{
@@ -999,7 +1073,19 @@ public partial class AlienScene : Node3D
 		   framing has yet to happen, is framed afresh. */
 		LevelViewerCamera keepViewOf = null;
 		List<NodePath> keptHides = null;
-		if (IsRebuildOfSceneOnScreen(comp, out LevelViewerCamera camera))
+		if (BatchPreviewOnScreen)
+		{
+			//A preview batch's lean preview is on screen, not the user's scene (see TryKeepViewTakenByBatch)
+			if (TryKeepViewTakenByBatch(comp, out Vector3 viewOrigin, out List<NodePath> viewHides))
+			{
+				_contentOriginToKeep = viewOrigin;
+				keptHides = viewHides;
+				keepViewOf = GetViewport()?.GetCamera3D() as LevelViewerCamera;
+				if (keepViewOf != null)
+					keepViewOf.SkipNextCompositeFraming = true;
+			}
+		}
+		else if (IsRebuildOfSceneOnScreen(comp, out LevelViewerCamera camera))
 		{
 			_contentOriginToKeep = _contentOrigin;
 			keptHides = LevelViewerEntityHide.CapturePaths(_parentNode);
@@ -1044,7 +1130,7 @@ public partial class AlienScene : Node3D
 		{
 			ShortGuid again = _forcedRepopulate;
 			_forcedRepopulate = ShortGuid.Invalid;
-			Callable.From(() => QueuePopulateComposite(again, true)).CallDeferred();
+			Callable.From(() => QueuePopulateComposite(again, true, supersedesDeferredSwitch: false)).CallDeferred();
 		}
 	}
 
@@ -1054,6 +1140,8 @@ public partial class AlienScene : Node3D
 		FunctionEntityPreview.DeferVisualRefresh = false;
 		_deferMeshTreeActivation = false;
 		_isBulkPopulating = false;
+		//Normally off again as the old scene's tables are cleared; a populate that threw before then must not leave it on
+		_sceneTeardown = false;
 
 		/* Whatever these throw, OpenCAGE still hears the populate finished: without it the populating marquee, and every
 		   focus hand-over held back while the viewer is busy, waited for good. */
@@ -1104,8 +1192,11 @@ public partial class AlienScene : Node3D
 			if (!expanded)
 			{
 				stack.Push((node, true));
-				foreach (Node child in node.GetChildren())
+				Godot.Collections.Array<Node> children = node.GetChildren();
+				foreach (Node child in children)
 					stack.Push((child, false));
+				//Released now rather than left to the finalizer: one native array per node, a million on TECH_Hub
+				((Godot.Collections.Array)children)?.Dispose();
 				continue;
 			}
 
@@ -1162,6 +1253,7 @@ public partial class AlienScene : Node3D
 		_nodeEntities.Clear();
 		_nodeOwnerComposites.Clear();
 		_aliasParameterEntityByRenderTarget = null;
+		_aliasParameterDepthByRenderTarget = null;
 		_deferredPickOwners.Clear();
 		_bulkPopulatePreviews.Clear();
 		_bulkModelReferencePreviews.Clear();
@@ -1169,11 +1261,16 @@ public partial class AlienScene : Node3D
 		_bulkPickableMeshes.Clear();
 		_modelRefRenderablesByEntityId = null;
 		ClearEntityNodeCache();
+		_sceneTeardown = true;
 		PreviewVisualUtility.CleanupAllFunctionEntityPreviews(this);
 		ClearSelectedEntity();
 		LevelViewerSelection.Clear();
 		//The tint is held per mesh, and every mesh it points at is about to be freed
 		LevelViewerZoneHighlight.Clear();
+		//So are the alias/proxy overlays. Rebuilding the composite on screen keeps their rebuild key, so left alone they
+		//kept the old meshes and the new scene got no tint
+		LevelViewerAliasHighlight.Clear();
+		LevelViewerProxyHighlight.Clear();
 		LevelViewerPick.ClearRegistry();
 		LevelViewerCompositeFocus.Clear();
 		CancelLargeSceneRenderPolicy();
@@ -1199,6 +1296,7 @@ public partial class AlienScene : Node3D
 		   every filter pass and mesh count walked them - a preview batch replaces the scene a thousand times. */
 		_modelReferenceMeshes.Clear();
 		_meshBindings.Clear();
+		_sceneTeardown = false;
 
 		_contentOrigin = Vector3.Zero;
 		_parentNode = new Node3D { Name = _levelName };
@@ -1348,10 +1446,16 @@ public partial class AlienScene : Node3D
 			double objects = Performance.GetMonitor(Performance.Monitor.ObjectCount);
 			double resources = Performance.GetMonitor(Performance.Monitor.ObjectResourceCount);
 			double nodes = Performance.GetMonitor(Performance.Monitor.ObjectNodeCount);
+			/* Nodes outside the tree and never freed: the usual shape of a leaked node, which "nodes" alone can't tell from the
+			   scene. Not the engine's orphan monitor, which only counts in debug builds (the viewer ships as a release one):
+			   every live node less those in the tree is the same number, in any build. */
+			SceneTree tree = Engine.GetMainLoop() as SceneTree;
+			double orphans = tree != null ? nodes - tree.GetNodeCount() : -1;
 			long privateBytes = System.Diagnostics.Process.GetCurrentProcess().PrivateMemorySize64;
 			string line = "Memory breakdown " + when + ": process private " + (privateBytes >> 20) + " MB; managed heap " + (managed >> 20)
 				+ " MB; engine static " + (engineStatic >> 20) + " MB; renderer textures " + (texture >> 20) + " MB, buffers " + (buffer >> 20)
-				+ " MB, video total " + (video >> 20) + " MB; objects " + (long)objects + " (resources " + (long)resources + ", nodes " + (long)nodes + ").";
+				+ " MB, video total " + (video >> 20) + " MB; objects " + (long)objects + " (resources " + (long)resources + ", nodes " + (long)nodes
+				+ ", orphan nodes " + (long)orphans + ").";
 			ViewerLog.Print(line);
 			GD.Print(line); //ViewerLog is off by default in the exported viewer; this one is worth having in the host's relay regardless
 		}
@@ -1400,6 +1504,8 @@ public partial class AlienScene : Node3D
 		{
 			_bulkMeshSpawning = false;
 			_deferBulkPickRegistration = false;
+			//Spent: kept, one per mesh (76k on SCI_AndroidLab), they held each render target until the next populate
+			_bulkMeshSpawnJobs.Clear();
 		}
 
 		/* The content goes to its focus point now, before the meshes just spawned are in the renderer's culling BVH (they
@@ -1755,10 +1861,18 @@ public partial class AlienScene : Node3D
 
 		if (!_isBulkPopulating)
 		{
-			foreach (Entity entity in composite.aliases)
-				AddEntity(composite, entity, compositeNode);
-			foreach (Entity entity in composite.proxies)
-				AddEntity(composite, entity, compositeNode);
+			_spawningPlacementAliases++;
+			try
+			{
+				foreach (Entity entity in composite.aliases)
+					AddEntity(composite, entity, compositeNode);
+				foreach (Entity entity in composite.proxies)
+					AddEntity(composite, entity, compositeNode);
+			}
+			finally
+			{
+				_spawningPlacementAliases--;
+			}
 		}
 	}
 
@@ -1992,6 +2106,9 @@ public partial class AlienScene : Node3D
 							LevelViewerProxyHighlight.InvalidateCache();
 						}
 					}
+					//Outside a populate what it points at was drawn before it was here
+					if (!_isBulkPopulating)
+						RedrawAliasTarget(alias, aliasedNode, removed: false);
 				}
 
 				break;
@@ -2019,6 +2136,44 @@ public partial class AlienScene : Node3D
 		}
 	}
 
+	/* An alias spawned outside a populate points at something drawn before it was there, without what it sets on it. A
+	   populate wires every alias before it makes a single mesh (RebuildBulkMeshSpawnJobsFromPreviews), but an add spawns in
+	   tree order: a placement's ModelReferences, all the way down, before the aliases of the composites around them, and an
+	   alias sent on its own after the placement it points into. Undoing a composite delete put Torrens' doors back with every
+	   keypad screen in its own material, not the one KeyPadHacking's aliases give it, and a bunk bed in its own colour, until
+	   a rebuild drew them right. An alias taken away left what it had set behind, the same way. What it points at is drawn
+	   again, as an edit of the alias draws it (RefreshModelReferenceOverridesForParameterChange,
+	   RefreshMaterialMappingForParameterChange). */
+	private void RedrawAliasTarget(AliasEntity alias, Node3D pointedNode, bool removed)
+	{
+		if (alias == null || pointedNode == null || !GodotObject.IsInstanceValid(pointedNode) || pointedNode.IsQueuedForDeletion()
+			|| !_nodeEntities.TryGetValue(pointedNode, out Entity pointedEntity) || pointedEntity is not FunctionEntity pointedFunction)
+			return;
+
+		if (ModelReferenceMaterialMapping.IsModelReferenceEntity(pointedFunction))
+		{
+			//Its material and colour overrides, read through the render-target index - which the alias is in (or out of) by now
+			if (ModelReferenceMaterialOverrides.HasModelReferenceOverrideParameter(alias))
+				RefreshFunctionEntityPreviews(pointedNode);
+			return;
+		}
+
+		/* A mapping on a placement re-skins the ModelReferences directly in it. One spawned along with the placement it points
+		   into needs nothing: those resolved through the alias index as they spawned, and it is in there (see
+		   ModelReferenceMaterialMapping.ForgetAliasIndexIfItMaps) - redrawing them for each such alias would draw them twice. */
+		if ((removed || _spawningPlacementAliases == 0)
+			&& ModelReferenceMaterialMapping.TryGetMappingParameter(alias) != null
+			&& ModelReferenceMaterialMapping.IsCompositeInstanceEntity(pointedFunction, _content.Level.Commands))
+		{
+			if (removed)
+				ModelReferenceMaterialMapping.ClearAliasInstanceMappingMeta(pointedNode);
+			RefreshDirectModelReferencesInCompositeInstance(pointedNode);
+		}
+	}
+
+	//Non-zero while a placement's own aliases and proxies are spawned along with it (AddCompositeInstance)
+	private int _spawningPlacementAliases;
+
 	public void RemoveComposite(ShortGuid composite)
 	{
 		if (_compositeNodes.ContainsKey(composite))
@@ -2030,12 +2185,28 @@ public partial class AlienScene : Node3D
 				{
 					UntrackFunctionEntityPreviews(compositeInstance);
 					UntrackEntityNodeTree(compositeInstance);
-					compositeInstance.QueueFree();
+					FreeReleasingName(compositeInstance);
 				}
 			}
 			_compositeNodes.Remove(composite);
 			InvalidateFunctionEntityPreviewCache();
 		}
+	}
+
+	/// <summary>
+	/// Frees a node that is looked up by name (an entity's node, a wireframe overlay), which gives up its name first. A queued
+	/// node stays a child until the end of the frame, and an entity sent again in the same tick - an edit that deletes and
+	/// re-sends it, as every MCP edit and refactor does, or an undo of one - was given an "@id@n" name by Godot. Every lookup
+	/// by name missed it from then on: a selection fell back to the first copy of the entity, in whatever placement that was
+	/// (highlighted outside the focus, while the copy edited stayed plain), and the focus anchor and the hidden-node restore
+	/// found nothing.
+	/// </summary>
+	private static void FreeReleasingName(Node3D node)
+	{
+		//Alive across the native call, as LevelViewerPick explains for StringName temporaries
+		using (StringName freedName = new StringName("freed_" + node.GetInstanceId()))
+			node.Name = freedName;
+		node.QueueFree();
 	}
 
 	public void AddEntity(ShortGuid composite, ShortGuid entity)
@@ -2095,6 +2266,9 @@ public partial class AlienScene : Node3D
 	{
 		if (_loadedComposite == null || _content?.Level?.Commands == null || _loadStep != LoadPipelineStep.None)
 			return false;
+		//Nothing spawned into a preview the batch is about to replace (see RebuildLoadedComposite)
+		if (PreviewBatchHasScene)
+			return true;
 
 		Dictionary<ShortGuid, Composite> composites = new Dictionary<ShortGuid, Composite>();
 		foreach (Composite composite in _content.Level.Commands.Entries)
@@ -2611,7 +2785,8 @@ public partial class AlienScene : Node3D
 				_parentNode,
 				_content.Level.Commands,
 				focusAnchor,
-				_nodeEntities);
+				_nodeEntities,
+				_loadedComposite?.shortGUID.AsUInt32 ?? 0);
 			RefreshProxyHighlights(forceRebuild: false);
 			RefreshAliasHighlights(forceRebuild: false);
 		}
@@ -3004,7 +3179,14 @@ public partial class AlienScene : Node3D
 			int last = entityPath.Count - 1;
 			int compositeIndex = Mathf.Min(last, compositePath.Count - 1);
 			if (TryGetCachedEntityNodes(new ShortGuid(compositePath[compositeIndex]), new ShortGuid(entityPath[last]), out List<Node3D> nodes))
-				entityNode = nodes[0];
+			{
+				entityNode = FindCachedNodeOnPath(nodes, entityPath);
+				/* Any copy will do only when the placement itself is not in this scene (the editor's root and the scene's
+				   out of step for a moment). A placement that is here but holds no node for the entity (a composite variable,
+				   which only incremental spawns make) has nothing to select - not a copy in another placement. */
+				if (entityNode == null && (last == 0 || GetEntityNode(entityPath.GetRange(0, last), ParentNode) == null))
+					entityNode = nodes[0];
+			}
 		}
 
 		if (entityNode == null)
@@ -3014,6 +3196,34 @@ public partial class AlienScene : Node3D
 			return ResolveSelectionVisualRoot(entityNode, entity) ?? entityNode;
 
 		return entityNode;
+	}
+
+	/// <summary>
+	/// Of an entity's copies, the one whose entity chain from the root is the path itself: when the lookup by name misses the
+	/// copy asked for, the fallback takes it rather than the first copy, which can sit in any placement of the composite.
+	/// </summary>
+	private Node3D FindCachedNodeOnPath(List<Node3D> nodes, List<uint> entityPath)
+	{
+		List<uint> chain = new List<uint>();
+		foreach (Node3D node in nodes)
+		{
+			if (node == null || !GodotObject.IsInstanceValid(node) || node.IsQueuedForDeletion())
+				continue;
+			chain.Clear();
+			for (Node current = node; current != null && current != _parentNode; current = current.GetParent())
+			{
+				if (current is Node3D current3D && _nodeEntities.TryGetValue(current3D, out Entity entity))
+					chain.Add(entity.shortGUID.AsUInt32);
+			}
+			if (chain.Count != entityPath.Count)
+				continue;
+			bool same = true;
+			for (int i = 0; i < chain.Count && same; i++)
+				same = chain[chain.Count - 1 - i] == entityPath[i];
+			if (same)
+				return node;
+		}
+		return null;
 	}
 
 	private Node3D ResolveSelectionVisualRoot(Node3D entityNode, Entity entity)
@@ -3844,8 +4054,10 @@ public partial class AlienScene : Node3D
 			return;
 
 		Commands commands = _content.Level.Commands;
-		foreach (Node child in instanceRoot.GetChildren())
+		int childCount = instanceRoot.GetChildCount();
+		for (int i = 0; i < childCount; i++)
 		{
+			Node child = instanceRoot.GetChild(i);
 			if (child is not Node3D childNode || !GodotObject.IsInstanceValid(childNode))
 				continue;
 
@@ -3943,7 +4155,10 @@ public partial class AlienScene : Node3D
 		HashSet<FunctionEntityPreview> going = new HashSet<FunctionEntityPreview>(gone);
 		_bulkPopulatePreviews.RemoveAll(going.Contains);
 		_bulkModelReferencePreviews.RemoveAll(going.Contains);
-		_functionEntityPreviewsCacheDirty = true;
+		//Every reader rebuilds a dirty cache (and the by-composite index) first: the old ones only held the removed
+		//previews, and their entities, until then
+		InvalidateFunctionEntityPreviewCache();
+		_cachedFunctionEntityPreviews = Array.Empty<FunctionEntityPreview>();
 	}
 
 	private static bool ShouldMaterializeFunctionPreview(
@@ -4464,7 +4679,12 @@ public partial class AlienScene : Node3D
 	{
 		ulong key = MakeEntityCacheKey(compositeId, entityId);
 		if (_entityNodesByKey.TryGetValue(key, out List<Node3D> entityNodes))
+		{
 			entityNodes.Remove(entityNode);
+			//A pasted entity's id is new each time: its emptied list would otherwise stay until the next populate
+			if (entityNodes.Count == 0)
+				_entityNodesByKey.Remove(key);
+		}
 	}
 
 	/* A node leaving the scene takes every entity node under it out of the registries with it. A
@@ -4495,7 +4715,19 @@ public partial class AlienScene : Node3D
 				pending.Push(current.GetChild(i));
 
 			if (current is Node3D node)
+			{
 				overrideUntracked |= UntrackSpawnedEntityNode(node);
+				//The pick and mesh tables too: nothing else takes a removed subtree out of them before the next populate
+				//(a populate-spawned mesh has no exit hook of its own)
+				LevelViewerPick.ForgetNode(node);
+				LevelViewerCompositeFocus.ForgetNode(node);
+				if (node is MeshInstance3D mesh)
+				{
+					_modelReferenceMeshes.Remove(mesh);
+					_meshBindings.Remove(mesh);
+					_sceneFilterMeshes.Remove(mesh);
+				}
+			}
 		}
 
 		if (overrideUntracked)
@@ -4625,11 +4857,21 @@ public partial class AlienScene : Node3D
 		}
 	}
 
+	/* Set while a whole scene is torn down (a level reset, a repopulate): every table a refresh has to keep tidy is cleared
+	   wholesale a few lines later, so the per-mesh bookkeeping is skipped then - a mesh at a time, it was hundreds of
+	   thousands of removals per switch on the biggest levels. */
+	private bool _sceneTeardown;
+
 	public void ClearRenderableChildren(Node3D parent)
 	{
 		if (parent == null)
 			return;
 
+		/* Out of the bookkeeping first, as a resource sync does: a populate-spawned mesh has no exit hook to take itself
+		   out of the mesh tables, and the pick tables never hear of a queued free - so every refresh (an override,
+		   mapping or parameter edit; each tick of a slider) left its old meshes in all of them until the next populate. */
+		if (!_sceneTeardown)
+			ForgetRenderableChildren(parent);
 		for (int i = parent.GetChildCount() - 1; i >= 0; i--)
 		{
 			if (parent.GetChild(i) is MeshInstance3D mesh)
@@ -4675,8 +4917,11 @@ public partial class AlienScene : Node3D
 				if (compositeInstance == null || !GodotObject.IsInstanceValid(compositeInstance))
 					continue;
 
-				foreach (Node child in compositeInstance.GetChildren())
+				//By index: GetChildren() is a native array per placement, on every move packet
+				int childCount = compositeInstance.GetChildCount();
+				for (int i = 0; i < childCount; i++)
 				{
+					Node child = compositeInstance.GetChild(i);
 					if (child.Name == entityNodeName && child is Node3D entityNode)
 					{
 						EntityNodeUtil.SetPointed(entityNode, pointedPos);
@@ -4703,6 +4948,7 @@ public partial class AlienScene : Node3D
 		string entityNodeName = entity.AsUInt32.ToString();
 		bool removed = false;
 		int instancesProcessed = 0;
+		List<(AliasEntity Alias, Node3D Target)> redrawWithout = null;
 
 		if (_compositeNodes.TryGetValue(composite, out List<Node3D> compositeInstances))
 		{
@@ -4778,13 +5024,16 @@ public partial class AlienScene : Node3D
 							pointedNode.Position = position;
 							pointedNode.RotationDegrees = rotation;
 							EntityNodeUtil.SetPointed(pointedNode, false);
+							//And without what it set on it, once it is out of the maps (below)
+							if (nodeEntity is AliasEntity removedAlias)
+								(redrawWithout ??= new List<(AliasEntity, Node3D)>()).Add((removedAlias, pointedNode));
 						}
 
 						//By the key the removal names first: a node found by name never made it into the maps the tree walk goes by
 						UntrackEntityNode(composite, entity, entityNode);
 						UntrackEntityNodeTree(entityNode);
 						UntrackFunctionEntityPreviews(entityNode);
-						entityNode.QueueFree();
+						FreeReleasingName(entityNode);
 						removed = true;
 						instancesProcessed++;
 					}
@@ -4794,6 +5043,12 @@ public partial class AlienScene : Node3D
 					}
 				}
 			}
+		}
+
+		if (redrawWithout != null)
+		{
+			foreach ((AliasEntity removedAlias, Node3D target) in redrawWithout)
+				RedrawAliasTarget(removedAlias, target, removed: true);
 		}
 
 		if (removed && refreshHighlights)
@@ -5260,18 +5515,18 @@ public partial class AlienScene : Node3D
 			return false;
 		}
 
-		uint parameterEntityId = parameterEntity?.shortGUID.AsUInt32 ?? 0;
-		uint fallbackEntityId = fallbackEntity?.shortGUID.AsUInt32 ?? 0;
 		int materialWriteIndex = _content.Level.Materials.GetWriteIndex(material);
-		ulong cacheKey = MakeModelReferenceOverrideMaterialKey(
-			materialWriteIndex,
-			parameterEntityId,
-			fallbackEntityId,
-			scalars,
-			wireframe);
+		ModelReferenceOverrideKey cacheKey = new ModelReferenceOverrideKey(materialWriteIndex, parameterEntity, fallbackEntity, wireframe);
+		/* One entry per (material, entities, wireframe), holding the values it was made for. The values were part of the
+		   key, so every new one an edit sent (each tick of a colour or opacity drag) added a material and kept the old one
+		   until the next populate. A different value replaces the entry; the old material stays with any mesh not yet
+		   respawned, and goes with it. */
 		if (_modelReferenceOverrideMaterials.TryGetValue(cacheKey, out ShaderMaterial cachedMaterial)
 			&& cachedMaterial != null
-			&& GodotObject.IsInstanceValid(cachedMaterial))
+			&& GodotObject.IsInstanceValid(cachedMaterial)
+			&& _modelReferenceOverrideMaterialScalars.TryGetValue(cacheKey, out ModelReferenceMaterialOverrides.EnvironmentColourScalars cachedScalars)
+			&& cachedScalars.Vertex == scalars.Vertex
+			&& cachedScalars.Diffuse == scalars.Diffuse)
 		{
 			shaderMaterial = cachedMaterial;
 			return true;
@@ -5300,25 +5555,53 @@ public partial class AlienScene : Node3D
 		{
 			_modelReferenceOverrideMaterials[cacheKey] = shaderMaterial;
 			_modelReferenceOverrideMaterialSources[cacheKey] = material;
+			_modelReferenceOverrideMaterialScalars[cacheKey] = scalars;
 		}
 
 		return shaderMaterial != null;
 	}
 
-	private static ulong MakeModelReferenceOverrideMaterialKey(
-		int materialWriteIndex,
-		uint parameterEntityId,
-		uint fallbackEntityId,
-		ModelReferenceMaterialOverrides.EnvironmentColourScalars scalars,
-		bool wireframe)
+	/* An entity deleted from the script takes its override entries with it. They are keyed by the entity object, and an
+	   undo brings it back as a new one, so they were never matched again: each delete and undo of a coloured
+	   ModelReference (or of an alias carrying its colours) kept the old entity and a material per surface until the next
+	   populate. The materials stay with the meshes still showing them, and go when those are freed. */
+	public void ForgetModelReferenceOverrideMaterials(Entity entity)
 	{
-		ulong hash = (ulong)(uint)materialWriteIndex;
-		hash = unchecked(hash * 397 + parameterEntityId);
-		hash = unchecked(hash * 397 + fallbackEntityId);
-		hash = unchecked(hash * 397 + (wireframe ? 1u : 0u));
-		hash = unchecked(hash * 397 + (uint)scalars.Vertex.GetHashCode());
-		hash = unchecked(hash * 397 + (uint)scalars.Diffuse.GetHashCode());
-		return hash;
+		if (entity == null || _modelReferenceOverrideMaterials.Count == 0)
+			return;
+
+		ForgetModelReferenceOverrideMaterialsWhere(key => key.ParameterEntity == entity || key.FallbackEntity == entity);
+	}
+
+	/// <summary>A whole composite leaving the script (a variant or a refactor undone): the entries of all its entities.</summary>
+	public void ForgetModelReferenceOverrideMaterials(Composite composite)
+	{
+		if (composite == null || _modelReferenceOverrideMaterials.Count == 0)
+			return;
+
+		//Entity has no equality of its own: these are the objects themselves, as in the keys
+		HashSet<Entity> gone = new HashSet<Entity>(composite.GetEntities());
+		ForgetModelReferenceOverrideMaterialsWhere(key =>
+			(key.ParameterEntity != null && gone.Contains(key.ParameterEntity)) || (key.FallbackEntity != null && gone.Contains(key.FallbackEntity)));
+	}
+
+	private void ForgetModelReferenceOverrideMaterialsWhere(Func<ModelReferenceOverrideKey, bool> match)
+	{
+		List<ModelReferenceOverrideKey> stale = null;
+		foreach (ModelReferenceOverrideKey key in _modelReferenceOverrideMaterials.Keys)
+		{
+			if (match(key))
+				(stale ??= new List<ModelReferenceOverrideKey>()).Add(key);
+		}
+		if (stale == null)
+			return;
+
+		foreach (ModelReferenceOverrideKey key in stale)
+		{
+			_modelReferenceOverrideMaterials.Remove(key);
+			_modelReferenceOverrideMaterialSources.Remove(key);
+			_modelReferenceOverrideMaterialScalars.Remove(key);
+		}
 	}
 
 	private Entity ResolveModelReferenceEntityFromMesh(MeshInstance3D meshInstance)
@@ -5401,7 +5684,7 @@ public partial class AlienScene : Node3D
 
 		_wireframeMaterials.Clear();
 
-		foreach (KeyValuePair<ulong, ShaderMaterial> entry in _modelReferenceOverrideMaterials)
+		foreach (KeyValuePair<ModelReferenceOverrideKey, ShaderMaterial> entry in _modelReferenceOverrideMaterials)
 		{
 			if (entry.Value != null && GodotObject.IsInstanceValid(entry.Value))
 				entry.Value.Dispose();
@@ -5409,6 +5692,7 @@ public partial class AlienScene : Node3D
 
 		_modelReferenceOverrideMaterials.Clear();
 		_modelReferenceOverrideMaterialSources.Clear();
+		_modelReferenceOverrideMaterialScalars.Clear();
 	}
 
 	private void EnsureSolidMaterial(Materials.Material material)
@@ -5544,8 +5828,13 @@ public partial class AlienScene : Node3D
 		{
 			foreach (Node node in tree.GetNodesInGroup(LevelViewerPick.WireframeOverlayGroupName))
 			{
-				if (node is Node3D node3D && GodotObject.IsInstanceValid(node3D))
-					node3D.QueueFree();
+				/* Out of the group and off its name first: wireframe off and on again within one frame (two settings packets
+				   handled together) found the queued overlays by name, kept them, and they were freed at the end of it */
+				if (node is Node3D node3D && GodotObject.IsInstanceValid(node3D) && !node3D.IsQueuedForDeletion())
+				{
+					node3D.RemoveFromGroup(LevelViewerPick.WireframeOverlayGroupName);
+					FreeReleasingName(node3D);
+				}
 			}
 		}
 
@@ -5653,7 +5942,7 @@ public partial class AlienScene : Node3D
 			int faceByteCount = texPart.Content.Length / 6;
 			byte[] faceData = new byte[faceByteCount];
 			Array.Copy(texPart.Content, 0, faceData, 0, faceByteCount);
-			Image image = AlienSceneTextures.CreateImageFromRaw(
+			using Image image = AlienSceneTextures.CreateImageFromRaw(
 				faceData,
 				(int)texPart.Width,
 				(int)texPart.Height,

@@ -211,7 +211,8 @@ public static class AlienSceneTextures
 		if (baked?.Upload == null || baked.Upload.Length == 0)
 			return null;
 
-		Image image = Image.CreateFromData(baked.Width, baked.Height, false, baked.Format, baked.Upload);
+		//Uploaded by CreateFromImage below and not kept: released here rather than by a finalizer, for every texture a load converts
+		using Image image = Image.CreateFromData(baked.Width, baked.Height, false, baked.Format, baked.Upload);
 		if (image == null || image.IsEmpty())
 			return null;
 
@@ -379,7 +380,7 @@ public static class AlienSceneTextures
 		if (_transparencyCache.TryGetValue(texture, out bool cached))
 			return cached;
 
-		Image image = texture.GetImage();
+		using Image image = texture.GetImage();
 		if (image == null || image.IsEmpty())
 			return false;
 
@@ -402,7 +403,8 @@ public static class AlienSceneTextures
 		if (sourceFormat == Textures.TextureFormat.DXT1 || sourceFormat == Textures.TextureFormat.X8R8G8B8)
 			return false;
 
-		Image probe = CreateProbeImage(content, width, height, format, sourceFormat);
+		//The base mip decompressed to RGBA8 (16 MB for a 2048 square), for every texture a load converts: released here
+		using Image probe = CreateProbeImage(content, width, height, format, sourceFormat);
 		if (probe == null)
 			return false;
 

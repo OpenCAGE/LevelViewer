@@ -349,8 +349,10 @@ public static class PreviewVisualUtility
             if (current is MeshInstance3D meshInstance)
                 meshes.Add(meshInstance);
 
-            foreach (Node child in current.GetChildren())
-                pending.Push(child);
+            //By index: GetChildren() is a native array per node visited
+            int childCount = current.GetChildCount();
+            for (int i = 0; i < childCount; i++)
+                pending.Push(current.GetChild(i));
         }
     }
 
@@ -373,8 +375,10 @@ public static class PreviewVisualUtility
             if (current is MeshInstance3D meshInstance)
                 meshes.Add(meshInstance);
 
-            foreach (Node child in current.GetChildren())
+            int childCount = current.GetChildCount();
+            for (int i = 0; i < childCount; i++)
             {
+                Node child = current.GetChild(i);
                 if (child is Node3D child3D
                     && child3D != root
                     && AlienScene.HasOwnerComposite(child3D))
@@ -708,7 +712,24 @@ public static class PreviewVisualUtility
         if (node == null || !GodotObject.IsInstanceValid(node))
             return;
 
+        /* Out of the pick and grey-out bookkeeping first. A preview's Refresh rebuilds its geometry - every preview, on every
+           settings packet - and the old meshes stayed registered with their owner until the end of the frame: the reapply
+           that follows the refresh greyed them along with the new ones, and the grey-out held the saved material of each
+           freed mesh until the next change of scope (960 a time on BSP_Torrens). */
+        ForgetPreviewSubtree(node);
         node.QueueFree();
+    }
+
+    private static void ForgetPreviewSubtree(Node node)
+    {
+        if (node is Node3D node3D)
+        {
+            LevelViewerPick.ForgetNode(node3D);
+            LevelViewerCompositeFocus.ForgetNode(node3D);
+        }
+        int count = node.GetChildCount();
+        for (int i = 0; i < count; i++)
+            ForgetPreviewSubtree(node.GetChild(i));
     }
 
     public static void CleanupAllFunctionEntityPreviews(Node searchRoot = null)

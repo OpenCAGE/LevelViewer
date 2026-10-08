@@ -67,15 +67,35 @@ public partial class SplinePathPreview : FunctionEntityPreview
         RefreshPreviewsOf(previous);
     }
 
+    /// <summary>
+    /// What follows a refresh here in every placement (AlienScene sets it): the rebuilt segment lines registered for picking and
+    /// the grey-out put back over them and the recoloured markers - as a spline parameter edit does. Without it, Edit in
+    /// Viewport left the spline bright in every greyed-out placement until something else re-greyed that owner.
+    /// </summary>
+    internal static System.Action<SplinePathPreview> AfterEditRefresh;
+    //Once the placements are done: the selection's highlight put back on the rebuilt lines of the spline being edited
+    internal static System.Action AfterEditRefreshAll;
+
+    //The spline being edited shows whatever the filters say, or there would be nothing to edit - and what is drawn is picked
+    //and greyed out like the rest (the pickable sync asks this too)
+    protected override bool IsDrawnNow() => Entity == _editEntity || base.IsDrawnNow();
+
     private static void RefreshPreviewsOf(FunctionEntity entity)
     {
         if (entity == null)
             return;
+        bool any = false;
         foreach (SplinePathPreview preview in _live)
         {
             if (preview.Entity == entity && GodotObject.IsInstanceValid(preview))
+            {
                 preview.Refresh();
+                AfterEditRefresh?.Invoke(preview);
+                any = true;
+            }
         }
+        if (any)
+            AfterEditRefreshAll?.Invoke();
     }
 
     public override void _EnterTree()
@@ -113,8 +133,7 @@ public partial class SplinePathPreview : FunctionEntityPreview
         if (Entity == null)
             return;
 
-        //The spline being edited shows whatever the filters say, or there would be nothing to edit
-        bool visible = Entity == _editEntity || PreviewVisualUtility.IsPreviewVisible(Entity, OwnerCompositeId);
+        bool visible = IsDrawnNow();
         if (!visible)
         {
             if (_root != null)

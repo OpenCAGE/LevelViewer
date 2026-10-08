@@ -73,6 +73,8 @@ public partial class CommandsEditorConnection : Node3D
 
     private bool _didLoadLevel = true;
     private bool _levelReloadForced;
+    //The scene a newly connected viewer's load builds (Packet.level_scene_root): 0 is the level's root
+    private uint _levelLoadSceneRoot;
 
     private struct ParameterSyncKey : IEquatable<ParameterSyncKey>
     {
@@ -127,12 +129,12 @@ public partial class CommandsEditorConnection : Node3D
     private struct EntityOp
     {
         public bool Add;
+        //A whole composite deleted: in the same queue as the entity adds and removals, so all of them happen in packet order
+        public bool RemoveComposite;
         public ShortGuid Composite;
         public ShortGuid Entity;
     }
     private readonly Queue<EntityOp> _entityOps = new Queue<EntityOp>();
-    //Every composite deleted since the last pump, not just the last one: a port replacing nested composites deletes a run of them at once
-    private readonly Queue<ShortGuid> _removedComposites = new Queue<ShortGuid>();
 
     /* Inside a scene batch (an import) the script copy is kept up to date and the scene is left alone:
        the COMPOSITE_RELOADED the batch ends with rebuilds it whole. Should the batch end without one,
@@ -631,7 +633,7 @@ public partial class CommandsEditorConnection : Node3D
             return true;
         if (_levelName != "" && _didLoadLevel)
             return true;
-        if (_entityOps.Count > 0 || _removedComposites.Count > 0)
+        if (_entityOps.Count > 0)
             return true;
         if (_forceSelectionApply || _currentEntityGOID != _currentEntity)
             return true;
@@ -663,19 +665,28 @@ public partial class CommandsEditorConnection : Node3D
             _didLoadLevel = false;
             bool forced = _levelReloadForced;
             _levelReloadForced = false;
+            uint sceneRoot = _levelLoadSceneRoot;
+            _levelLoadSceneRoot = 0;
 
             if (forced || !ShouldSkipLevelReload(level, pathToAi))
-                Callable.From(() => _scene.QueueLoadLevel(level, pathToAi)).CallDeferred();
+                Callable.From(() =>
+                {
+                    if (forced)
+                        _scene.SetSceneRootForLevelLoad(new ShortGuid(sceneRoot));
+                    _scene.QueueLoadLevel(level, pathToAi);
+                }).CallDeferred();
         }
 
         if (_entityOps.Count > 0)
         {
             //One line for a batch of adds (a whole composite's contents) or of removals (a box's worth of
             //deep-select aliases let go of), not one per entity
-            int adds = 0;
+            int adds = 0, removals = 0;
             foreach (EntityOp op in _entityOps)
+            {
                 if (op.Add) adds++;
-            int removals = _entityOps.Count - adds;
+                else if (!op.RemoveComposite) removals++;
+            }
 
             /* Every op here is already in the script's copy (the packets are read into it as they arrive), so when the adds
                would put back a large share of the scene one entity at a time, building the composite on screen again from
@@ -715,7 +726,16 @@ public partial class CommandsEditorConnection : Node3D
                         ViewerLog.PrintErr("[Focus] Could not hand focus back during a long entity batch: " + e.Message);
                     }
                 }
-                if (op.Add)
+                if (op.RemoveComposite)
+                {
+                    /* In packet order: drained after every add and removal of the tick instead, an undo then redo of Create
+                       Composite Variant (or of a refactor) handled together freed the placement the redo had just put back -
+                       it was registered under the composite by then - and it stayed gone until the next populate */
+                    ViewerLog.Print("Removing composite: " + op.Composite.AsUInt32);
+                    _scene.RemoveComposite(op.Composite);
+                    removedAny = true;
+                }
+                else if (op.Add)
                 {
                     if (adds == 1)
                         ViewerLog.Print("Adding entity: " + op.Entity.AsUInt32);
@@ -733,13 +753,6 @@ public partial class CommandsEditorConnection : Node3D
             //Worth a line when it is long enough for OpenCAGE to have noticed: this is the viewer's busiest path outside a populate
             if (batchTime.ElapsedMilliseconds > 1000)
                 ViewerLog.Print("Entity batch (" + adds + " added, " + removals + " removed) took " + (batchTime.ElapsedMilliseconds / 1000.0).ToString("0.0") + " s");
-        }
-
-        while (_removedComposites.Count > 0)
-        {
-            ShortGuid removed = _removedComposites.Dequeue();
-            ViewerLog.Print("Removing composite: " + removed.AsUInt32);
-            _scene.RemoveComposite(removed);
         }
 
         bool sceneFiltersDirty = false;
@@ -1343,11 +1356,23 @@ public partial class CommandsEditorConnection : Node3D
             {
                 lock (_lock)
                 {
+                    /* Its entities leave with it: an undone Create Composite Variant or refactor drops a composite without an
+                       ENTITY_DELETED for each, and the redo brings it back as new objects - the override materials and the
+                       mapping index kept the old ones until the next populate, and the index answered with them. */
+                    Commands commands = _scene.Content.Level?.Commands;
+                    if (commands != null)
+                    {
+                        foreach (Composite removed in commands.Entries.Where(o => o.shortGUID == new ShortGuid(packet.composite)).ToList())
+                        {
+                            _scene.ForgetModelReferenceOverrideMaterials(removed);
+                            ModelReferenceMaterialMapping.NoteCompositeRemoved(commands, removed);
+                        }
+                    }
                     _scene.Content.Level?.Commands.Entries.RemoveAll(o => o.shortGUID == new ShortGuid(packet.composite));
                     if (InSceneBatch)
                         _sceneBatchTouched = true;
                     else
-                        _removedComposites.Enqueue(new ShortGuid(packet.composite));
+                        _entityOps.Enqueue(new EntityOp() { RemoveComposite = true, Composite = new ShortGuid(packet.composite) });
                 }
                 break;
             }
@@ -1360,7 +1385,12 @@ public partial class CommandsEditorConnection : Node3D
                     if (!skipReload)
                     {
                         _didLoadLevel = true;
-                        _levelReloadForced = packet.level_reload;
+                        /* Only a forced load says which scene, and stays forced until it is queued: a save's LEVEL_LOADED reaching
+                           a viewer still on its way into the level (drained in the same pass as a reconnect's) must not take back
+                           the reload or the scene the reconnect asked for */
+                        _levelReloadForced |= packet.level_reload;
+                        if (packet.level_reload)
+                            _levelLoadSceneRoot = packet.level_scene_root;
                         _viewerOriginatedEntityAdds.Clear();
                         _releasedEphemeralAliases.Clear();
                     }
@@ -1382,6 +1412,12 @@ public partial class CommandsEditorConnection : Node3D
                 if (ShouldQueueScenePopulate(packet))
                 {
                     uint compositeId = packet.composite;
+                    //A root switch after a reconnect's LEVEL_LOADED, before its load is queued: newer than the scene it named
+                    lock (_lock)
+                    {
+                        if (_didLoadLevel && _levelLoadSceneRoot != 0)
+                            _levelLoadSceneRoot = compositeId;
+                    }
                     Callable.From(() => _scene?.QueuePopulateComposite(new ShortGuid(compositeId))).CallDeferred();
                 }
                 break;
@@ -2563,6 +2599,7 @@ public partial class CommandsEditorConnection : Node3D
 
         bool changed = PreviewVisibilitySettings.ActiveCompositeId != activeCompositeId;
         PreviewVisibilitySettings.ActiveCompositeId = activeCompositeId;
+        _scene?.NoteEditorActiveComposite(activeCompositeId);
         return changed;
     }
 
@@ -4226,8 +4263,11 @@ public partial class CommandsEditorConnection : Node3D
                 if (composite != null)
                 {
                     ShortGuid entityId = new ShortGuid(ids[i]);
+                    Entity removedEntity = composite.GetEntityByID(entityId);
+                    _scene.ForgetModelReferenceOverrideMaterials(removedEntity);
+                    ModelReferenceMaterialMapping.NoteEntityRemoved(_scene.Content.Level?.Commands, composite, removedEntity);
                     //By what the entity is here; the packet says only what its first one is
-                    switch (composite.GetEntityByID(entityId)?.variant ?? packet.entity_variant)
+                    switch (removedEntity?.variant ?? packet.entity_variant)
                     {
                         case EntityVariant.FUNCTION:
                             composite.RemoveFunction(entityId);
@@ -4867,6 +4907,7 @@ public partial class CommandsEditorConnection : Node3D
                 FunctionEntity functionEntity = new FunctionEntity() { shortGUID = entityId, function = new ShortGuid(function) };
                 composite.AddFunction(functionEntity);
                 ApplyEntityAddedParameters(functionEntity, parameters);
+                ModelReferenceMaterialMapping.NoteEntityAdded(composite, functionEntity);
                 return true;
             }
             case EntityVariant.VARIABLE:
@@ -4874,6 +4915,7 @@ public partial class CommandsEditorConnection : Node3D
                 VariableEntity variableEntity = new VariableEntity() { shortGUID = entityId };
                 composite.AddVariable(variableEntity);
                 ApplyEntityAddedParameters(variableEntity, parameters);
+                ModelReferenceMaterialMapping.NoteEntityAdded(composite, variableEntity);
                 return true;
             }
             case EntityVariant.ALIAS:
@@ -4882,6 +4924,7 @@ public partial class CommandsEditorConnection : Node3D
                 AliasEntity aliasEntity = new AliasEntity() { shortGUID = entityId, alias = aliasPath };
                 composite.AddAlias(aliasEntity);
                 ApplyEntityAddedParameters(aliasEntity, parameters);
+                ModelReferenceMaterialMapping.NoteEntityAdded(composite, aliasEntity);
                 return true;
             }
             case EntityVariant.PROXY:
@@ -4890,6 +4933,7 @@ public partial class CommandsEditorConnection : Node3D
                 ProxyEntity proxyEntity = new ProxyEntity() { shortGUID = entityId, proxy = proxy };
                 composite.AddProxy(proxyEntity);
                 ApplyEntityAddedParameters(proxyEntity, parameters);
+                ModelReferenceMaterialMapping.NoteEntityAdded(composite, proxyEntity);
                 return true;
             }
         }

@@ -109,7 +109,8 @@ public static class LevelViewerEntityHide
 		for (int i = 0; i < _hiddenEntries.Count; i++)
 		{
 			Node3D visualRoot = _hiddenEntries[i].VisualRoot;
-			if (visualRoot != null && GodotObject.IsInstanceValid(visualRoot) && root.IsAncestorOf(visualRoot))
+			//One freed this frame has given its name up (AlienScene.FreeReleasingName): its path names nothing in the rebuilt scene
+			if (visualRoot != null && GodotObject.IsInstanceValid(visualRoot) && !visualRoot.IsQueuedForDeletion() && root.IsAncestorOf(visualRoot))
 				paths.Add(root.GetPathTo(visualRoot));
 		}
 		return paths;

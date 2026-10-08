@@ -135,6 +135,8 @@ internal sealed class EntityHighlightState
 
 			ApplyMeshHighlight(mesh);
 		}
+		//Scratch only: kept filled, it held the last highlighted meshes after they were freed
+		_meshCollectBuffer.Clear();
 	}
 
 	private void ReleaseMeshForSelection(MeshInstance3D mesh)

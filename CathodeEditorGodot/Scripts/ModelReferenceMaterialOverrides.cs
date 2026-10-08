@@ -118,6 +118,21 @@ public static class ModelReferenceMaterialOverrides
 		return !string.IsNullOrWhiteSpace(TryGetStringParameter(parameterEntity, fallbackEntity, MaterialParameterName));
 	}
 
+	/// <summary>Whether the entity (an alias, typically) sets anything that changes how a ModelReference it reaches is drawn.</summary>
+	public static bool HasModelReferenceOverrideParameter(Entity entity)
+	{
+		if (entity?.parameters == null)
+			return false;
+
+		for (int i = 0; i < entity.parameters.Count; i++)
+		{
+			if (entity.parameters[i] != null && IsModelReferenceOverrideParameter(entity.parameters[i].name))
+				return true;
+		}
+
+		return false;
+	}
+
 
 
 	/// <summary>

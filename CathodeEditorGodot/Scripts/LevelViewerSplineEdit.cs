@@ -248,8 +248,9 @@ public sealed class LevelViewerSplineEdit
 		if (_host == null)
 			return false;
 
-		if (_entity == null)
-			_entity = FindEntity(scene);
+		/* Found again each time: an edit that deletes and re-sends the spline (an MCP edit, an undo) brings it back as a new
+		   object, and the override held for the old one drew the working points nowhere until the mode was switched again */
+		_entity = FindEntity(scene) ?? _entity;
 		return true;
 	}
 

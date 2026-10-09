@@ -152,7 +152,8 @@ namespace OpenCAGE.UnityConnection
         // world space (`camera_position`, `camera_forward`, `camera_up`, `camera_fov`), sent when it moves (at most
         // about 30 a second, the last pose always sent) and once when streaming starts. OpenCAGE passes it to the
         // running game (live link), whose camera then follows the viewport. `camera_in_level_space` says the viewer
-        // is showing the level itself; for any other composite the pose means nothing to the game.
+        // is showing the level itself; for any other composite the pose means nothing to the game. Also, carrying a non-zero
+        // `viewport_query_id`, the answer to a VIEWPORT_QUERY whatever `stream_camera_pose` is - which is not a pose of the stream.
         VIEWER_CAMERA_POSE,
 
         // OpenCAGE -> Level Viewer: put the viewport camera at `camera_position`, looking along `camera_forward` with
@@ -182,6 +183,14 @@ namespace OpenCAGE.UnityConnection
         SPLINE_EDIT_POINT_DELETE_REQUEST,
         // Level Viewer -> OpenCAGE: Escape was pressed - leave Edit in Viewport.
         SPLINE_EDIT_EXIT_REQUEST,
+
+        // OpenCAGE -> Level Viewer: say where the viewport camera is now, and what lies under each of `viewport_pick_points` and
+        // along each of `viewport_pick_rays`. Answered, whether or not stream_camera_pose is on, by one VIEWER_CAMERA_POSE that
+        // carries the query's `viewport_query_id` and `viewport_pick_results` (see there). Built like OpenCAGE's other packets,
+        // with the selection on it, so a viewer from before this takes it as a re-sync of what it has - and never answers, which
+        // is how OpenCAGE tells it is too old.
+        // Appended, not inserted: these travel as numbers, so an existing event's value must not move.
+        VIEWPORT_QUERY,
     }
 
     /// <summary>
@@ -222,6 +231,41 @@ namespace OpenCAGE.UnityConnection
         public uint composite;
         public string file = ""; //the PNG written, "" when none was
         public int status;        //a CompositePreviewStatus
+    }
+
+    /// <summary>A ray a VIEWPORT_QUERY casts: from `origin` along `direction`, in the space VIEWER_CAMERA_POSE uses.</summary>
+    public class ViewportPickRay
+    {
+        public float[] origin = new float[3];
+        public float[] direction = new float[3];
+    }
+
+    /// <summary>
+    /// What one of a VIEWPORT_QUERY's points or rays met: the nearest surface the viewport draws and could be clicked (what a
+    /// click there would land on), in the space VIEWER_CAMERA_POSE uses. One per point, then one per ray, in the order asked.
+    /// </summary>
+    public class ViewportPickResult
+    {
+        public bool hit;
+        public float[] position;  //the point hit
+        public float[] normal;    //the surface there, a unit vector facing back along the ray
+        public float distance;    //metres from the ray's start (the camera, for a point)
+
+        //The entity drawn there: its instance path from the composite the scene was built from (the entity last), and the
+        //composite each step of it is in. Empty when what was hit belongs to no entity.
+        public List<uint> path_entities = new List<uint>();
+        public List<uint> path_composites = new List<uint>();
+
+        //"model" (a model the entity draws), "preview" (an entity's stand-in shape or icon), "occlusion" (an occlusion mesh,
+        //drawn while its scene filter is on) or "other"
+        public string kind = "";
+        //For a model: its name and LOD, the submesh's write index among the level's models, and the material drawn on it as
+        //the viewer has it (remaps applied) with its index among the level's materials (-1 where unknown)
+        public string model = "";
+        public string lod = "";
+        public int submesh = -1;
+        public string material = "";
+        public int material_index = -1;
     }
 
     /// <summary>One entity of a composite, as ENTITY_ADDED would carry it, for COMPOSITE_CONTENTS.</summary>
@@ -520,6 +564,31 @@ namespace OpenCAGE.UnityConnection
         public List<SplineEditPoint> spline_edit_points = new List<SplineEditPoint>();
         public bool spline_edit_loop = false;
         public int spline_edit_selected = -1;
+
+        // VIEWPORT_QUERY, and the VIEWER_CAMERA_POSE that answers it. OpenCAGE -> Level Viewer: the query's id (never 0), the points to
+        // pick (each [x, y], a 0-1 fraction of the viewport like a drop's) and the rays to cast. Level Viewer -> OpenCAGE: the id again,
+        // with the camera in the usual camera_* fields, a result per point and then per ray, the composite the scene was built from (its
+        // ShortGuid as a number: the pose and the results are in its space), the viewport's size in pixels, and why it could not answer
+        // ("" when it could - no scene loaded, say, or composite previews being taken). A streamed pose carries id 0, which is also what
+        // a viewer from before this sends.
+        public uint viewport_query_id = 0;
+        public List<float[]> viewport_pick_points = null;
+        public List<ViewportPickRay> viewport_pick_rays = null;
+        public List<ViewportPickResult> viewport_pick_results = null;
+        public uint camera_scene_composite = 0;
+        public int viewport_width = 0;
+        public int viewport_height = 0;
+        public string viewport_query_error = "";
+
+        // OpenCAGE -> Level Viewer, on VIEWPORT_SET_CAMERA while the camera does not follow the game's: look through the entity at this
+        // instance path (from the composite the scene was built from, the entity last) - from where it is drawn now, an Animation Mode
+        // pose included, looking along its +Z - rather than from camera_position/forward/up, which carry OpenCAGE's own working-out of
+        // the same pose for a viewer from before this. With camera_look_through_follow the camera stays on the entity as it moves, until
+        // anything else moves the camera. Null looks through nothing, which is also what a packet from before this carries.
+        // camera_fov, on the same packet: above 0 sets the vertical field of view (degrees) until the camera is next moved by anything
+        // but OpenCAGE, below 0 puts the viewer's own back, 0 leaves it (as a packet from before this always did).
+        public List<uint> camera_look_through = null;
+        public bool camera_look_through_follow = false;
     }
 
     /// <summary>One point of a spline being edited in the viewport: a position and a rotation (degrees), in Cathode space.</summary>

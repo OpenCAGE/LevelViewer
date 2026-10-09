@@ -1060,6 +1060,9 @@ public partial class CommandsEditorConnection : Node3D
                 try
                 {
                     AnimationPreview.Apply(_scene, previewActive, previewTargets);
+                    //A camera being looked through may have just been moved by it: the view goes with it
+                    if (FindCamera() is LevelViewerCamera camera)
+                        camera.WakeForLookThrough();
                 }
                 catch (Exception ex)
                 {
@@ -1131,6 +1134,13 @@ public partial class CommandsEditorConnection : Node3D
         {
             //Nothing but where to put the camera: it must not be taken for a selection or a settings sync either
             HandleViewportSetCamera(packet);
+            return;
+        }
+
+        if (packet.packet_event == PacketEvent.VIEWPORT_QUERY)
+        {
+            //Nothing but the question: the selection it carries is only there for older viewers
+            HandleViewportQuery(packet);
             return;
         }
 
@@ -2301,18 +2311,116 @@ public partial class CommandsEditorConnection : Node3D
         Vector3 position = new Vector3(packet.camera_position.X, packet.camera_position.Y, packet.camera_position.Z);
         Vector3 forward = new Vector3(packet.camera_forward.X, packet.camera_forward.Y, packet.camera_forward.Z);
         Vector3 up = new Vector3(packet.camera_up.X, packet.camera_up.Y, packet.camera_up.Z);
+        float fov = packet.camera_fov;
+        List<uint> lookThrough = packet.camera_look_through != null && packet.camera_look_through.Count != 0 ? new List<uint>(packet.camera_look_through) : null;
+        bool follow = packet.camera_look_through_follow;
         Callable.From(() =>
         {
             try
             {
-                if (FindCamera() is LevelViewerCamera camera)
-                    camera.PlaceAtLevelPose(position, forward, up);
+                if (FindCamera() is not LevelViewerCamera camera)
+                    return;
+
+                /* Through an entity, from where it is drawn now: an Animation Mode pose applied before this (the packets run
+                   in order) is where it is. Not in the scene (yet), the pose OpenCAGE worked out stands in. */
+                Node3D through = lookThrough != null && _scene != null ? _scene.FindEntityNode(lookThrough) : null;
+                if (through != null)
+                    camera.LookThrough(through, follow, fov);
+                else
+                {
+                    if (lookThrough != null)
+                        ViewerLog.Print("[Viewer] The entity to look through is not in the scene: the camera is placed where OpenCAGE worked out it is");
+                    camera.PlaceAtLevelPose(position, forward, up, fov);
+                }
             }
             catch (Exception ex)
             {
                 ViewerLog.PrintErr("[Viewer] Placing the camera failed: " + ex);
             }
         }).CallDeferred();
+    }
+
+    /* OpenCAGE asks where the camera is and what lies under some points or along some rays (VIEWPORT_QUERY). Answered on the
+       main thread, after whatever was asked for before it (a camera placement, an animation pose) has run - deferred calls go
+       in order - and sent straight away: not through the pose stream, whose newest pose would replace it. */
+    private void HandleViewportQuery(Packet packet)
+    {
+        uint id = packet.viewport_query_id;
+        if (id == 0)
+            return;
+
+        List<float[]> points = packet.viewport_pick_points != null ? new List<float[]>(packet.viewport_pick_points) : new List<float[]>();
+        List<ViewportPickRay> rays = packet.viewport_pick_rays != null ? new List<ViewportPickRay>(packet.viewport_pick_rays) : new List<ViewportPickRay>();
+        Callable.From(() =>
+        {
+            Packet answer;
+            try
+            {
+                answer = AnswerViewportQuery(points, rays);
+            }
+            catch (Exception ex)
+            {
+                ViewerLog.PrintErr("[Viewer] Answering a viewport query failed: " + ex);
+                answer = new Packet(PacketEvent.VIEWER_CAMERA_POSE) { viewport_query_error = "the viewport failed to answer: " + ex.Message };
+            }
+
+            answer.viewport_query_id = id;
+            SendMessage(answer);
+        }).CallDeferred();
+    }
+
+    /* The answer to a VIEWPORT_QUERY: the camera, and a result per point then per ray. Main thread. */
+    private Packet AnswerViewportQuery(List<float[]> points, List<ViewportPickRay> rays)
+    {
+        Packet answer = new Packet(PacketEvent.VIEWER_CAMERA_POSE);
+        LevelViewerCamera camera = FindCamera() as LevelViewerCamera;
+        if (camera == null)
+        {
+            answer.viewport_query_error = "the viewport has no camera";
+            return answer;
+        }
+
+        Viewport viewport = camera.GetViewport();
+        Vector2 size = viewport != null ? viewport.GetVisibleRect().Size : Vector2.Zero;
+        answer.viewport_width = (int)size.X;
+        answer.viewport_height = (int)size.Y;
+
+        //An entity the camera follows may have moved since the camera last ran (a pose cleared just before this)
+        camera.SyncPlacedView();
+        if (!camera.TryGetScenePose(out Vector3 position, out Vector3 forward, out Vector3 up, out float fov, out bool inLevelSpace, out uint levelRoot, out string why))
+        {
+            answer.viewport_query_error = why;
+            return answer;
+        }
+
+        answer.camera_position = new System.Numerics.Vector3(position.X, position.Y, position.Z);
+        answer.camera_forward = new System.Numerics.Vector3(forward.X, forward.Y, forward.Z);
+        answer.camera_up = new System.Numerics.Vector3(up.X, up.Y, up.Z);
+        answer.camera_fov = fov;
+        answer.camera_in_level_space = inLevelSpace;
+        answer.camera_level_root = levelRoot;
+        answer.camera_scene_composite = _scene.CompositeID;
+
+        if (points.Count == 0 && rays.Count == 0)
+            return answer;
+
+        answer.viewport_pick_results = new List<ViewportPickResult>(points.Count + rays.Count);
+        foreach (float[] point in points)
+        {
+            float x = point != null && point.Length > 0 ? Mathf.Clamp(point[0], 0f, 1f) : 0.5f;
+            float y = point != null && point.Length > 1 ? Mathf.Clamp(point[1], 0f, 1f) : 0.5f;
+            Vector2 screen = new Vector2(x * size.X, y * size.Y);
+            answer.viewport_pick_results.Add(_scene.PickForQuery(camera.ProjectRayOrigin(screen), camera.ProjectRayNormal(screen), camera));
+        }
+        foreach (ViewportPickRay ray in rays)
+        {
+            //In the scene root's space on CATHODE's axes, as the camera's pose is: into Godot's world space for the cast
+            Vector3 origin = ray?.origin != null && ray.origin.Length >= 3 ? new Vector3(ray.origin[0], ray.origin[1], -ray.origin[2]) : Vector3.Zero;
+            Vector3 direction = ray?.direction != null && ray.direction.Length >= 3 ? new Vector3(ray.direction[0], ray.direction[1], -ray.direction[2]) : Vector3.Zero;
+            Transform3D root = _scene.ParentNode.GlobalTransform;
+            answer.viewport_pick_results.Add(_scene.PickForQuery(root * origin, root.Basis * direction, null));
+        }
+        return answer;
     }
 
     /* stream_camera_pose has just come on: the camera sends where it is now (main thread). */

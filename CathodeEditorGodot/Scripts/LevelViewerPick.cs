@@ -681,6 +681,72 @@ public static class LevelViewerPick
 		return best;
 	}
 
+	/// <summary>
+	/// The normal (world space, unit, facing back along the ray) of the triangle of <paramref name="meshInstance"/> that a ray
+	/// meets first - for a hit <see cref="RaycastClosest"/> found, which keeps only the distance. The same faces count as there.
+	/// False for an icon billboard, which has no surface of its own but the side that faces the camera.
+	/// </summary>
+	public static bool TryGetSurfaceNormal(MeshInstance3D meshInstance, Vector3 origin, Vector3 direction, out Vector3 normal)
+	{
+		normal = Vector3.Zero;
+		if (meshInstance == null || !GodotObject.IsInstanceValid(meshInstance) || direction.LengthSquared() < RayEpsilon)
+			return false;
+
+		Material material = meshInstance.MaterialOverride ?? meshInstance.GetActiveMaterial(0);
+		if (PreviewVisualUtility.IsIconBillboardMaterial(material))
+			return false;
+
+		Mesh mesh = meshInstance.Mesh;
+		if (mesh == null || mesh.GetSurfaceCount() == 0)
+			return false;
+
+		Transform3D inverse = meshInstance.GlobalTransform.AffineInverse();
+		Vector3 localOrigin = inverse * origin;
+		Vector3 localDirection = inverse.Basis * direction;
+		if (localDirection.LengthSquared() < RayEpsilon)
+			return false;
+		localDirection = localDirection.Normalized();
+
+		PickFaceMode faceMode = GetMeshFaceMode(meshInstance);
+		float closest = float.MaxValue;
+		Vector3 a = Vector3.Zero, b = Vector3.Zero, c = Vector3.Zero;
+		bool found = false;
+		CachedMeshSurface[] surfaces = GetCachedMeshSurfaces(mesh);
+		for (int surfaceIndex = 0; surfaceIndex < surfaces.Length; surfaceIndex++)
+		{
+			CachedMeshSurface surface = surfaces[surfaceIndex];
+			Vector3[] vertices = surface.Vertices;
+			int[] indices = surface.Indices;
+			int count = indices.Length > 0 ? indices.Length : vertices.Length;
+			for (int i = 0; i + 2 < count; i += 3)
+			{
+				Vector3 v0 = indices.Length > 0 ? vertices[indices[i]] : vertices[i];
+				Vector3 v1 = indices.Length > 0 ? vertices[indices[i + 1]] : vertices[i + 1];
+				Vector3 v2 = indices.Length > 0 ? vertices[indices[i + 2]] : vertices[i + 2];
+				if (!TryRayIntersectTriangle(localOrigin, localDirection, v0, v1, v2, faceMode, out float t) || t >= closest)
+					continue;
+				closest = t;
+				a = v0;
+				b = v1;
+				c = v2;
+				found = true;
+			}
+		}
+
+		if (!found)
+			return false;
+
+		//Normals go through the inverse transpose, which keeps them square to the surface under a scale
+		Vector3 local = (b - a).Cross(c - a);
+		Vector3 world = meshInstance.GlobalTransform.Basis.Inverse().Transposed() * local;
+		if (world.LengthSquared() < RayEpsilon)
+			return false;
+		normal = world.Normalized();
+		if (normal.Dot(direction) > 0f)
+			normal = -normal;
+		return true;
+	}
+
 	public static PickHit? PickClosest(
 		Node3D searchRoot,
 		Camera3D camera,

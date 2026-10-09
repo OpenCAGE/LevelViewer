@@ -395,6 +395,17 @@ public partial class LevelViewerCamera : Camera3D
             ViewerLog.PrintErr("[Viewer] Camera _Process failed: " + ex);
         }
 
+        //A view OpenCAGE set up: kept on an entity it follows, or handed back once anything else moved the camera (outside
+        //ProcessInternal, which returns early while the viewer idles)
+        try
+        {
+            UpdatePlacedView();
+        }
+        catch (Exception ex)
+        {
+            ViewerLog.PrintErr("[Viewer] Looking through an entity failed: " + ex);
+        }
+
         //Following the game's camera: back on its pose if anything has moved it off (outside ProcessInternal, as below)
         try
         {
@@ -2171,9 +2182,10 @@ public partial class LevelViewerCamera : Camera3D
     /// <paramref name="position"/>, looking along <paramref name="forward"/> with <paramref name="up"/> as up, in the
     /// space VIEWER_CAMERA_POSE is sent in (the scene root's, on CATHODE's axes). Anything that would move the camera
     /// on from there - following the selection, the framing a populate has yet to do - is called off, and the look
-    /// carries on from the new direction. Main thread.
+    /// carries on from the new direction. <paramref name="fov"/> above 0 is a vertical field of view in degrees to use until
+    /// the camera is next moved by anything else, below 0 puts the camera's own back, 0 leaves it. Main thread.
     /// </summary>
-    public void PlaceAtLevelPose(Vector3 position, Vector3 forward, Vector3 up)
+    public void PlaceAtLevelPose(Vector3 position, Vector3 forward, Vector3 up, float fov = 0f)
     {
         AlienScene scene = _alienScene;
         Node3D root = scene != null && GodotObject.IsInstanceValid(scene) ? scene.ParentNode : null;
@@ -2201,6 +2213,7 @@ public partial class LevelViewerCamera : Camera3D
         ClearSelectionFollow();
         GlobalTransform = root.GlobalTransform * pose;
         SyncAnglesFromTransform();
+        HoldPlacedView(null, fov);
 
         //Awake to draw it and, while streaming, to send it on: the game follows this camera, so it follows the placement too
         LevelViewerRenderIdleThrottle.NotifyUserActivity();
@@ -2210,6 +2223,171 @@ public partial class LevelViewerCamera : Camera3D
         if (ShouldShowCameraPosition())
             UpdatePositionHud(positionBefore);
         _positionHudTimer = ShouldShowCameraPosition() ? HudFadeSeconds : 0f;
+    }
+
+    // -------------------------------------------------------------------------
+    //  A view OpenCAGE set up
+    // -------------------------------------------------------------------------
+
+    /* What VIEWPORT_SET_CAMERA can leave in place after the placement itself: a field of view of OpenCAGE's (camera_fov), and
+       an entity the camera keeps looking through as it moves (camera_look_through_follow) - an animated camera that Animation
+       Mode is playing, say. Held until anything else moves the camera - the user's own controls, a focus, a populate's
+       framing, following the game's camera - and then the camera's own field of view comes back. Main thread. */
+    private float _ownFov = -1f;          //the field of view the camera's own controls use (the scene's), once known
+    private bool _placedFovHeld;          //OpenCAGE's field of view is on
+    private Node3D _lookThroughNode;      //the entity node the camera stays on, or null
+    private bool _placedViewHeld;         //either of those: the camera is watched for being moved by anything else
+    private Transform3D _placedTransform; //where OpenCAGE (or the entity followed) last put the camera
+
+    /// <summary>
+    /// Put the camera where <paramref name="entityNode"/> is drawn now - an Animation Mode pose included - looking along the
+    /// entity's +Z (CATHODE's facing, which is the node's -Z, a camera's own), as the camera entity there would see. With
+    /// <paramref name="follow"/> it stays on the entity as it moves until anything else moves the camera. <paramref name="fov"/>
+    /// as for <see cref="PlaceAtLevelPose"/>. Main thread.
+    /// </summary>
+    public void LookThrough(Node3D entityNode, bool follow, float fov)
+    {
+        if (entityNode == null || !GodotObject.IsInstanceValid(entityNode) || _followingGameCamera)
+            return;
+
+        //The batch has the scene, and puts the camera back where it found it when it is done
+        if (_alienScene != null && GodotObject.IsInstanceValid(_alienScene) && _alienScene.IsPreviewBatchRunning)
+        {
+            ViewerLog.Print("[Viewer] Looking through an entity ignored: composite previews are being taken");
+            return;
+        }
+
+        Vector3 positionBefore = GlobalPosition;
+        _cameraPlacements++;
+        ClearSelectionFollow();
+        GlobalTransform = EyeOf(entityNode);
+        SyncAnglesFromTransform();
+        HoldPlacedView(follow ? entityNode : null, fov);
+
+        LevelViewerRenderIdleThrottle.NotifyUserActivity();
+        if (!IsProcessing())
+            SetProcess(true);
+
+        if (ShouldShowCameraPosition())
+            UpdatePositionHud(positionBefore);
+        _positionHudTimer = ShouldShowCameraPosition() ? HudFadeSeconds : 0f;
+    }
+
+    /// <summary>
+    /// Something may have moved the entity the camera looks through (an Animation Mode pose): the camera goes with it now, in
+    /// the same step as the pose - not a frame later, when a picture or a VIEWPORT_QUERY could already have been taken - and
+    /// stays awake to keep following. Main thread.
+    /// </summary>
+    public void WakeForLookThrough()
+    {
+        if (_lookThroughNode == null)
+            return;
+
+        UpdatePlacedView();
+        LevelViewerRenderIdleThrottle.NotifyUserActivity();
+        if (!IsProcessing())
+            SetProcess(true);
+    }
+
+    /// <summary>The view OpenCAGE set up brought up to date before the camera is read for a VIEWPORT_QUERY. Main thread.</summary>
+    public void SyncPlacedView() => UpdatePlacedView();
+
+    /* Where an entity's node puts the eye: its transform without any scale, since a camera's basis must be a rotation. */
+    private static Transform3D EyeOf(Node3D node)
+    {
+        Transform3D global = node.GlobalTransform;
+        return new Transform3D(global.Basis.Orthonormalized(), global.Origin);
+    }
+
+    /* After a placement: OpenCAGE's field of view taken (or the camera's own put back), the entity to stay on noted, and where
+       the camera now is remembered, to tell when anything else moves it. */
+    private void HoldPlacedView(Node3D follow, float fov)
+    {
+        if (_ownFov <= 0f)
+            _ownFov = Fov;
+
+        if (fov > 0f && float.IsFinite(fov))
+        {
+            SetVerticalFovDegrees(fov);
+            _placedFovHeld = true;
+        }
+        else if (fov < 0f)
+        {
+            Fov = _ownFov;
+            _placedFovHeld = false;
+        }
+
+        _lookThroughNode = follow;
+        _placedTransform = GlobalTransform;
+        _placedViewHeld = _placedFovHeld || _lookThroughNode != null;
+    }
+
+    /* Each frame: the camera kept on the entity it follows, and the view handed back once anything else has moved it. */
+    private void UpdatePlacedView()
+    {
+        if (!_placedViewHeld)
+            return;
+
+        if (_followingGameCamera || !GlobalTransform.IsEqualApprox(_placedTransform))
+        {
+            EndPlacedView();
+            return;
+        }
+
+        if (_lookThroughNode == null)
+            return;
+
+        //Gone with the scene it was in (a populate): the camera stays where it last was
+        if (!GodotObject.IsInstanceValid(_lookThroughNode) || !_lookThroughNode.IsInsideTree())
+        {
+            _lookThroughNode = null;
+            _placedViewHeld = _placedFovHeld;
+            return;
+        }
+
+        Transform3D eye = EyeOf(_lookThroughNode);
+        if (GlobalTransform.IsEqualApprox(eye))
+            return;
+
+        GlobalTransform = eye;
+        SyncAnglesFromTransform();
+        _placedTransform = GlobalTransform;
+        LevelViewerRenderIdleThrottle.NotifyUserActivity();
+    }
+
+    /* The view is the camera's own again: nothing followed, and its own field of view back. */
+    private void EndPlacedView()
+    {
+        _placedViewHeld = false;
+        _lookThroughNode = null;
+        if (!_placedFovHeld)
+            return;
+
+        _placedFovHeld = false;
+        if (_ownFov > 0f)
+            Fov = _ownFov;
+    }
+
+    /// <summary>
+    /// Where the camera is, as VIEWER_CAMERA_POSE says it (the scene root's space on CATHODE's axes; see TryGetLevelSpacePose),
+    /// with its vertical field of view in degrees - for OpenCAGE's VIEWPORT_QUERY, whatever the pose stream is doing. False,
+    /// with <paramref name="why"/> in words, while there is no scene to be in. Main thread.
+    /// </summary>
+    public bool TryGetScenePose(out Vector3 position, out Vector3 forward, out Vector3 up, out float fov, out bool inLevelSpace, out uint levelRoot, out string why)
+    {
+        fov = GetVerticalFovDegrees();
+        why = "";
+        if (TryGetLevelSpacePose(out position, out forward, out up, out inLevelSpace, out levelRoot))
+            return true;
+
+        AlienScene scene = _alienScene;
+        if (scene == null || !GodotObject.IsInstanceValid(scene) || !scene.Content.Loaded)
+            why = "the viewport has no level loaded yet";
+        else if (scene.IsPreviewBatchRunning)
+            why = "the viewport is taking composite previews";
+        else
+            why = "the viewport has no scene built to place the camera in";
+        return false;
     }
 
     /// <summary>
@@ -2278,6 +2456,8 @@ public partial class LevelViewerCamera : Camera3D
 
         if (follow)
         {
+            //The game's camera takes over: a view OpenCAGE set up ends, its field of view with it
+            EndPlacedView();
             _fovBeforeFollowing = Fov;
             ClearSelectionFollow();
             _mouseLookActive = false;

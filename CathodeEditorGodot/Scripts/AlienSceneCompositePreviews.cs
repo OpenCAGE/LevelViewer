@@ -260,6 +260,10 @@ public partial class AlienScene
 			//A rebuild queued before the batch would colour a preview; the restore at the end colours the level again
 			_zoneRebuildPending = false;
 			_previewOverlaysStoodDown = true;
+			/* A preview is the composite as the game draws it, not as the viewport's filters have it: the volumes, icons and
+			   collision someone switched on are not in it, and the models are even when their own filter is off (which made
+			   every preview empty). Each preview's populate applies this; the filters are refreshed again after the batch. */
+			RenderFilters.CapturingPreviews = true;
 
 			PreviewJob[] jobs = new PreviewJob[ids.Count];
 			List<Composite> pending = new List<Composite>();
@@ -404,9 +408,11 @@ public partial class AlienScene
 				PreviewVisibilitySettings.ActiveCompositeId = _editorActiveCompositeDuringPreviews != 0 ? _editorActiveCompositeDuringPreviews : viewActiveComposite;
 			_editorActiveCompositeDuringPreviews = 0;
 			_previewOverlaysStoodDown = false;
+			RenderFilters.CapturingPreviews = false;
 		}
 
 		double restoreSeconds = 0;
+		bool viewRestored = false;
 		ShortGuid requestedRoot = _previewBatchRequestedRoot;
 		//Deleted while the batch ran (an undo of its creation; the editor closed its view): nothing to switch to, the old scene goes back
 		if (requestedRoot != ShortGuid.Invalid && _content.Level?.Commands?.GetComposite(requestedRoot) == null)
@@ -426,6 +432,7 @@ public partial class AlienScene
 					Composite restoreTo = _content.Level?.Commands?.GetComposite(viewComposite.shortGUID) ?? viewComposite;
 					RestoreViewAfterPreviews(restoreTo, viewOrigin, camera, viewCamera, viewHides);
 					restoreSeconds = restore.Elapsed.TotalSeconds;
+					viewRestored = true;
 				}
 				else
 				{
@@ -442,6 +449,9 @@ public partial class AlienScene
 			_previewBatchRunning = false;
 			_previewBatchViewComposite = null;
 			_previewBatchRequestedRoot = ShortGuid.Invalid;
+			//The restore's populate applied the viewport's own filters; anything else on screen was last filtered as a preview
+			if (sceneRebuilt && !viewRestored)
+				RestoreRenderFiltersAfterPreviews();
 			RestoreOverlaysAfterPreviews();
 			//A load or populate that arrived part way through showed the overlay for itself and hides it when it is done;
 			//a load that failed shows its message there, which stays until the next load
@@ -524,9 +534,9 @@ public partial class AlienScene
 			_previewBatchPopulate = false;
 		}
 
-		/* What CompletePopulate does to make the scene right - the filters bring the meshes spawned
-		   hidden above into view and give every preview its visuals. The overlays it would refresh are
-		   stood down, and the camera is left alone. */
+		/* What CompletePopulate does to make the scene right - the filters, read as a preview has them
+		   (RenderFilters.CapturingPreviews), bring the meshes spawned hidden above into view and hide the
+		   rest. The overlays it would refresh are stood down, and the camera is left alone. */
 		RefreshRenderFilters(null);
 		RefreshSceneGeometryFilters();
 		return true;
@@ -615,10 +625,11 @@ public partial class AlienScene
 		}
 	}
 
-	//Overlays that live inside the level's tree and are never part of a composite's preview
+	//Overlays that live inside the level's tree and are never part of a composite's preview (the wireframe pass is the viewport's own)
 	private bool IsExcludedFromPreview(Node node)
 	{
-		return node == _collisionOverlay || node == _stateInfoOverlay || node.Name == LightRadiusVisualNodeName;
+		return node == _collisionOverlay || node == _stateInfoOverlay || node.Name == LightRadiusVisualNodeName
+			|| node.IsInGroup(LevelViewerPick.WireframeOverlayGroupName);
 	}
 
 	/// <summary>
@@ -658,6 +669,28 @@ public partial class AlienScene
 			return;
 
 		PrewarmPlanIfMissing(union, composites.Count + " composite(s) to be captured");
+	}
+
+	/* The scene on screen had the filters applied as a preview wants them: it is the batch's last preview, or one a populate
+	   built while the batch ran, and a filter change that arrived meanwhile was refreshed under them too. A load still on
+	   its way applies the viewport's own filters, and makes the wireframe, when it completes. */
+	private void RestoreRenderFiltersAfterPreviews()
+	{
+		if (!_content.Loaded || _loadStep != LoadPipelineStep.None || _parentNode == null || !GodotObject.IsInstanceValid(_parentNode))
+			return;
+
+		try
+		{
+			RefreshRenderFilters(null);
+			RefreshSceneGeometryFilters();
+			//Nor was the wireframe made for it (ActivateDeferredMeshes leaves it out of a preview)
+			if (ModelReferenceRenderSettings.WireframeEnabled)
+				ApplyModelReferenceWireframeToMeshes();
+		}
+		catch (Exception e)
+		{
+			ViewerLog.PrintErr("[Preview] Putting the render filters back failed: " + e);
+		}
 	}
 
 	private void RestoreOverlaysAfterPreviews()

@@ -136,6 +136,10 @@ public partial class LevelViewerCamera : Camera3D
 
     public override void _Input(InputEvent @event)
     {
+        //Turned away in _UnhandledInput, with everything else
+        if (IgnoringUserInput)
+            return;
+
         if (TryHandleScrollWheel(@event))
             GetViewport().SetInputAsHandled();
     }
@@ -154,6 +158,13 @@ public partial class LevelViewerCamera : Camera3D
 
     private void UnhandledInputInternal(InputEvent @event)
     {
+        if (IgnoringUserInput)
+        {
+            AbandonUserInputForPreviews();
+            GetViewport().SetInputAsHandled();
+            return;
+        }
+
         if (!IsProcessing())
             SetProcess(true);
 
@@ -474,10 +485,19 @@ public partial class LevelViewerCamera : Camera3D
         float deltaSeconds = (float)delta;
         Vector3 positionBefore = GlobalPosition;
 
-        if (EmbeddedInOpenCage)
-            ProcessEmbeddedMouseDrag(deltaSeconds);
+        //The keys and buttons are polled here rather than sent as events, so they are turned away here too
+        if (IgnoringUserInput)
+        {
+            AbandonUserInputForPreviews();
+        }
+        else
+        {
+            _userInputAbandoned = false;
+            if (EmbeddedInOpenCage)
+                ProcessEmbeddedMouseDrag(deltaSeconds);
 
-        ApplyKeyboardMovement(deltaSeconds);
+            ApplyKeyboardMovement(deltaSeconds);
+        }
         UpdateSelectionFollow();
 
         if (ShouldShowCameraPosition())
@@ -1459,6 +1479,37 @@ public partial class LevelViewerCamera : Camera3D
         Win32Input.PopHideCursor();
         _embeddedCursorHiddenForLook = false;
         _embeddedLookAnchorScreen = null;
+    }
+
+    /* While composite previews are being captured (AlienScene.CapturePreviewsAsync) the scene on screen is each preview
+       being built in turn, and the batch puts the view back when it is done: a key would fly the camera about over them,
+       and a shortcut or a click would act on a scene that is about to be thrown away. Nothing typed or clicked in the viewport
+       does anything until the batch is over. */
+    private bool IgnoringUserInput => _alienScene != null && GodotObject.IsInstanceValid(_alienScene) && _alienScene.IsPreviewBatchRunning;
+    private bool _userInputAbandoned;
+
+    //Whatever press was under way when the batch started is dropped once, so none is left half done when it ends
+    private void AbandonUserInputForPreviews()
+    {
+        if (_userInputAbandoned)
+            return;
+        _userInputAbandoned = true;
+
+        if (_boxSelect.IsArmed)
+            _boxSelect.End();
+        LevelViewerTransformGizmo gizmo = GetGizmo();
+        if (gizmo != null && (gizmo.IsDragging || gizmo.IsHandoverArmed))
+            gizmo.CancelDrag();
+
+        _rightPressed = false;
+        _rightClickPending = false;
+        _rightDragStarted = false;
+        _rightDownScreen = null;
+        _mouseLookActive = false;
+        _panning = false;
+        _embeddedLastScreenMousePos = null;
+        ReleaseEmbeddedMouseCapture();
+        ReleaseMouse(this);
     }
 
     private void ReleaseEmbeddedMouseCapture()

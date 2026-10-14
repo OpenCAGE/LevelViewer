@@ -8,6 +8,18 @@ public static class RenderFilters
     private static readonly object _lock = new object();
     private static Dictionary<uint, bool> _enabledByFunctionType = new Dictionary<uint, bool>();
     private static Dictionary<string, bool> _enabledSceneFilters = new Dictionary<string, bool>();
+    private static bool _capturingPreviews;
+
+    /// <summary>
+    /// While set, every filter reads as a composite preview wants it, whatever the viewport has switched on: the models
+    /// shown and nothing else - no volumes, icons or markers, no collision or occlusion meshes - which is what the game
+    /// draws. Set for the length of a preview batch (AlienScene.CapturePreviewsAsync), which refreshes the filters after.
+    /// </summary>
+    public static bool CapturingPreviews
+    {
+        get { lock (_lock) return _capturingPreviews; }
+        set { lock (_lock) _capturingPreviews = value; }
+    }
 
     /// <summary>Apply the scene geometry filters (occlusion / collision). True when any changed.</summary>
     public static bool ApplySceneFiltersFromPacket(Dictionary<string, bool> filters)
@@ -43,6 +55,8 @@ public static class RenderFilters
     {
         lock (_lock)
         {
+            if (_capturingPreviews)
+                return false;
             if (_enabledSceneFilters.TryGetValue(kind.ToString(), out bool enabled))
                 return enabled;
             return false;
@@ -80,6 +94,8 @@ public static class RenderFilters
     {
         lock (_lock)
         {
+            if (_capturingPreviews)
+                return functionType == (uint)FunctionType.ModelReference;
             if (_enabledByFunctionType.TryGetValue(functionType, out bool enabled))
                 return enabled;
             return RenderFilterDefinitions.IsEnabledByDefault(functionType);

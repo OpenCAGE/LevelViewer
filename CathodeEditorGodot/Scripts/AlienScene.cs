@@ -1572,20 +1572,37 @@ public partial class AlienScene : Node3D
 	/* The meshes used to join a "model_reference_renderable" group here that nothing ever read. Godot keeps a
 	   group's members in a vector and scans it on every add and every tree exit, so 80k meshes cost O(n^2) twice:
 	   seconds here (TECH_Hub, no messages answered - OpenCAGE froze on any focus change) and more again when the
-	   scene was freed. _modelReferenceMeshes is the list of them. */
+	   scene was freed. _modelReferenceMeshes is the list of them.
+	   Bulk spawning leaves the wireframe out (SpawnRenderable), so with Render Wireframe on it is made here, once every
+	   mesh is in: nothing else made it, and every populate of a composite came back without one. Not for a preview
+	   batch's populates - a preview leaves the viewport's wireframe out, and the batch's restore makes it again. */
 	private void ActivateDeferredMeshes()
 	{
-		foreach (MeshInstance3D mesh in _modelReferenceMeshes.Keys)
+		bool makeWireframe = ModelReferenceRenderSettings.WireframeEnabled && !_previewBatchPopulate;
+		System.Diagnostics.Stopwatch wireframeTimer = makeWireframe ? System.Diagnostics.Stopwatch.StartNew() : null;
+		int wireframesMade = 0;
+		foreach (KeyValuePair<MeshInstance3D, Materials.Material> entry in _modelReferenceMeshes)
 		{
 			LevelViewerSentMessages.PumpIfDue();
+			MeshInstance3D mesh = entry.Key;
 			if (mesh == null || !GodotObject.IsInstanceValid(mesh))
 				continue;
 
 			mesh.Visible = ModelReferencesShown;
 			MeshInstance3D overlay = FindWireframeOverlay(mesh);
+			if (overlay == null && makeWireframe)
+			{
+				UpdateWireframeOverlay(mesh, entry.Value);
+				overlay = FindWireframeOverlay(mesh);
+				if (overlay != null)
+					wireframesMade++;
+			}
 			if (overlay != null)
 				overlay.Visible = ModelReferencesShown && ModelReferenceRenderSettings.WireframeEnabled;
 		}
+
+		if (wireframesMade > 0)
+			ViewerLog.Print("[Viewer] Made " + wireframesMade + " wireframe overlay(s) in " + wireframeTimer.ElapsedMilliseconds + " ms.");
 	}
 
 	/// <summary>

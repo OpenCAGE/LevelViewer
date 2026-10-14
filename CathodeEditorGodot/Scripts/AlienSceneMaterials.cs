@@ -20,6 +20,7 @@ public static class AlienSceneMaterials
 	private static readonly StringName ZoneColourParam = new StringName("zone_colour");
 	private static readonly StringName DiffuseTintParam = new StringName("diffuse_tint");
 	private static readonly StringName VertexColourTintParam = new StringName("vertex_colour_tint");
+	private static readonly StringName UseVertexColourParam = new StringName("use_vertex_colour");
 	private static readonly StringName DiffuseUvMultParam = new StringName("diffuse_uv_mult");
 	private static readonly StringName UseDiffuseMapParam = new StringName("use_diffuse_map");
 	private static readonly StringName DiffuseMapParam = new StringName("diffuse_map");
@@ -455,6 +456,7 @@ public static class AlienSceneMaterials
 		bool preserveDiffuseAlpha = useTransparentBlend || useAlphaCutout;
 		AlienSceneShaderParams.MaterialParams shaderParams = AlienSceneShaderParams.GetParams(shader.Ubershader);
 		Color diffuseTint = AlienSceneShaderParams.GetDiffuseTint(material, shader, shaderParams, preserveDiffuseAlpha);
+		diffuseTint.A *= AlienSceneShaderParams.GetDecalOpacity(material, shader);
 		Color vertexColourTint = Colors.White;
 		if (environmentScalars.HasValue)
 		{
@@ -469,6 +471,8 @@ public static class AlienSceneMaterials
 
 		godotMaterial.SetShaderParameter(DiffuseTintParam, diffuseTint);
 		godotMaterial.SetShaderParameter(VertexColourTintParam, vertexColourTint);
+		//The mesh's own vertex colours tint the diffuse too, where the game's do (a mesh without them is white)
+		godotMaterial.SetShaderParameter(UseVertexColourParam, ModelReferenceMaterialOverrides.TintsWithVertexColour(shader));
 		godotMaterial.SetShaderParameter(DiffuseUvMultParam, AlienSceneShaderParams.GetUvScale(material, shader, shaderParams));
 
 		godotMaterial.SetShaderParameter(UseDiffuseMapParam, diffuse != null);

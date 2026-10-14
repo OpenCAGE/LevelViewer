@@ -24,7 +24,8 @@ void fragment() {
 	vec4 color = use_separate_alpha_map
 		? model_reference_apply_diffuse_color(diffuse_tint, tex, use_diffuse_map)
 		: diffuse_tint * tex;
-	color = model_reference_apply_vertex_colour_tint(color, vertex_colour_tint);
+	vec4 vertex_tint = model_reference_vertex_tint(vertex_colour_tint, COLOR);
+	color = model_reference_apply_vertex_colour_tint(color, vertex_tint);
 
 	vec4 separate_sample = vec4(1.0);
 	if (use_separate_alpha_map) {
@@ -35,7 +36,7 @@ void fragment() {
 	float ndl = max(dot(normal, MODEL_REFERENCE_PREVIEW_LIGHT_DIR), 0.0);
 
 	float alpha = model_reference_blend_alpha(tex, separate_sample, diffuse_tint.a);
-	alpha *= vertex_colour_tint.a;
+	alpha *= vertex_tint.a;
 	model_reference_finish_alpha(alpha);
 
 	ALBEDO = model_reference_apply_preview_shading(color.rgb, ndl);

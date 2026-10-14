@@ -46,6 +46,16 @@ vec3 model_reference_apply_preview_shading(vec3 albedo, float ndl) {
 	return model_reference_cap_peak(lit);
 }
 
+// Whether the mesh's own vertex colours tint the diffuse: set per material, where the game's VERTEX_COLOUR does
+// (ModelReferenceMaterialOverrides.TintsWithVertexColour). A mesh without vertex colours reads as white.
+uniform bool use_vertex_colour = false;
+
+// The vertex colour tint as the game builds it: the instance's vertex_colour_scale, times the mesh's vertex colour where
+// the material tints with it
+vec4 model_reference_vertex_tint(vec4 vertex_colour_tint, vec4 vertex_colour) {
+	return use_vertex_colour ? vertex_colour_tint * vertex_colour : vertex_colour_tint;
+}
+
 vec4 model_reference_apply_vertex_colour_tint(vec4 color, vec4 vertex_colour_tint) {
 	return vec4(color.rgb * vertex_colour_tint.rgb, color.a * vertex_colour_tint.a);
 }

@@ -10,6 +10,7 @@ public sealed class ParsedMeshSurface
 	public int[] Indices;
 	public Vector3[] Normals;
 	public Vector2[] Uvs;
+	public Color[] Colours;
 
 	public bool IsValid =>
 		Vertices != null && Vertices.Length > 0
@@ -54,12 +55,18 @@ public sealed class ParsedMeshSurface
 				uvs[i] = cathodeMesh.UVs[0][i];
 		}
 
+		//What a VERTEX_COLOUR material tints its diffuse with (see ModelReferenceMaterialOverrides.TintsWithVertexColour)
+		Color[] colours = null;
+		if (cathodeMesh.Colours.Count == cathodeMesh.Vertices.Count)
+			colours = cathodeMesh.Colours.ToArray();
+
 		surface = new ParsedMeshSurface
 		{
 			Vertices = vertices,
 			Indices = indices,
 			Normals = normals,
 			Uvs = uvs,
+			Colours = colours,
 		};
 		return true;
 	}
@@ -80,6 +87,9 @@ public sealed class ParsedMeshSurface
 
 		if (Uvs != null)
 			arrays[(int)Mesh.ArrayType.TexUV] = Uvs;
+
+		if (Colours != null)
+			arrays[(int)Mesh.ArrayType.Color] = Colours;
 
 		LevelViewerMeshUtil.AddSurface(mesh, Mesh.PrimitiveType.Triangles, arrays);
 		return mesh;

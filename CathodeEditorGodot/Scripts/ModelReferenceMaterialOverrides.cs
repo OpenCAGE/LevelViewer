@@ -535,8 +535,8 @@ public static class ModelReferenceMaterialOverrides
 
 
 	/// <summary>
-	/// What vertex_colour_scale / vertex_opacity_scale do to this material's diffuse. The viewer's meshes carry no
-	/// vertex colours, so every vertex is taken as white.
+	/// What vertex_colour_scale / vertex_opacity_scale do to this material's diffuse: the scale the mesh's own vertex
+	/// colours are multiplied by where they tint it (<see cref="TintsWithVertexColour"/> - the shader multiplies them in).
 	/// </summary>
 	/// <remarks>
 	/// Retail copies the two, unclamped, into the instance's first GPU constant (CA_ENVIRONMENT instances only), and
@@ -557,16 +557,30 @@ public static class ModelReferenceMaterialOverrides
 			return Vector4.One;
 
 		float alpha = Mathf.Clamp(opacity, 0f, 1f);
-		if (HasFeature(shader, CA_ENVIRONMENT.FEATURES.VERTEX_AMBIENT_OCCLUSION)
-			|| HasFeature(shader, CA_ENVIRONMENT.FEATURES.ALPHABLEND_NOISE)
-			|| HasFeature(shader, CA_ENVIRONMENT.FEATURES.DIRT_MAPPING)
-			|| HasFeature(shader, CA_ENVIRONMENT.FEATURES.AMBIENT_OCCLUSION_MAPPING))
-		{
+		if (!TintsWithVertexColour(shader))
 			return new Vector4(1f, 1f, 1f, alpha);
-		}
 
 		Vector3 tint = ClampVector3Components(scale, 0f, 1f);
 		return new Vector4(tint.X, tint.Y, tint.Z, alpha);
+	}
+
+	/// <summary>
+	/// Whether the game tints this material's diffuse with the mesh's vertex colours (times the instance's
+	/// vertex_colour_scale): a CA_ENVIRONMENT material with VERTEX_COLOUR that puts the colour to no other use. With
+	/// ALPHABLEND_NOISE or DIRT_MAPPING its x/y are blend amounts, with VERTEX_AMBIENT_OCCLUSION its z is the AO term,
+	/// and with AMBIENT_OCCLUSION_MAPPING its z scales the AO map's tint instead (see <see cref="GetVertexColourTint"/>).
+	/// Props painted in their vertex colours - the nodding bird's blue hat and red feathers over a grey plastic map -
+	/// rely on it.
+	/// </summary>
+	public static bool TintsWithVertexColour(Shaders.Shader shader)
+	{
+		return shader != null
+			&& shader.Ubershader == SHADER_LIST.CA_ENVIRONMENT
+			&& HasFeature(shader, CA_ENVIRONMENT.FEATURES.VERTEX_COLOUR)
+			&& !HasFeature(shader, CA_ENVIRONMENT.FEATURES.VERTEX_AMBIENT_OCCLUSION)
+			&& !HasFeature(shader, CA_ENVIRONMENT.FEATURES.ALPHABLEND_NOISE)
+			&& !HasFeature(shader, CA_ENVIRONMENT.FEATURES.DIRT_MAPPING)
+			&& !HasFeature(shader, CA_ENVIRONMENT.FEATURES.AMBIENT_OCCLUSION_MAPPING);
 	}
 
 	private static bool HasFeature(Shaders.Shader shader, CA_ENVIRONMENT.FEATURES feature)

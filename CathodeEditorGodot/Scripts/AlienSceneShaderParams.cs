@@ -193,6 +193,18 @@ public static class AlienSceneShaderParams
 		return new Vector2(scale, scale);
 	}
 
+	/// <summary>
+	/// What a CA_ENVIRONMENT DECAL material's alpha is scaled by - its OPACITY_MODIFIER_VALUE: the game blends a decal by that
+	/// times the diffuse's alpha times the tint's, so a decal-flagged glass with an opaque map (the nodding bird's tube, 0.6)
+	/// is see-through. 1 for anything else, or a material without the value.
+	/// </summary>
+	public static float GetDecalOpacity(Materials.Material material, Shaders.Shader shader)
+	{
+		if (shader == null || shader.Ubershader != SHADER_LIST.CA_ENVIRONMENT || !HasFeature(shader, "DECAL"))
+			return 1f;
+		return Mathf.Clamp(GetFloat(shader, material, (int)CA_ENVIRONMENT.PARAMETERS.OPACITY_MODIFIER_VALUE, 1f), 0f, 1f);
+	}
+
 	public static float GetAlphaScissorThreshold(Materials.Material material, Shaders.Shader shader)
 	{
 		return Mathf.Clamp(GetFloat(shader, material, GetAlphaThresholdIndex(shader.Ubershader), 0.5f), 0f, 1f);

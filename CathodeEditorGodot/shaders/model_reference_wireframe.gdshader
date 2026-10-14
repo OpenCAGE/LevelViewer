@@ -14,6 +14,7 @@ void fragment() {
 	if (use_diffuse_map) {
 		color *= texture(diffuse_map, UV * diffuse_uv_mult);
 	}
-	color = model_reference_apply_vertex_colour_tint(color, vertex_colour_tint);
+	vec4 vertex_tint = model_reference_vertex_tint(vertex_colour_tint, COLOR);
+	color = model_reference_apply_vertex_colour_tint(color, vertex_tint);
 	ALBEDO = vec3(1.0) - color.rgb;
 }

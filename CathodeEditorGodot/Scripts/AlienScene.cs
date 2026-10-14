@@ -1613,6 +1613,32 @@ public partial class AlienScene : Node3D
 		return foundAny;
 	}
 
+	/// <summary>
+	/// World-space bounds of every model-reference mesh drawn now: the level's geometry, without preview icons, and
+	/// without what the render filters or H have hidden. What the Z key frames with nothing selected. False when nothing
+	/// is drawn.
+	/// </summary>
+	public bool TryGetVisibleGeometryBounds(out Aabb bounds)
+	{
+		bounds = new Aabb();
+		bool foundAny = false;
+		foreach (MeshInstance3D mesh in _modelReferenceMeshes.Keys)
+		{
+			if (mesh == null || !GodotObject.IsInstanceValid(mesh) || !mesh.IsVisibleInTree())
+				continue;
+
+			Aabb local = mesh.GetAabb();
+			if (local.Size.LengthSquared() <= 0.000001f)
+				continue;
+
+			Aabb global = mesh.GlobalTransform * local;
+			bounds = foundAny ? bounds.Merge(global) : global;
+			foundAny = true;
+		}
+
+		return foundAny;
+	}
+
 	/// <summary>Moves level root so the initial focus point sits near the origin for stable rendering.</summary>
 	public void RecenterContentOrigin()
 	{

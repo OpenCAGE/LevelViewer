@@ -598,11 +598,17 @@ public partial class LevelViewerCamera : Camera3D
 
     /// <summary>Explicit focus (the Z key). Asked for directly, so there is no size limit - an instance
     /// frames its whole subtree; an alias or proxy still frames what it points at rather than its
-    /// reference point.</summary>
+    /// reference point. With nothing selected, it frames all the geometry on show.</summary>
     private void FocusSelectedEntity()
     {
-        if (_alienScene == null || !_alienScene.TryGetSelectedEntity(out Node3D selected))
+        if (_alienScene == null)
             return;
+
+        if (!_alienScene.TryGetSelectedEntity(out Node3D selected))
+        {
+            FocusAllGeometry();
+            return;
+        }
 
         if (!_alienScene.TryResolveFocusTarget(selected, maxExtent: 0f, out Node3D target, out bool framePositionOnly))
             return;
@@ -611,6 +617,31 @@ public partial class LevelViewerCamera : Camera3D
             && GodotObject.IsInstanceValid(_commandsEditorConnection)
             && _commandsEditorConnection.FixCameraToSelected;
         HandleSelectionFocus(target, fixCamera, framePositionOnly);
+    }
+
+    //Z with nothing selected looks down on the level at least this steeply (radians): a level is wide and flat, and seen
+    //from level with it, it is a sliver
+    private const float OverviewMinPitch = 0.5f;
+
+    /// <summary>
+    /// Z with nothing selected: everything drawn in view at once (the level's geometry; preview icons and anything hidden
+    /// left out), from the way the camera faces now, tipped to look down on it. As far back as it takes: unlike framing a
+    /// selection, there is no distance limit.
+    /// </summary>
+    private void FocusAllGeometry()
+    {
+        //Following the game's camera (LiveLink Camera), the camera is the game's to move
+        if (_followingGameCamera || _alienScene == null || !_alienScene.TryGetVisibleGeometryBounds(out Aabb bounds))
+            return;
+
+        ClearSelectionFollow();
+        Vector3 positionBefore = GlobalPosition;
+        float pitch = Mathf.Clamp(Mathf.Min(_pitch, -OverviewMinPitch), -1.55f, 1.55f);
+        Vector3 viewDirection = new Vector3(-Mathf.Sin(_yaw) * Mathf.Cos(pitch), Mathf.Sin(pitch), -Mathf.Cos(_yaw) * Mathf.Cos(pitch));
+        LevelViewerView.FrameRuntimeCameraToFit(this, bounds, viewDirection, GetVerticalFovDegrees());
+        if (ShouldShowCameraPosition())
+            UpdatePositionHud(positionBefore);
+        _positionHudTimer = ShouldShowCameraPosition() ? HudFadeSeconds : 0f;
     }
 
     /// <summary>

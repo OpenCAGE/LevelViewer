@@ -23,11 +23,12 @@ namespace OpenCAGE
     /// collapsing and draws a copy under every placement, so the honest answer for a copy standing in
     /// a room is the zone that room belongs to.
     ///
-    /// Measured against the instancer by ReleaseSweep `zonecheck`. TECH_COMMS: reaches all 992,704
-    /// entities the build zones, agreeing with the primary zone on 992,699 and the other 5 being
-    /// their secondary; TECH_HUB: all 1,252,706, agreeing on 1,252,659. Neither level has a single
-    /// entity put in a zone the build says it is not in. Both additionally claim entities the build
-    /// leaves unzoned (309,864 and 247,905) - 100% of them inside is_shared composites, as above.
+    /// Measured against the instancer by ReleaseSweep `zonecheck` (15 Oct 2026, both following aliases
+    /// and proxies). TECH_COMMS: reaches all 992,687 entities the build zones, agreeing with the primary
+    /// zone on 992,664 and the other 23 being their secondary; SCI_HOSPITALUPPER: all 875,829, agreeing
+    /// on 875,797, the other 32 secondary. Neither level has a single entity put in a zone the build
+    /// says it is not in. Both additionally claim entities the build leaves unzoned (309,864 and
+    /// 105,694) - 100% of them inside is_shared composites, as above.
     /// </remarks>
     public static class ZoneMembership
     {
@@ -78,6 +79,7 @@ namespace OpenCAGE
                 ? commands.EntryPoints[0]
                 : null;
 
+            Found found = new Found();
             Walk(
                 commands,
                 from,
@@ -85,9 +87,33 @@ namespace OpenCAGE
                 new List<uint>(),
                 new HashSet<ShortGuid>(),
                 worthDescending,
-                zones,
+                found,
                 relativePathsOnly: from != root);
+
+            //What aliases and proxies of a zone carry for it, wherever the walk came across them
+            foreach (KeyValuePair<string, List<List<uint>>> carried in found.Carried)
+            {
+                if (found.ByPath.TryGetValue(carried.Key, out SyncedZone zone))
+                    zone.roots.AddRange(carried.Value);
+            }
+
+            foreach (SyncedZone zone in found.Zones)
+            {
+                if (zone.roots.Count != 0)
+                    zones.Add(zone);
+            }
             return zones;
+        }
+
+        /// <summary>
+        /// What a walk turns up: every zone it passes (by the path to it, for what is carried to it from elsewhere), and the
+        /// roots aliases and proxies of a zone carry for it.
+        /// </summary>
+        private class Found
+        {
+            public readonly List<SyncedZone> Zones = new List<SyncedZone>();
+            public readonly Dictionary<string, SyncedZone> ByPath = new Dictionary<string, SyncedZone>();
+            public readonly List<KeyValuePair<string, List<List<uint>>>> Carried = new List<KeyValuePair<string, List<List<uint>>>>();
         }
 
         /// <summary>
@@ -125,6 +151,10 @@ namespace OpenCAGE
                         parents.Add(composite.shortGUID);
                 }
 
+                //An alias or proxy carrying links for a zone elsewhere has to be walked to as well
+                if (!holdsZone)
+                    holdsZone = HoldsZoneLinkCarrier(composite);
+
                 if (holdsZone && reaching.Add(composite.shortGUID))
                     pending.Enqueue(composite.shortGUID);
             }
@@ -161,19 +191,24 @@ namespace OpenCAGE
             List<uint> path,
             HashSet<ShortGuid> onStack,
             HashSet<ShortGuid> worthDescending,
-            List<SyncedZone> zones,
+            Found found,
             bool relativePathsOnly)
         {
             //A composite that (however indirectly) instances itself would otherwise walk forever
             if (!onStack.Add(composite.shortGUID))
                 return;
 
+            foreach (AliasEntity alias in composite.aliases)
+                AddCarriedRoots(commands, composite, compositeStack, path, alias, found, relativePathsOnly);
+            foreach (ProxyEntity proxy in composite.proxies)
+                AddCarriedRoots(commands, composite, compositeStack, path, proxy, found, relativePathsOnly);
+
             foreach (FunctionEntity function in composite.functions)
             {
                 if (function.function.IsFunctionType)
                 {
                     if (function.function.AsFunctionType == FunctionType.Zone)
-                        EmitZone(commands, composite, compositeStack, path, function, zones, relativePathsOnly);
+                        EmitZone(commands, composite, compositeStack, path, function, found, relativePathsOnly);
                     continue;
                 }
 
@@ -186,7 +221,7 @@ namespace OpenCAGE
 
                 path.Add(function.shortGUID.AsUInt32);
                 compositeStack.Add(nested);
-                Walk(commands, nested, compositeStack, path, onStack, worthDescending, zones, relativePathsOnly);
+                Walk(commands, nested, compositeStack, path, onStack, worthDescending, found, relativePathsOnly);
                 compositeStack.RemoveAt(compositeStack.Count - 1);
                 path.RemoveAt(path.Count - 1);
             }
@@ -200,7 +235,7 @@ namespace OpenCAGE
             List<Composite> compositeStack,
             List<uint> path,
             FunctionEntity zone,
-            List<SyncedZone> zones,
+            Found found,
             bool relativePathsOnly)
         {
             SyncedZone synced = new SyncedZone()
@@ -213,7 +248,58 @@ namespace OpenCAGE
             ZoneDefinitions.GetColour(
                 ColourKey(zone, path), out synced.colour_r, out synced.colour_g, out synced.colour_b);
 
-            foreach (EntityConnector link in zone.childLinks)
+            AddLinkRoots(commands, composite, compositeStack, path, zone, synced.roots, relativePathsOnly);
+
+            //Kept even with nothing of its own yet: an alias or proxy of it may carry links for it
+            found.Zones.Add(synced);
+            found.ByPath[Key(PathTo(path, zone.shortGUID.AsUInt32))] = synced;
+        }
+
+        /// <summary>
+        /// An alias or proxy of a Zone can carry 'composites' links of its own, and CATHODE adds an alias's links to the entity
+        /// it points at - so they fill that zone, read from where they are written. Retail does this rarely (9 aliases and 2
+        /// proxies across the shipped levels) and the build follows them: SCI_HospitalUpper's two reach 32 drawn instances, and
+        /// retail's movers for every one of them carry the zone.
+        /// </summary>
+        private static void AddCarriedRoots(
+            Commands commands,
+            Composite composite,
+            List<Composite> compositeStack,
+            List<uint> path,
+            Entity pointer,
+            Found found,
+            bool relativePathsOnly)
+        {
+            if (!CarriesZoneLinks(pointer))
+                return;
+            if (!EntityInstancePath.TryResolvePointer(commands, composite, path, pointer,
+                    out List<uint> zonePath, out bool relativeToHere, out Entity target) || !IsZone(target))
+                return;
+
+            //A zone named from the level root is somewhere a walk that started elsewhere cannot place
+            if (relativePathsOnly && !relativeToHere)
+                return;
+
+            List<List<uint>> roots = new List<List<uint>>();
+            AddLinkRoots(commands, composite, compositeStack, path, pointer, roots, relativePathsOnly);
+            if (roots.Count != 0)
+                found.Carried.Add(new KeyValuePair<string, List<List<uint>>>(Key(zonePath), roots));
+        }
+
+        /// <summary>
+        /// What the 'composites' links on <paramref name="holder"/> - a Zone, or an alias or proxy of one - reach, from the
+        /// composite holding it.
+        /// </summary>
+        private static void AddLinkRoots(
+            Commands commands,
+            Composite composite,
+            List<Composite> compositeStack,
+            List<uint> path,
+            Entity holder,
+            List<List<uint>> roots,
+            bool relativePathsOnly)
+        {
+            foreach (EntityConnector link in holder.childLinks)
             {
                 if (link.thisParamID != ShortGuids.composites)
                     continue;
@@ -226,7 +312,9 @@ namespace OpenCAGE
                 {
                     foreach (TriggerSequence.SequenceEntry entry in sequence.sequence)
                     {
-                        if (!EntityInstancePath.TryResolve(commands, composite, path, entry.connectedEntity,
+                        //An entry can name an alias (retail does, 251 times across the shipped levels): the zone takes what
+                        //the alias stands for, as it does for an alias wired straight to the zone below
+                        if (!EntityInstancePath.TryResolveTarget(commands, composite, path, entry.connectedEntity,
                                 out List<uint> full, out bool relativeToHere))
                             continue;
 
@@ -235,36 +323,72 @@ namespace OpenCAGE
                         if (relativePathsOnly && !relativeToHere)
                             continue;
 
-                        synced.roots.Add(full);
+                        roots.Add(full);
                     }
                 }
                 else if (linked is VariableEntity pin)
                 {
-                    AddPinRoots(commands, compositeStack, path, pin, synced, relativePathsOnly);
+                    AddPinRoots(commands, compositeStack, path, pin, roots, relativePathsOnly);
                 }
-                else if (linked is AliasEntity alias)
+                else if (linked is AliasEntity || linked is ProxyEntity)
                 {
-                    //An alias stands in for the entity it names, and that entity is what gets streamed
-                    if (EntityInstancePath.TryResolve(commands, composite, path, alias.alias,
+                    //An alias or proxy stands in for the entity it names, and that entity is what gets streamed
+                    if (EntityInstancePath.TryResolvePointer(commands, composite, path, linked,
                             out List<uint> full, out bool relativeToHere) && (relativeToHere || !relativePathsOnly))
-                        synced.roots.Add(full);
+                        roots.Add(full);
                 }
                 else
                 {
-                    //Linked straight to something in the zone's own composite
-                    synced.roots.Add(PathTo(path, linked.shortGUID.AsUInt32));
+                    //Linked straight to something in the holder's own composite
+                    roots.Add(PathTo(path, linked.shortGUID.AsUInt32));
                 }
             }
+        }
 
-            if (synced.roots.Count != 0)
-                zones.Add(synced);
+        private static bool IsZone(Entity entity)
+        {
+            return entity is FunctionEntity function && function.function.IsFunctionType
+                && function.function.AsFunctionType == FunctionType.Zone;
+        }
+
+        //Only a 'composites' link can fill a zone; checked before resolving anything, as nearly no alias or proxy has one
+        private static bool CarriesZoneLinks(Entity entity)
+        {
+            if (!(entity is AliasEntity || entity is ProxyEntity))
+                return false;
+            foreach (EntityConnector link in entity.childLinks)
+            {
+                if (link.thisParamID == ShortGuids.composites)
+                    return true;
+            }
+            return false;
+        }
+
+        private static bool HoldsZoneLinkCarrier(Composite composite)
+        {
+            foreach (AliasEntity alias in composite.aliases)
+            {
+                if (CarriesZoneLinks(alias))
+                    return true;
+            }
+            foreach (ProxyEntity proxy in composite.proxies)
+            {
+                if (CarriesZoneLinks(proxy))
+                    return true;
+            }
+            return false;
+        }
+
+        private static string Key(List<uint> path)
+        {
+            return string.Join(",", path);
         }
 
         /// <summary>
         /// A zone inside a reusable composite takes its contents through one of that composite's pins,
         /// so the entities it claims are named by whatever placed the composite - one composite up.
         /// </summary>
-        private static void AddPinRoots(Commands commands, List<Composite> compositeStack, List<uint> path, VariableEntity pin, SyncedZone synced, bool relativePathsOnly)
+        private static void AddPinRoots(Commands commands, List<Composite> compositeStack, List<uint> path, VariableEntity pin, List<List<uint>> roots, bool relativePathsOnly)
         {
             //Nothing placed the level root, so a pin there is fed by nothing
             if (path.Count == 0 || compositeStack.Count < 2)
@@ -289,16 +413,16 @@ namespace OpenCAGE
                 for (int i = 0; i < path.Count - 1; i++)
                     full.Add(path[i]);
 
-                if (target is AliasEntity alias)
+                if (target is AliasEntity || target is ProxyEntity)
                 {
-                    if (EntityInstancePath.TryResolve(commands, parent, full, alias.alias,
+                    if (EntityInstancePath.TryResolvePointer(commands, parent, full, target,
                             out List<uint> aliased, out bool relativeToHere) && (relativeToHere || !relativePathsOnly))
-                        synced.roots.Add(aliased);
+                        roots.Add(aliased);
                     continue;
                 }
 
                 full.Add(target.shortGUID.AsUInt32);
-                synced.roots.Add(full);
+                roots.Add(full);
             }
         }
 

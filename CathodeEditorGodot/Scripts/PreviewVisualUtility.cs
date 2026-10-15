@@ -202,6 +202,21 @@ public static class PreviewVisualUtility
         material.RenderPriority = OpaqueRenderPriority;
     }
 
+    /// <summary>
+    /// Whether this is one of the see-through materials box and sphere volumes are drawn in, and how see-through it is.
+    /// </summary>
+    public static bool TryGetTransparentPreviewAlpha(Material material, out float alpha)
+    {
+        alpha = 1f;
+        if (material is not ShaderMaterial shaderMaterial || shaderMaterial.Shader == null
+            || !ReferenceEquals(shaderMaterial.Shader, SharedTransparentMaterial.Shader))
+            return false;
+
+        Variant colour = shaderMaterial.GetShaderParameter(AlbedoColorParam);
+        alpha = colour.VariantType == Variant.Type.Color ? colour.AsColor().A : 0.24f;
+        return true;
+    }
+
     public static bool IsIconBillboardMaterial(Material material)
     {
         if (material is not ShaderMaterial shaderMaterial || shaderMaterial.Shader == null)

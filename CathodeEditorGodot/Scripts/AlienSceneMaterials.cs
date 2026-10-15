@@ -137,6 +137,7 @@ public static class AlienSceneMaterials
 	private static readonly HashSet<Material> _zoneTintMaterialSet = new HashSet<Material>();
 	private static Shader _zoneTintShader;
 	private static Shader _zoneTintShaderDoubleSided;
+	private static Shader _zoneTintShaderTransparent;
 
 	/// <summary>
 	/// The flat zone colour a mesh is drawn in while Show Zones is on, shared by every mesh of that
@@ -147,6 +148,9 @@ public static class AlienSceneMaterials
 	/// One material per colour and cull mode, never per mesh. A level names a few hundred zones, so
 	/// this stays a few hundred materials however much geometry they cover - and per-mesh materials on
 	/// a scene this size is what exhausted the RenderingServer's RID pool once already.
+	///
+	/// A colour with alpha below 1 is see-through, for the translucent box and sphere volumes: drawn as they are, in the
+	/// zone's colour, rather than filled solid over the room they sit in.
 	/// </remarks>
 	public static Material GetZoneTintMaterial(Color colour, bool doubleSided)
 	{
@@ -154,7 +158,8 @@ public static class AlienSceneMaterials
 		if (_zoneTintMaterials.TryGetValue(key, out ShaderMaterial cached) && GodotObject.IsInstanceValid(cached))
 			return cached;
 
-		Shader shader = GetZoneTintShader(doubleSided);
+		bool transparent = colour.A < 0.999f;
+		Shader shader = transparent ? GetZoneTintTransparentShader() : GetZoneTintShader(doubleSided);
 		if (shader == null)
 			return null;
 
@@ -162,6 +167,8 @@ public static class AlienSceneMaterials
 		{
 			ResourceName = "zone tint",
 			Shader = shader,
+			//Sorted with the volumes it stands in for (PreviewVisualUtility's transparent priority)
+			RenderPriority = transparent ? 1 : 0,
 		};
 		material.SetShaderParameter(ZoneColourParam, colour);
 
@@ -203,6 +210,15 @@ public static class AlienSceneMaterials
 		if (_zoneTintShader == null)
 			ViewerLog.PrintErr("[Zones] Missing zone_tint.gdshader - the project needs exporting again.");
 		return _zoneTintShader;
+	}
+
+	private static Shader GetZoneTintTransparentShader()
+	{
+		if (_zoneTintShaderTransparent == null)
+			_zoneTintShaderTransparent = GD.Load<Shader>("res://shaders/zone_tint_transparent.gdshader");
+		if (_zoneTintShaderTransparent == null)
+			ViewerLog.PrintErr("[Zones] Missing zone_tint_transparent.gdshader - the project needs exporting again.");
+		return _zoneTintShaderTransparent;
 	}
 
 	/// <summary>

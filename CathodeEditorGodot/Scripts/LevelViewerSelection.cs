@@ -29,6 +29,8 @@ public static class LevelViewerSelection
         ClearInternal();
         PreviewVisibilitySettings.SelectionHighlightMode = mode;
         MarkAll(selected);
+        //Out of Wireframe Transparent, the zone colour it held off goes back on
+        LevelViewerZoneHighlight.SyncWithSelection();
     }
 
     public static void Apply(Node3D selected)
@@ -214,7 +216,8 @@ public static class LevelViewerSelection
             case OpenCAGE.UnityConnection.LevelViewerHighlightMode.Wireframe:
                 return LevelViewerHighlightOverlay.TryApplyWireframeOverlay(meshInstance, _savedOverlays);
             case OpenCAGE.UnityConnection.LevelViewerHighlightMode.WireframeTransparent:
-                return LevelViewerHighlightOverlay.TryApplyWireframe(meshInstance, _savedOverrides);
+                //The one mode that takes the material slot: a zone colour in it is lent, and the mesh's own material is what goes back
+                return LevelViewerHighlightOverlay.TryApplyWireframe(meshInstance, _savedOverrides, LevelViewerZoneHighlight.LendToSelection);
             default:
                 return LevelViewerHighlightOverlay.TryApplyOverlay(
                     meshInstance,

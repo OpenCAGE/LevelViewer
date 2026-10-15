@@ -112,7 +112,12 @@ public static class LevelViewerHighlightOverlay
     }
 
     /// <summary>Draws the mesh as its own edges. Replaces the material, so the surface stops filling in.</summary>
-    public static bool TryApplyWireframe(MeshInstance3D meshInstance, Dictionary<MeshInstance3D, Material> savedOverrides)
+    /// <param name="underneath">
+    /// What to put back when the selection lets go, given the mesh, when that is not simply what it is wearing now - a zone
+    /// colour is lent rather than kept (<see cref="LevelViewerZoneHighlight.LendToSelection"/>).
+    /// </param>
+    public static bool TryApplyWireframe(MeshInstance3D meshInstance, Dictionary<MeshInstance3D, Material> savedOverrides,
+        System.Func<MeshInstance3D, Material> underneath = null)
     {
         if (meshInstance == null || !GodotObject.IsInstanceValid(meshInstance))
             return false;
@@ -127,9 +132,15 @@ public static class LevelViewerHighlightOverlay
         if (wireframe == null)
             return false;
 
-        savedOverrides[meshInstance] = meshInstance.MaterialOverride;
+        savedOverrides[meshInstance] = underneath != null ? underneath(meshInstance) : meshInstance.MaterialOverride;
         meshInstance.MaterialOverride = wireframe;
         return true;
+    }
+
+    /// <summary>Whether a selection is drawing the mesh as its edges alone (it holds the mesh's material slot).</summary>
+    public static bool IsSelectionWireframe(Material material)
+    {
+        return material != null && _selectionWireframe != null && ReferenceEquals(material, _selectionWireframe);
     }
 
     /// <summary>

@@ -28,6 +28,12 @@ public static class LevelViewerLightRadius
 	// (the first override that supplies a parameter wins, then the entity's own parameter).
 	private static IReadOnlyList<Entity> _overrideEntities;
 
+	/// <summary>Whether this is the range visual itself (the node everything it draws hangs off).</summary>
+	public static bool IsVisualRoot(Node node)
+	{
+		return _visualRoot != null && ReferenceEquals(node, _visualRoot);
+	}
+
 	public static bool ShouldShow(FunctionEntity entity, uint ownerCompositeId)
 	{
 		if (entity == null || !entity.function.IsFunctionType)

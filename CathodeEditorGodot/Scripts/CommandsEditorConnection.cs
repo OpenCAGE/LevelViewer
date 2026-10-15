@@ -739,7 +739,16 @@ public partial class CommandsEditorConnection : Node3D
                 {
                     if (adds == 1)
                         ViewerLog.Print("Adding entity: " + op.Entity.AsUInt32);
-                    _scene.AddEntity(op.Composite, op.Entity);
+                    /* One that fails is reported and the batch goes on: thrown out of here, it skipped the rest of the batch's
+                       ending too - the highlight refresh below, so what had been added stayed out of its zone colour */
+                    try
+                    {
+                        _scene.AddEntity(op.Composite, op.Entity);
+                    }
+                    catch (Exception e)
+                    {
+                        ViewerLog.PrintErr("[Viewer] Adding entity " + op.Entity.AsUInt32 + " to " + op.Composite.AsUInt32 + " failed: " + e);
+                    }
                 }
                 else
                 {

@@ -231,6 +231,9 @@ public partial class AlienScene : Node3D
 			return;
 		preview.SyncPickablesWithVisibility();
 		ReapplyCompositeFocusTo(owner);
+		//The redrawn points come back in the spline's own colours, in every placement
+		if (PreviewVisibilitySettings.ShowZones)
+			RefreshZoneOverlayDeferred();
 	}
 
 	public override void _Process(double delta)
@@ -242,7 +245,14 @@ public partial class AlienScene : Node3D
 		if (_zoneRebuildPending)
 		{
 			_zoneRebuildPending = false;
-			RefreshZoneOverlay();
+			try
+			{
+				RefreshZoneOverlay();
+			}
+			catch (System.Exception ex)
+			{
+				ViewerLog.PrintErr("[Zones] Zone overlay refresh failed: " + ex);
+			}
 		}
 
 		UpdateLoadPipelineProcessing();
@@ -2734,15 +2744,20 @@ public partial class AlienScene : Node3D
 		if (_previewOverlaysStoodDown)
 			return;
 
-		RefreshProxyHighlights(forceRebuild);
-		RefreshAliasHighlights(forceRebuild);
-
-		/* Zones ride the same signal. Everything that raises this has changed which meshes exist -
-		   an entity added or removed, or a resource sync respawning every model reference that showed
-		   an edited material - and a mesh that has just been rebuilt is drawn in its own material
-		   again, not its zone's. The rebuild reconciles, so the meshes that did not change cost
-		   nothing. */
-		RefreshZoneOverlayDeferred();
+		try
+		{
+			RefreshProxyHighlights(forceRebuild);
+			RefreshAliasHighlights(forceRebuild);
+		}
+		finally
+		{
+			/* Zones ride the same signal. Everything that raises this has changed which meshes exist -
+			   an entity added or removed, or a resource sync respawning every model reference that showed
+			   an edited material - and a mesh that has just been rebuilt is drawn in its own material
+			   again, not its zone's. The rebuild reconciles, so the meshes that did not change cost
+			   nothing. (Asked for even when the overlays above fail: the new meshes need colouring either way.) */
+			RefreshZoneOverlayDeferred();
+		}
 	}
 
 	/// <summary>Bring the zone colouring up to date, or take it off. Cheap when nothing has changed.</summary>
@@ -2787,6 +2802,17 @@ public partial class AlienScene : Node3D
 
 		LevelViewerZoneHighlight.Rebuild(this);
 		LevelViewerSelection.ReapplyIfSelectionActive();
+	}
+
+	/// <summary>
+	/// One of the viewport's own overlays that live inside the level's tree - the collision filter, the navmesh and cover
+	/// sheets, a selected light's range - and are no part of the level itself. Reference tests only: asked of every node.
+	/// </summary>
+	internal bool IsViewportOverlay(Node node)
+	{
+		return (_collisionOverlay != null && ReferenceEquals(node, _collisionOverlay))
+			|| (_stateInfoOverlay != null && ReferenceEquals(node, _stateInfoOverlay))
+			|| LevelViewerLightRadius.IsVisualRoot(node);
 	}
 
 	public void RefreshProxyHighlights(bool forceRebuild = true)
@@ -2930,17 +2956,19 @@ public partial class AlienScene : Node3D
 			_markedWithSelection.AddRange(markedNodes);
 
 			/* Everything drawn as the selection - the selection itself and whatever is marked with it -
-			   gives back the overlay it is carrying, so selection green is what ends up on top. */
+			   gives back the overlay it is carrying, so selection green is what ends up on top. The zone
+			   colour stays: it is the mesh's material, not an overlay, and the selection is drawn over it -
+			   a selection, a deep-selected composite or a sequence's members still show which zone they
+			   are in. (Wireframe Transparent takes the material slot instead; the colour is lent to it -
+			   LevelViewerZoneHighlight.LendToSelection.) */
 			List<Node3D> highlightNodes = markedNodes.Count == 0 ? selectionNodes : markedNodes;
 			for (int i = 0; i < highlightNodes.Count; i++)
 			{
 				LevelViewerProxyHighlight.ReleaseNode(highlightNodes[i]);
 				LevelViewerAliasHighlight.ReleaseNode(highlightNodes[i]);
-				LevelViewerZoneHighlight.ReleaseNode(highlightNodes[i]);
 			}
 			LevelViewerProxyHighlight.ReleaseNode(entityNode);
 			LevelViewerAliasHighlight.ReleaseNode(entityNode);
-			LevelViewerZoneHighlight.ReleaseNode(entityNode);
 			LevelViewerSelection.Apply(highlightNodes);
 			ReapplyCompositeFocusLeftBySelection();
 
@@ -2978,6 +3006,8 @@ public partial class AlienScene : Node3D
 		catch (System.Exception ex)
 		{
 			ViewerLog.PrintErr("[Viewer] Selection highlight failed: " + ex);
+			//What the old selection let go of still takes its zone colour back
+			try { LevelViewerZoneHighlight.SyncWithSelection(); } catch { }
 		}
 	}
 
@@ -4536,6 +4566,10 @@ public partial class AlienScene : Node3D
 			if (preview is not ModelReferencePreview && preview.GetParent() is Node3D previewOwner)
 				ReapplyCompositeFocusTo(previewOwner);
 		}
+
+		//The same goes for the zone colours: what is shown again or made now is in its own colours, not its zone's
+		if (PreviewVisibilitySettings.ShowZones)
+			RefreshZoneOverlayDeferred();
 	}
 
 	/// <summary>Whether the model references' own render filter is asking for them right now.</summary>

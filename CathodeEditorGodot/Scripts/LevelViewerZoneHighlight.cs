@@ -27,8 +27,9 @@ public static class LevelViewerZoneHighlight
 	/// <summary>What one mesh is carrying for us, and what it was carrying before.</summary>
 	/// <remarks>
 	/// A mesh is in here while it is coloured - by its zone, or white for none. <see cref="Applied"/>
-	/// is false while the mesh has been handed back to the selection, which is drawn in its own
-	/// material - it is still ours to re-take when the selection moves on.
+	/// is false while the selection holds the mesh's material slot (Wireframe Transparent draws a
+	/// selection as its edges alone, which takes the override): it is still ours to re-take when the
+	/// selection moves on. Every other selection mode draws over the zone colour, which stays.
 	/// </remarks>
 	private sealed class Tint
 	{
@@ -127,6 +128,10 @@ public static class LevelViewerZoneHighlight
 			{
 				LevelViewerSentMessages.PumpIfDue();
 				Node3D node = scene.TryResolveInstancePathNode(path);
+				//An alias or proxy's node is an empty stand-in; what it points at is what is drawn. OpenCAGE follows them
+				//itself (EntityInstancePath.TryResolveTarget) - this is for one it could not, which the viewer has wired
+				if (node is EntityOverride pointer && pointer.PointedEntity != null)
+					node = pointer.PointedEntity;
 				if (node == null)
 				{
 					unresolvedRoots++;
@@ -144,7 +149,7 @@ public static class LevelViewerZoneHighlight
 		}
 
 		HashSet<MeshInstance3D> claimed = new HashSet<MeshInstance3D>();
-		int recoloured = TintScene(root, coloursByRootNode, claimed, out int walked, out int unzoned);
+		int recoloured = TintScene(scene, root, coloursByRootNode, claimed, out int walked, out int unzoned);
 		int released = DropUnclaimed(claimed);
 
 		ViewerLog.Print("[Zones] " + (walked - unzoned) + " of " + walked + " meshes across " + drawnZones + " of "
@@ -154,6 +159,7 @@ public static class LevelViewerZoneHighlight
 	}
 
 	private static int TintScene(
+		AlienScene scene,
 		Node3D root,
 		Dictionary<Node, Color> coloursByRootNode,
 		HashSet<MeshInstance3D> claimed,
@@ -182,6 +188,12 @@ public static class LevelViewerZoneHighlight
 			   some later rebuild; they are already on their way out, so pass over them and their
 			   children, which go with them. */
 			if (node.IsQueuedForDeletion())
+				continue;
+
+			/* The viewport's own overlays live in the level's tree but are no part of it - the navmesh and cover sheets,
+			   the collision filter, a selected light's range. Filled with a flat opaque colour they hid the level under
+			   them (the navmesh as a white sheet over every floor), and they mean nothing in zone terms. */
+			if (scene.IsViewportOverlay(node))
 				continue;
 
 			if (coloursByRootNode.TryGetValue(node, out Color rootColour))
@@ -214,46 +226,71 @@ public static class LevelViewerZoneHighlight
 	/// <summary>Bring one mesh to the colour it should be. True when that meant actually writing to it.</summary>
 	private static bool TintMesh(MeshInstance3D mesh, Color colour, HashSet<MeshInstance3D> claimed)
 	{
+		Material ownBefore = null;
 		if (_tinted.TryGetValue(mesh, out Tint existing))
 		{
+			//The selection is drawing it as its edges and has the material slot; it hands back the mesh's own material
+			//when it moves on, and SyncWithSelection colours it then - in whatever colour it should be by that time
+			if (IsHeldBySelection(mesh))
+			{
+				existing.Colour = colour;
+				existing.Applied = false;
+				claimed.Add(mesh);
+				return false;
+			}
+
 			//Already the right colour and still carrying it: the common case, and free
-			bool stillOurs = !existing.Applied || AlienSceneMaterials.IsZoneTintMaterial(mesh.MaterialOverride);
-			if (existing.Colour == colour && stillOurs)
+			if (existing.Applied && existing.Colour == colour && AlienSceneMaterials.IsZoneTintMaterial(mesh.MaterialOverride))
 			{
 				claimed.Add(mesh);
 				return false;
 			}
 
+			ownBefore = existing.Saved;
 			Restore(mesh, existing);
 			_tinted.Remove(mesh);
 		}
 
-		//The wireframe pass draws a model's edges over it; filling those in solid would erase it
-		if (mesh.IsInGroup(LevelViewerPick.WireframeOverlayGroupName))
+		//The wireframe pass draws a model's edges over it; filling those in solid would erase it. A scene filter's hulls
+		//(occlusion volumes, collision) are drawn in the filter's own colour when it is switched on to look at them
+		if (mesh.IsInGroup(LevelViewerPick.WireframeOverlayGroupName) || mesh.IsInGroup(LevelViewerPick.SceneFilterGroupName))
 			return false;
 
+		//Selected while it was being spawned, with the selection holding its slot: wait for it to let go
+		if (IsHeldBySelection(mesh))
+		{
+			_tinted[mesh] = new Tint { Saved = ownBefore, Colour = colour, Applied = false };
+			claimed.Add(mesh);
+			return false;
+		}
+
+		//What it is drawn with when it is not ours: never one of our own colours, which a restore would put back for good
+		Material own = mesh.MaterialOverride;
+		if (AlienSceneMaterials.IsZoneTintMaterial(own))
+			own = ownBefore;
+
 		//A preview icon is a camera-facing sprite, not a piece of the level: flat-filling it says nothing
-		Material current = mesh.MaterialOverride ?? mesh.GetActiveMaterial(0);
+		Material current = own ?? mesh.GetActiveMaterial(0);
 		if (current == null || PreviewVisualUtility.IsIconBillboardMaterial(current))
 			return false;
 
-		Material tint = AlienSceneMaterials.GetZoneTintMaterial(
-			colour, AlienSceneMaterials.IsDoubleSidedMaterial(current));
+		Material tint = TintFor(colour, current);
 		if (tint == null)
 			return false;
 
 		claimed.Add(mesh);
-
-		//The selection is drawn as itself, textures and all; this waits for it to move on
-		if (IsMeshUnderSelection(mesh))
-		{
-			_tinted[mesh] = new Tint { Saved = mesh.MaterialOverride, Colour = colour, Applied = false };
-			return false;
-		}
-
-		_tinted[mesh] = new Tint { Saved = mesh.MaterialOverride, Colour = colour, Applied = true };
+		_tinted[mesh] = new Tint { Saved = own, Colour = colour, Applied = true };
 		mesh.MaterialOverride = tint;
 		return true;
+	}
+
+	/* The zone colour in a material that draws the way the mesh's own does: both faces where it drew both, and see-through
+	   where it was see-through - a trigger box or sphere is a translucent volume, and filled solid it hid the room it sits in. */
+	private static Material TintFor(Color colour, Material own)
+	{
+		if (PreviewVisualUtility.TryGetTransparentPreviewAlpha(own, out float alpha))
+			return AlienSceneMaterials.GetZoneTintMaterial(new Color(colour.R, colour.G, colour.B, alpha), false);
+		return AlienSceneMaterials.GetZoneTintMaterial(colour, AlienSceneMaterials.IsDoubleSidedMaterial(own));
 	}
 
 	/// <summary>
@@ -284,84 +321,47 @@ public static class LevelViewerZoneHighlight
 	}
 
 	/// <summary>Re-colour anything the selection has since let go of.</summary>
+	/// <remarks>
+	/// Only a selection drawn as its edges alone (Wireframe Transparent) takes a mesh's material slot - the other modes draw
+	/// over the zone colour, which stays, so a selection keeps showing which zone it is in. Run after every selection change.
+	/// </remarks>
 	public static void SyncWithSelection()
 	{
 		foreach (KeyValuePair<MeshInstance3D, Tint> entry in _tinted)
 		{
 			MeshInstance3D mesh = entry.Key;
 			Tint tint = entry.Value;
-			if (tint.Applied || mesh == null || !GodotObject.IsInstanceValid(mesh) || IsMeshUnderSelection(mesh))
+			if (tint.Applied || mesh == null || !GodotObject.IsInstanceValid(mesh) || mesh.IsQueuedForDeletion() || IsHeldBySelection(mesh))
 				continue;
 
-			Material material = AlienSceneMaterials.GetZoneTintMaterial(
-				tint.Colour, AlienSceneMaterials.IsDoubleSidedMaterial(mesh.MaterialOverride ?? mesh.GetActiveMaterial(0)));
+			//What the selection gave back is the mesh's own material - never one of our colours, which a restore would put back for good
+			Material own = mesh.MaterialOverride;
+			if (AlienSceneMaterials.IsZoneTintMaterial(own))
+				own = tint.Saved;
+
+			Material material = TintFor(tint.Colour, own ?? mesh.GetActiveMaterial(0));
 			if (material == null)
 				continue;
 
-			tint.Saved = mesh.MaterialOverride;
+			tint.Saved = own;
 			tint.Applied = true;
 			mesh.MaterialOverride = material;
 		}
 	}
 
 	/// <summary>
-	/// Give the meshes under <paramref name="root"/> their own material back, so a selected entity is
-	/// seen as itself - textures and all - rather than as a flat piece of its zone.
+	/// The material a selection drawn as its edges should put back when it lets go of <paramref name="mesh"/>: the mesh's own,
+	/// not the zone colour it is wearing - which is handed over meanwhile (SyncWithSelection takes it back). Put back the
+	/// colour, a mesh would keep it after zones went off, the restore having already run.
 	/// </summary>
-	public static void ReleaseNode(Node3D root)
+	public static Material LendToSelection(MeshInstance3D mesh)
 	{
-		if (root == null || !GodotObject.IsInstanceValid(root) || _tinted.Count == 0)
-			return;
+		Material current = mesh?.MaterialOverride;
+		if (mesh == null || !_tinted.TryGetValue(mesh, out Tint tint) || !AlienSceneMaterials.IsZoneTintMaterial(current))
+			return current;
 
-		/* The selection's own meshes, found by walking down from it and looked up here: a selection is usually one entity,
-		   and asking every tinted mesh whether the selection is its ancestor (an interop call each) was ~150k calls per
-		   selected node on a DLC map. A selection with more nodes under it than there are tinted meshes scans instead. */
-		List<MeshInstance3D> under = new List<MeshInstance3D>();
-		if (CollectMeshesUnder(root, under, _tinted.Count))
-		{
-			for (int i = 0; i < under.Count; i++)
-			{
-				if (_tinted.TryGetValue(under[i], out Tint found) && found.Applied)
-					Restore(under[i], found);
-			}
-			return;
-		}
-
-		foreach (KeyValuePair<MeshInstance3D, Tint> entry in _tinted)
-		{
-			MeshInstance3D mesh = entry.Key;
-			if (!entry.Value.Applied || mesh == null || !GodotObject.IsInstanceValid(mesh))
-				continue;
-
-			if (mesh != root && !root.IsAncestorOf(mesh))
-				continue;
-
-			Restore(mesh, entry.Value);
-		}
-	}
-
-	/// <summary>The meshes at and under <paramref name="root"/>; false (and a partial list) past <paramref name="limit"/> nodes.</summary>
-	private static bool CollectMeshesUnder(Node root, List<MeshInstance3D> into, int limit)
-	{
-		Stack<Node> pending = new Stack<Node>();
-		pending.Push(root);
-		int visited = 0;
-		while (pending.Count != 0)
-		{
-			Node node = pending.Pop();
-			if (node == null || !GodotObject.IsInstanceValid(node))
-				continue;
-			if (++visited > limit)
-				return false;
-
-			if (node is MeshInstance3D mesh)
-				into.Add(mesh);
-
-			int children = node.GetChildCount();
-			for (int i = 0; i < children; i++)
-				pending.Push(node.GetChild(i));
-		}
-		return true;
+		tint.Applied = false;
+		return tint.Saved != null && GodotObject.IsInstanceValid(tint.Saved) ? tint.Saved : null;
 	}
 
 	/// <summary>
@@ -383,8 +383,7 @@ public static class LevelViewerZoneHighlight
 		mesh.MaterialOverride = tint.Saved != null && GodotObject.IsInstanceValid(tint.Saved) ? tint.Saved : null;
 	}
 
-	/* IsUnderSelection already walks the node's ancestors. This used to walk them too and ask it at every level - depth
-	   squared interop calls per mesh, for every tinted mesh on every selection change: seconds a click on a DLC map
-	   with Show Zones on, packets handled with no frame drawn in between. */
-	private static bool IsMeshUnderSelection(MeshInstance3D mesh) => LevelViewerSelection.IsUnderSelection(mesh);
+	//The selection is drawing it as its edges alone, in the slot the colour goes in (one property read, no tree walk: this is
+	//asked of every coloured mesh on every selection change)
+	private static bool IsHeldBySelection(MeshInstance3D mesh) => LevelViewerHighlightOverlay.IsSelectionWireframe(mesh.MaterialOverride);
 }

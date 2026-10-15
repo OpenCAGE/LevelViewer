@@ -3132,8 +3132,13 @@ public partial class CommandsEditorConnection : Node3D
         if (selectionEntities != null && selectionEntities.Count > 1)
             packet.selection_entities = new List<uint>(selectionEntities);
 
+        packet.selection_input_tick = _localSelectionInputTick;
         return packet;
     }
+
+    //When the latest selection made here (a click, a box, a key) was handled, in GetTickCount milliseconds: OpenCAGE leaves a pick
+    //alone that was made before its own latest selection but reaches it after (Packet.selection_input_tick)
+    private static uint _localSelectionInputTick = 0;
 
     /// <summary>What a viewport click does to the selection that is already there.</summary>
     public enum SelectionChange
@@ -3999,6 +4004,7 @@ public partial class CommandsEditorConnection : Node3D
     private void ApplyLocalSelection(List<uint> pathEntities, List<uint> pathComposites, bool entitySelected,
         List<uint> selectionEntities = null)
     {
+        _localSelectionInputTick = unchecked((uint)System.Environment.TickCount);
         lock (_lock)
         {
             uint previousActiveComposite = PreviewVisibilitySettings.ActiveCompositeId;

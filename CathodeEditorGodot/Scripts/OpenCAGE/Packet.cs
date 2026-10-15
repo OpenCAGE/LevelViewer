@@ -589,6 +589,12 @@ namespace OpenCAGE.UnityConnection
         // but OpenCAGE, below 0 puts the viewer's own back, 0 leaves it (as a packet from before this always did).
         public List<uint> camera_look_through = null;
         public bool camera_look_through_follow = false;
+
+        // Level Viewer -> OpenCAGE, on ENTITY_SELECTED (and the packets that carry a selection along with them): when the click or key
+        // that made the selection was handled, in GetTickCount milliseconds (Environment.TickCount) - the clock OpenCAGE times its own
+        // selections by. A pick made before the user's latest selection in OpenCAGE that only arrives after it is left alone, so the
+        // last thing clicked wins wherever it was clicked. 0, which a viewer from before this sends, is always taken.
+        public uint selection_input_tick = 0;
     }
 
     /// <summary>One point of a spline being edited in the viewport: a position and a rotation (degrees), in Cathode space.</summary>

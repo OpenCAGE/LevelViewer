@@ -3175,19 +3175,24 @@ public partial class AlienScene : Node3D
 
 		List<uint> path = new List<uint>(entityPath);
 		int last = path.Count - 1;
+		//What is in each list already, looked up rather than searched for: a box round thousands of entities searched both per entity
+		HashSet<uint> idsIn = new HashSet<uint>(resolvedIds);
+		HashSet<Node3D> nodesIn = new HashSet<Node3D>(nodes);
 		for (int i = 0; i < selectionEntityIds.Count; i++)
 		{
 			uint entityId = selectionEntityIds[i];
-			if (entityId == 0 || entityId == primaryId || resolvedIds.Contains(entityId))
+			if (entityId == 0 || entityId == primaryId || idsIn.Contains(entityId))
 				continue;
 
 			path[last] = entityId;
 			Node3D node = TryResolveSelectionNode(path, compositePath);
-			if (node == null || !GodotObject.IsInstanceValid(node) || nodes.Contains(node))
+			if (node == null || !GodotObject.IsInstanceValid(node) || nodesIn.Contains(node))
 				continue;
 
 			nodes.Add(node);
+			nodesIn.Add(node);
 			resolvedIds.Add(entityId);
+			idsIn.Add(entityId);
 		}
 
 		return nodes;

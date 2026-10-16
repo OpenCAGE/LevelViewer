@@ -904,6 +904,9 @@ public partial class CommandsEditorConnection : Node3D
             && string.Equals(loadedName, levelName, StringComparison.OrdinalIgnoreCase);
     }
 
+    //The version this viewer speaks, read once: making a whole Packet to ask it, for every packet received, made a dozen collections each time
+    private static readonly int OurPacketVersion = new Packet().version;
+
     private void HandleMessage(string data)
     {
         Packet packet;
@@ -935,7 +938,7 @@ public partial class CommandsEditorConnection : Node3D
             && !WebSocketPacketLog.IsStreamed(packet))
             ViewerLog.Print("Packet: " + packet.packet_event);
 
-        if (packet.version != new Packet().version)
+        if (packet.version != OurPacketVersion)
         {
             ViewerLog.PrintErr("Your Commands Editor is utilising a different API version than this Godot client!!\nPlease ensure both are up to date.");
             return;
@@ -4156,10 +4159,12 @@ public partial class CommandsEditorConnection : Node3D
             return normalized;
 
         normalized.Add(primary);
+        //What is in it already, looked up rather than searched for: a box round thousands of entities searched the list per entity
+        HashSet<uint> added = new HashSet<uint>() { primary };
         for (int i = 0; i < selectionEntities.Count; i++)
         {
             uint entityId = selectionEntities[i];
-            if (entityId != 0 && !normalized.Contains(entityId))
+            if (entityId != 0 && added.Add(entityId))
                 normalized.Add(entityId);
         }
 

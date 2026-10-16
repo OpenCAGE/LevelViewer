@@ -808,7 +808,11 @@ public partial class LevelViewerCamera : Camera3D
         if (_followingGameCamera) return;
 
         //Whether the keys are the viewport's at all is one answer for the frame: asked once here, not once per key below
-        //(seven lots of window, focus and cursor queries every frame)
+        //(seven lots of window, focus and cursor queries every frame) - and only with a movement key down, as without one
+        //nothing moves either way. The answer hit-tests the window under the cursor, which waits on OpenCAGE's thread when
+        //one of its windows is there: asked every frame, a busy OpenCAGE (a level loading, its progress window over the
+        //viewport) held up every frame of the viewer's with it.
+        if (EmbeddedInOpenCage && !AnyEmbeddedMovementKeyDown()) return;
         if (EmbeddedInOpenCage && !ShouldAcceptEmbeddedKeyboardInput()) return;
 
         float speed = MoveSpeed * deltaSeconds;
@@ -854,7 +858,14 @@ public partial class LevelViewerCamera : Camera3D
         if (!EmbeddedInOpenCage)
             return Input.IsKeyPressed(Key.V);
 
-        return ShouldAcceptEmbeddedKeyboardInput() && Win32Input.IsKeyDown(Win32Input.VK_V);
+        //The key first: whose the keys are is the costly question (see ApplyKeyboardMovement), and this is asked per mouse move
+        return Win32Input.IsKeyDown(Win32Input.VK_V) && ShouldAcceptEmbeddedKeyboardInput();
+    }
+
+    private static bool AnyEmbeddedMovementKeyDown()
+    {
+        return Win32Input.IsKeyDown(Win32Input.VK_W) || Win32Input.IsKeyDown(Win32Input.VK_A) || Win32Input.IsKeyDown(Win32Input.VK_S)
+            || Win32Input.IsKeyDown(Win32Input.VK_D) || Win32Input.IsKeyDown(Win32Input.VK_E) || Win32Input.IsKeyDown(Win32Input.VK_Q);
     }
 
     private bool IsMovementKeyDown(Key key)

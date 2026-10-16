@@ -22,10 +22,14 @@
       <DesignTime>True</DesignTime>
     </Compile>
     <!-- CathodeLib's info.dat (the vanilla entity, enum, pin and name tables) is embedded through this resx, so the viewer
-         always has the copy that matches the CathodeLib it was built with. Nothing is shipped beside the exe for it. -->
+         always has the copy that matches the CathodeLib it was built with. Nothing is shipped beside the exe for it.
+         LogicalName: left to the SDK, the resource takes this project's namespace and the link's folders
+         (CathodeEditorGodot.CathodeLib.Properties.Resources), and CathodeLib's Resources class - which asks for
+         CathodeLib.Properties.Resources - never finds it. -->
     <EmbeddedResource Include="..\..\..\CathodeLib\CathodeLib\Properties\Resources.resx" Link="CathodeLib\Properties\Resources.resx">
       <Generator>ResXFileCodeGenerator</Generator>
       <LastGenOutput>Resources.Designer.cs</LastGenOutput>
+      <LogicalName>CathodeLib.Properties.Resources.resources</LogicalName>
     </EmbeddedResource>
   </ItemGroup>
 

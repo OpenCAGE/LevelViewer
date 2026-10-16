@@ -36,9 +36,51 @@ public static class LevelViewerZoneHighlight
 		public Material Saved;
 		public Color Colour;
 		public bool Applied;
+		//The reconcile that last found the mesh still the zones' (see _pass): one that did not lets it go (DropUnclaimed)
+		public int Pass;
 	}
 
 	private static readonly Dictionary<MeshInstance3D, Tint> _tinted = new();
+
+	//Counts reconciles. A Tint stamped with the current one has been claimed by it - a stamp rather than a set of the claimed
+	//meshes, which cost a hash insert per mesh and a lookup per entry afterwards, on every reconcile
+	private static int _pass;
+
+	/// <summary>One mesh the last walk of the level reached, and the colour it was given there.</summary>
+	private readonly struct WalkedMesh
+	{
+		public readonly MeshInstance3D Mesh;
+		public readonly Color Colour;
+		public readonly bool InZone;
+
+		public WalkedMesh(MeshInstance3D mesh, Color colour, bool inZone)
+		{
+			Mesh = mesh;
+			Colour = colour;
+			InZone = inZone;
+		}
+	}
+
+	/* The last walk of the level, for the next reconcile to reuse instead of walking every node again. The walk is most of what a
+	   reconcile costs - a third of a second on a big level - and nearly every reconcile follows a parameter edit, which has
+	   added nothing to the level and taken nothing out of it. Which meshes the walk reaches, and in what colour, comes from the
+	   tree and the resolved zone roots alone. So while nothing under the level has been added, taken out or renamed (SceneTree's
+	   own signals, watched only while there is a walk to keep) and the roots come to the same nodes in the same colours, a
+	   fresh walk would reach the same meshes in the same colours. Each is still reconciled exactly as the walk would do it
+	   (TintMesh), so a material written over a zone colour since is caught just the same. */
+	private static List<WalkedMesh> _walked;
+	private static Dictionary<Node, Color> _walkedRoots;
+	//What each root's path led to at that walk (before an alias or proxy is followed: that is looked at every time, as one
+	//can be pointed somewhere else without the tree changing), path by path in the table's order - and that table
+	private static List<Node3D> _resolvedPaths;
+	private static List<SyncedZone> _resolvedZones;
+	//Set while the tree is being watched for the walk; whatever changes it drops the walk (OnTreeChanged)
+	private static Node3D _watchedRoot;
+	private static AlienScene _watchedScene;
+	private static SceneTree _watchedTree;
+	private static readonly SceneTree.NodeAddedEventHandler _onNodeAdded = OnTreeChanged;
+	private static readonly SceneTree.NodeRemovedEventHandler _onNodeRemoved = OnTreeChanged;
+	private static readonly SceneTree.NodeRenamedEventHandler _onNodeRenamed = OnTreeChanged;
 
 	private static List<SyncedZone> _zones = new();
 
@@ -66,6 +108,8 @@ public static class LevelViewerZoneHighlight
 
 	public static void Clear()
 	{
+		ForgetWalk();
+
 		foreach (KeyValuePair<MeshInstance3D, Tint> entry in _tinted)
 			Restore(entry.Key, entry.Value);
 
@@ -110,6 +154,19 @@ public static class LevelViewerZoneHighlight
 
 		System.Diagnostics.Stopwatch timer = System.Diagnostics.Stopwatch.StartNew();
 
+		/* The tree as the last walk found it (see _walked), and the same table: each root's path then leads to the node it led to
+		   then, so that is taken rather than looked up again name by name. Otherwise the tree is watched from here on - what the
+		   paths resolve to is part of what a kept walk stands for. */
+		bool treeAsWalked = _walked != null && ReferenceEquals(_watchedRoot, root) && ReferenceEquals(_resolvedZones, _zones)
+			&& ResolvedPathsStillHeld();
+		if (!treeAsWalked)
+		{
+			ForgetWalk();
+			Watch(scene, root);
+		}
+		List<Node3D> resolvedPaths = treeAsWalked ? _resolvedPaths : new List<Node3D>();
+		int pathIndex = 0;
+
 		//Keyed by the node itself: Godot keeps one managed wrapper per node, and GetInstanceId() is an
 		//interop call this would otherwise make a quarter of a million times per rebuild
 		Dictionary<Node, Color> coloursByRootNode = new Dictionary<Node, Color>();
@@ -127,7 +184,16 @@ public static class LevelViewerZoneHighlight
 			foreach (List<uint> path in zone.roots)
 			{
 				LevelViewerSentMessages.PumpIfDue();
-				Node3D node = scene.TryResolveInstancePathNode(path);
+				Node3D node;
+				if (treeAsWalked)
+				{
+					node = resolvedPaths[pathIndex++];
+				}
+				else
+				{
+					node = scene.TryResolveInstancePathNode(path);
+					resolvedPaths.Add(node);
+				}
 				//An alias or proxy's node is an empty stand-in; what it points at is what is drawn. OpenCAGE follows them
 				//itself (EntityInstancePath.TryResolveTarget) - this is for one it could not, which the viewer has wired
 				if (node is EntityOverride pointer && pointer.PointedEntity != null)
@@ -148,21 +214,164 @@ public static class LevelViewerZoneHighlight
 				drawnZones++;
 		}
 
-		HashSet<MeshInstance3D> claimed = new HashSet<MeshInstance3D>();
-		int recoloured = TintScene(scene, root, coloursByRootNode, claimed, out int walked, out int unzoned);
-		int released = DropUnclaimed(claimed);
+		_pass++;
+		int recoloured, walked, unzoned;
+		bool reused = treeAsWalked && SameRoots(_walkedRoots, coloursByRootNode);
+		if (reused)
+		{
+			recoloured = TintWalked(_walked, out walked, out unzoned);
+		}
+		else
+		{
+			//No walk to reuse, or an alias or proxy has been pointed somewhere else since (the tree itself as it was, and still watched)
+			_walked = null;
+			List<WalkedMesh> meshes = new List<WalkedMesh>();
+			recoloured = TintScene(scene, root, coloursByRootNode, meshes, out walked, out unzoned);
+			//Kept only while the watch holds: anything added, taken out or renamed since it started has dropped it already
+			if (_watchedRoot != null)
+			{
+				_walked = meshes;
+				_walkedRoots = coloursByRootNode;
+				_resolvedPaths = resolvedPaths;
+				_resolvedZones = _zones;
+			}
+		}
+		int released = DropUnclaimed();
 
 		ViewerLog.Print("[Zones] " + (walked - unzoned) + " of " + walked + " meshes across " + drawnZones + " of "
 			+ _zones.Count + " zones, " + unzoned + " in no zone (white), in " + timer.ElapsedMilliseconds + "ms ("
 			+ recoloured + " recoloured, " + released + " released)"
-			+ (unresolvedRoots != 0 ? " (" + unresolvedRoots + " roots not in the scene)" : "") + ".");
+			+ (unresolvedRoots != 0 ? " (" + unresolvedRoots + " roots not in the scene)" : "")
+			+ (reused ? " (tree unchanged: the last walk reused)" : "") + ".");
+	}
+
+	//The same root nodes in the same colours
+	private static bool SameRoots(Dictionary<Node, Color> before, Dictionary<Node, Color> now)
+	{
+		if (before == null || before.Count != now.Count)
+			return false;
+
+		foreach (KeyValuePair<Node, Color> entry in now)
+		{
+			if (!before.TryGetValue(entry.Key, out Color colour) || colour != entry.Value)
+				return false;
+		}
+
+		return true;
+	}
+
+	/// <summary>Reconcile the meshes the last walk reached, in its order and its colours, without walking the tree.</summary>
+	private static int TintWalked(List<WalkedMesh> meshes, out int walked, out int unzoned)
+	{
+		int recoloured = 0;
+		int seen = 0;
+		int outside = 0;
+
+		for (int i = 0; i < meshes.Count; i++)
+		{
+			LevelViewerSentMessages.PumpIfDue();
+			WalkedMesh entry = meshes[i];
+			//Passed over as the walk passes over them: freed, or on the way out (see TintScene)
+			if (!GodotObject.IsInstanceValid(entry.Mesh) || entry.Mesh.IsQueuedForDeletion())
+				continue;
+
+			seen++;
+			if (!entry.InZone)
+				outside++;
+			if (TintMesh(entry.Mesh, entry.Colour))
+				recoloured++;
+		}
+
+		walked = seen;
+		unzoned = outside;
+		return recoloured;
+	}
+
+	//Start watching the level for anything added under it or taken out of it, for the walk about to be made
+	private static void Watch(AlienScene scene, Node3D root)
+	{
+		SceneTree tree = root.IsInsideTree() ? root.GetTree() : null;
+		if (tree == null)
+			return;
+
+		tree.NodeAdded += _onNodeAdded;
+		tree.NodeRemoved += _onNodeRemoved;
+		tree.NodeRenamed += _onNodeRenamed;
+		_watchedTree = tree;
+		_watchedRoot = root;
+		_watchedScene = scene;
+	}
+
+	private static void ForgetWalk()
+	{
+		_walked = null;
+		_walkedRoots = null;
+		_resolvedPaths = null;
+		_resolvedZones = null;
+		if (_watchedTree != null && GodotObject.IsInstanceValid(_watchedTree))
+		{
+			_watchedTree.NodeAdded -= _onNodeAdded;
+			_watchedTree.NodeRemoved -= _onNodeRemoved;
+			_watchedTree.NodeRenamed -= _onNodeRenamed;
+		}
+		_watchedTree = null;
+		_watchedRoot = null;
+		_watchedScene = null;
+	}
+
+	//One node per path of the table, each still there (or never found): a guard - anything freed was taken out of the tree first
+	private static bool ResolvedPathsStillHeld()
+	{
+		if (_resolvedPaths == null)
+			return false;
+
+		int paths = 0;
+		foreach (SyncedZone zone in _zones)
+		{
+			if (zone?.roots != null)
+				paths += zone.roots.Count;
+		}
+		if (paths != _resolvedPaths.Count)
+			return false;
+
+		for (int i = 0; i < _resolvedPaths.Count; i++)
+		{
+			if (_resolvedPaths[i] != null && !GodotObject.IsInstanceValid(_resolvedPaths[i]))
+				return false;
+		}
+
+		return true;
+	}
+
+	/* A node added anywhere in the tree, taken out of it or renamed (a path goes by names). One under the level drops the walk -
+	   unless it is inside one of the viewport's own overlays (or is one), which the walk never goes into and no path names: a
+	   selected light's range is rebuilt on every edit. */
+	private static void OnTreeChanged(Node node)
+	{
+		Node3D root = _watchedRoot;
+		if (root == null)
+			return;
+
+		if (GodotObject.IsInstanceValid(root) && node != null && GodotObject.IsInstanceValid(node))
+		{
+			if (!ReferenceEquals(node, root) && !root.IsAncestorOf(node))
+				return;
+
+			for (Node n = node; n != null && !ReferenceEquals(n, root); n = n.GetParent())
+			{
+				if (_watchedScene.IsViewportOverlay(n))
+					return;
+			}
+		}
+
+		ForgetWalk();
 	}
 
 	private static int TintScene(
 		AlienScene scene,
 		Node3D root,
 		Dictionary<Node, Color> coloursByRootNode,
-		HashSet<MeshInstance3D> claimed,
+		List<WalkedMesh> reached,
 		out int walked,
 		out int unzoned)
 	{
@@ -207,7 +416,9 @@ public static class LevelViewerZoneHighlight
 				seen++;
 				if (!inZone)
 					outside++;
-				if (TintMesh(mesh, inZone ? colour : UnzonedColour, claimed))
+				Color meshColour = inZone ? colour : UnzonedColour;
+				reached.Add(new WalkedMesh(mesh, meshColour, inZone));
+				if (TintMesh(mesh, meshColour))
 					recoloured++;
 			}
 
@@ -224,25 +435,28 @@ public static class LevelViewerZoneHighlight
 	}
 
 	/// <summary>Bring one mesh to the colour it should be. True when that meant actually writing to it.</summary>
-	private static bool TintMesh(MeshInstance3D mesh, Color colour, HashSet<MeshInstance3D> claimed)
+	private static bool TintMesh(MeshInstance3D mesh, Color colour)
 	{
 		Material ownBefore = null;
 		if (_tinted.TryGetValue(mesh, out Tint existing))
 		{
+			//Read once for both questions below (nothing between them writes it): an interop call, on every mesh
+			Material wearing = mesh.MaterialOverride;
+
 			//The selection is drawing it as its edges and has the material slot; it hands back the mesh's own material
 			//when it moves on, and SyncWithSelection colours it then - in whatever colour it should be by that time
-			if (IsHeldBySelection(mesh))
+			if (LevelViewerHighlightOverlay.IsSelectionWireframe(wearing))
 			{
 				existing.Colour = colour;
 				existing.Applied = false;
-				claimed.Add(mesh);
+				existing.Pass = _pass;
 				return false;
 			}
 
 			//Already the right colour and still carrying it: the common case, and free
-			if (existing.Applied && existing.Colour == colour && AlienSceneMaterials.IsZoneTintMaterial(mesh.MaterialOverride))
+			if (existing.Applied && existing.Colour == colour && AlienSceneMaterials.IsZoneTintMaterial(wearing))
 			{
-				claimed.Add(mesh);
+				existing.Pass = _pass;
 				return false;
 			}
 
@@ -259,8 +473,7 @@ public static class LevelViewerZoneHighlight
 		//Selected while it was being spawned, with the selection holding its slot: wait for it to let go
 		if (IsHeldBySelection(mesh))
 		{
-			_tinted[mesh] = new Tint { Saved = ownBefore, Colour = colour, Applied = false };
-			claimed.Add(mesh);
+			_tinted[mesh] = new Tint { Saved = ownBefore, Colour = colour, Applied = false, Pass = _pass };
 			return false;
 		}
 
@@ -278,8 +491,7 @@ public static class LevelViewerZoneHighlight
 		if (tint == null)
 			return false;
 
-		claimed.Add(mesh);
-		_tinted[mesh] = new Tint { Saved = own, Colour = colour, Applied = true };
+		_tinted[mesh] = new Tint { Saved = own, Colour = colour, Applied = true, Pass = _pass };
 		mesh.MaterialOverride = tint;
 		return true;
 	}
@@ -297,12 +509,12 @@ public static class LevelViewerZoneHighlight
 	/// Let go of everything no zone reached this time - including meshes that no longer exist, which
 	/// is most of what turns up here: editing a material respawns every model reference showing it.
 	/// </summary>
-	private static int DropUnclaimed(HashSet<MeshInstance3D> claimed)
+	private static int DropUnclaimed()
 	{
 		List<MeshInstance3D> going = null;
 		foreach (KeyValuePair<MeshInstance3D, Tint> entry in _tinted)
 		{
-			if (claimed.Contains(entry.Key))
+			if (entry.Value.Pass == _pass)
 				continue;
 
 			(going ??= new List<MeshInstance3D>()).Add(entry.Key);

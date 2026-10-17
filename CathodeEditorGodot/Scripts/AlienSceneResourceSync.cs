@@ -242,7 +242,7 @@ public partial class AlienScene
 		if (snapshot.Shaders != null)
 			ReconcileShaders(level.Shaders, snapshot.Shaders, shaderMap, changedShaders, pendingWrites, counts);
 		if (snapshot.Materials != null)
-			ReconcileMaterials(level.Materials, snapshot.Materials, textureMap, shaderMap, materialMap, changedMaterials, pendingWrites, counts);
+			ReconcileMaterials(level.Materials, snapshot.Materials, packet.resource_removed_materials, textureMap, shaderMap, materialMap, changedMaterials, pendingWrites, counts);
 
 		//A material draws with its shader's sampler layout and its textures' pixels: a change to either is a change to it
 		if (changedTextures.Count > 0 || changedShaders.Count > 0)
@@ -572,9 +572,13 @@ public partial class AlienScene
 
 	/* Materials are matched by position. The snapshot's references are first pointed at the live
 	   textures and shaders they stand for, after which Material's own equality is the right test. */
+	/* Materials are matched by position. A deleted one would otherwise hand every material after it its
+	   neighbour's content, so the positions the sender says are gone are taken out first and the rest
+	   line up again; anything left over past the snapshot's end goes as well. */
 	private static void ReconcileMaterials(
 		Materials live,
 		Materials snapshot,
+		List<int> removedPositions,
 		Dictionary<Textures.TEX4, Textures.TEX4> textureMap,
 		Dictionary<Shaders.Shader, Shaders.Shader> shaderMap,
 		Dictionary<Materials.Material, Materials.Material> map,
@@ -582,11 +586,29 @@ public partial class AlienScene
 		List<Action> pendingWrites,
 		ReconcileCounts counts)
 	{
+		HashSet<int> removed = new HashSet<int>(removedPositions ?? new List<int>());
+		List<Materials.Material> survivors = new List<Materials.Material>(live.Entries.Count);
+		for (int i = 0; i < live.Entries.Count; i++)
+		{
+			if (removed.Contains(i))
+			{
+				changed.Add(live.Entries[i]);
+				counts.MaterialsRemoved++;
+			}
+			else
+				survivors.Add(live.Entries[i]);
+		}
+
+		List<Materials.Material> entries = new List<Materials.Material>(snapshot.Entries.Count);
 		for (int i = 0; i < snapshot.Entries.Count; i++)
 		{
 			Materials.Material incoming = snapshot.Entries[i];
 			if (incoming == null)
+			{
+				if (i < survivors.Count)
+					entries.Add(survivors[i]);
 				continue;
+			}
 
 			incoming.Shader = MapReference(shaderMap, incoming.Shader);
 			foreach (TexturePtr reference in incoming.TextureReferences)
@@ -595,31 +617,35 @@ public partial class AlienScene
 					reference.Texture = MapReference(textureMap, reference.Texture);
 			}
 
-			if (i < live.Entries.Count)
+			if (i < survivors.Count)
 			{
-				Materials.Material existing = live.Entries[i];
+				Materials.Material existing = survivors[i];
 				if (!(existing == incoming))
 				{
 					changed.Add(existing);
 					pendingWrites.Add(() => CopyMaterialInto(incoming, existing));
 				}
 				map[incoming] = existing;
+				entries.Add(existing);
 			}
 			else
 			{
 				map[incoming] = incoming;
-				pendingWrites.Add(() => live.Entries.Add(incoming));
+				entries.Add(incoming);
 				counts.MaterialsAdded++;
 			}
 		}
 
-		for (int i = snapshot.Entries.Count; i < live.Entries.Count; i++)
+		for (int i = snapshot.Entries.Count; i < survivors.Count; i++)
 		{
-			changed.Add(live.Entries[i]);
+			changed.Add(survivors[i]);
 			counts.MaterialsRemoved++;
 		}
-		if (snapshot.Entries.Count < live.Entries.Count)
-			pendingWrites.Add(() => live.Entries.RemoveRange(snapshot.Entries.Count, live.Entries.Count - snapshot.Entries.Count));
+		pendingWrites.Add(() =>
+		{
+			live.Entries.Clear();
+			live.Entries.AddRange(entries);
+		});
 	}
 
 	private static T MapReference<T>(Dictionary<T, T> map, T reference) where T : class

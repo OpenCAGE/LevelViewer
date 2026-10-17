@@ -363,6 +363,9 @@ namespace OpenCAGE.UnityConnection
         public string resource_sync_models = null;
         public List<string> resource_changed_textures = new List<string>();
         public List<string> resource_changed_models = new List<string>();
+        //Materials are matched by position, so a deleted one would shift every material after it onto its
+        //neighbour: the positions (in the receiver's current table) that are gone, to be dropped first
+        public List<int> resource_removed_materials = new List<int>();
 
         //Files dropped on the viewport window (FILES_DROPPED): absolute paths, as the OS gave them
         public List<string> dropped_files = new List<string>();

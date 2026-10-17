@@ -616,7 +616,7 @@ public partial class LevelViewerTransformGizmo : Node3D
         if (!_isDragging)
             GlobalPosition = GetPivot();
 
-        GlobalBasis = GetOrientationBasis();
+        GlobalBasis = GetDrawnBasis();
 
         UpdateWorldScale();
         Scale   = Vector3.One * _worldScale;
@@ -1607,6 +1607,23 @@ public partial class LevelViewerTransformGizmo : Node3D
 
     private bool IsRotateMode
         => _mode == GizmoMode.RotateLocal || _mode == GizmoMode.RotateWorld;
+
+    /* How the handles are drawn. World rings sit on the world's axes, so they stayed still while the selection turned under
+       them; during the drag they turn with it, by as much as the anchor has actually turned (snap included), as the local
+       rings do - and are back on the world's axes once it ends. Only the drawing: the drag and hit testing keep to
+       GetOrientationBasis. A turn is only read once the drag has its start rotation, which a rotate drag always has. */
+    private Basis GetDrawnBasis()
+    {
+        if (_isDragging && !_dragIsPivot && _mode == GizmoMode.RotateWorld
+            && _target != null && GodotObject.IsInstanceValid(_target))
+        {
+            Quaternion turned = GetGlobalQuaternion(_target) * _dragStartGlobalQuat.Inverse();
+            if (IsFiniteQuaternion(turned))
+                return new Basis(turned.Normalized());
+        }
+
+        return GetOrientationBasis();
+    }
 
     private Basis GetOrientationBasis()
     {

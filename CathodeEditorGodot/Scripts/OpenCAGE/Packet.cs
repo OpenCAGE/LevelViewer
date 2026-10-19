@@ -433,6 +433,13 @@ namespace OpenCAGE.UnityConnection
         // which is also what a viewer from before this sends, so the two still talk.
         public uint gesture = 0;
 
+        // Level Viewer -> OpenCAGE, on ENTITY_PARAMETER_MODIFIED: 0 = an edit, as it always was. 1 = a gizmo drag still
+        // under way, sent a few times a second: where the entity is now, for OpenCAGE to show (the inspector, Live Link)
+        // without recording it - the drag's own edit follows when it is let go. 2 = that drag ended without an edit for
+        // this entity (called off, or let go where it started): OpenCAGE puts back what the level holds. A viewer from
+        // before this sends 0, and an OpenCAGE from before this reads 1 and 2 as edits, so the two are built together.
+        public int transform_preview = 0;
+
         // Level Viewer -> OpenCAGE, on ENTITY_ADDED: more entities of the selection this packet carries are
         // still to be added after it (a box in advanced deep select makes an alias for every nested entity it
         // takes), so OpenCAGE adds this one without selecting anything yet. The last packet of the run has it
@@ -483,6 +490,10 @@ namespace OpenCAGE.UnityConnection
         public bool context_menu_can_unhide_all = false;
         public bool context_menu_can_step_into = false;
         public bool context_menu_can_select_parent = false;
+
+        // With it: the focus entry frames all the geometry rather than the selection, as Z does with nothing selected
+        // in the viewport - so OpenCAGE names it for that. False from a viewer before this, which greyed it out instead.
+        public bool context_menu_focus_frames_all = false;
 
         // OpenCAGE -> Level Viewer, on VIEWPORT_ACTION: which action (a ViewportAction). 0 = none, which is
         // also what a packet from before this carries.

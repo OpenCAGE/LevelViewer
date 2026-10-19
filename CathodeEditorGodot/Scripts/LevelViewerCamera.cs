@@ -1136,7 +1136,8 @@ public partial class LevelViewerCamera : Camera3D
         connection.SendViewportContextMenuRequest(
             this,
             screenPosition,
-            canFocus: CanFocusSelectedEntity(),
+            canFocus: CanFocusSelectedEntity(out bool focusFramesAll),
+            focusFramesAll: focusFramesAll,
             canHide: _alienScene != null && _alienScene.CanHideSelectedEntity(),
             canUnhideAll: LevelViewerEntityHide.HasAny);
     }
@@ -1182,13 +1183,24 @@ public partial class LevelViewerCamera : Camera3D
         }
     }
 
-    private bool CanFocusSelectedEntity()
+    /// <summary>
+    /// Z would move the camera, as <see cref="FocusSelectedEntity"/> decides: onto the selection, or - with nothing
+    /// selected - out to all the geometry on show, which <paramref name="framesAll"/> reports so the menu can say so.
+    /// </summary>
+    private bool CanFocusSelectedEntity(out bool framesAll)
     {
+        framesAll = false;
         //Following the game's camera, the focus does nothing: the menu greys it out
-        return !_followingGameCamera
-            && _alienScene != null
-            && _alienScene.TryGetSelectedEntity(out Node3D selected)
-            && _alienScene.TryResolveFocusTarget(selected, maxExtent: 0f, out _, out _);
+        if (_followingGameCamera || _alienScene == null)
+            return false;
+
+        if (!_alienScene.TryGetSelectedEntity(out Node3D selected))
+        {
+            framesAll = true;
+            return _alienScene.TryGetVisibleGeometryBounds(out _);
+        }
+
+        return _alienScene.TryResolveFocusTarget(selected, maxExtent: 0f, out _, out _);
     }
 
     /// <summary>H: hide the selected entity until Shift+H (or the composite changes), and let go of it.</summary>

@@ -20,6 +20,25 @@ public partial class LevelViewerTransformGizmo : Node3D
     /// </summary>
     public Action<int, Vector3, Vector3, uint> OnTransformChanged;
 
+    /// <summary>
+    /// While a drag is under way, a few times a second (<see cref="PreviewIntervalMs"/>): where each target it is moving
+    /// is now, with the same args as <see cref="OnTransformChanged"/>, so the editor can follow the move as it happens.
+    /// Nothing is recorded from it: <see cref="OnTransformChanged"/> is still the edit, when the drag is let go.
+    /// </summary>
+    public Action<int, Vector3, Vector3, uint> OnTransformPreview;
+
+    /// <summary>
+    /// A target <see cref="OnTransformPreview"/> showed moving gets no edit after all - the drag was called off, ended as
+    /// a click, or left it where it started - so the editor shows it where the level has it again. Args: its index in
+    /// the selection, and the gesture.
+    /// </summary>
+    public Action<int, uint> OnTransformPreviewEnded;
+
+    /// <summary>The least time between two <see cref="OnTransformPreview"/>s of one drag.</summary>
+    public const ulong PreviewIntervalMs = 66;
+    private ulong _lastPreviewMs;
+    private bool _previewSent;
+
     /// <summary>Fired once when a drag ends — use for pick-cache invalidation (not every mouse-move frame).</summary>
     public Action<Node3D> OnDragCommitted;
 
@@ -505,6 +524,7 @@ public partial class LevelViewerTransformGizmo : Node3D
         {
             if (GodotObject.IsInstanceValid(_targets[i]))
                 _targets[i].Transform = _dragStartTransforms[i];
+            EndPreview(i);
         }
 
         //Handles a Ctrl+Shift drag was moving go back too
@@ -519,6 +539,34 @@ public partial class LevelViewerTransformGizmo : Node3D
         _dragIsClone   = false;
         _dragIsPivot   = false;
         _dragAxis      = DragAxis.None;
+        _previewSent   = false;
+        _lastPreviewMs = 0;
+    }
+
+    /* The drag so far, for the editor to follow: at once, then at most every PreviewIntervalMs. Not for a drag of the
+       handles alone, which moves nothing in the level. */
+    private void PreviewDrag()
+    {
+        if (OnTransformPreview == null || _dragIsPivot)
+            return;
+        ulong now = Time.GetTicksMsec();
+        if (_previewSent && now - _lastPreviewMs < PreviewIntervalMs)
+            return;
+        _lastPreviewMs = now;
+        _previewSent = true;
+        for (int i = 0; i < _targets.Count; i++)
+        {
+            Node3D target = _targets[i];
+            if (target != null && GodotObject.IsInstanceValid(target))
+                OnTransformPreview(i, target.Position, target.RotationDegrees, _gesture);
+        }
+    }
+
+    /* This target is getting no edit from the drag: the editor takes back what the previews showed it */
+    private void EndPreview(int index)
+    {
+        if (_previewSent)
+            OnTransformPreviewEnded?.Invoke(index, _gesture);
     }
 
     /// <summary>Where the handles sit: on the entity for one, in the middle of them for several.</summary>
@@ -1006,7 +1054,8 @@ public partial class LevelViewerTransformGizmo : Node3D
 
         ApplyDragSnap();
 
-        // Sync to OpenCAGE / all entity instances only on CommitDrag — not every mouse-move frame.
+        // The edit (OpenCAGE, every instance of the entity) is made on CommitDrag; this only lets the editor follow along
+        PreviewDrag();
     }
 
     /// <summary>
@@ -1150,6 +1199,7 @@ public partial class LevelViewerTransformGizmo : Node3D
             if (i < _dragStartTransforms.Count && IsSameTransform(target.Transform, _dragStartTransforms[i]))
             {
                 target.Transform = _dragStartTransforms[i];
+                EndPreview(i);
                 continue;
             }
 

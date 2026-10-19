@@ -343,6 +343,8 @@ public partial class CommandsEditorConnection : Node3D
         _transformGizmo = new LevelViewerTransformGizmo();
         _transformGizmo.Name = "TransformGizmo";
         _transformGizmo.OnTransformChanged = OnGizmoTransformChanged;
+        _transformGizmo.OnTransformPreview = OnGizmoTransformPreview;
+        _transformGizmo.OnTransformPreviewEnded = OnGizmoTransformPreviewEnded;
         _transformGizmo.OnDragCommitted = OnGizmoDragCommitted;
         _transformGizmo.OnDuplicateRequested = SendEntityDuplicateRequest;
         _transformGizmo.OnCloneCancelled = SendGestureCancelRequest;
@@ -2204,10 +2206,10 @@ public partial class CommandsEditorConnection : Node3D
     /// A right click here wants the context menu (issue 704). OpenCAGE draws it, themed with the rest of the
     /// editor, so this sends only what it can't know: where the click landed, and which entries have anything
     /// to act on. False when there is no OpenCAGE to draw one - the standalone viewer has no menu.
-    /// <paramref name="canFocus"/>, <paramref name="canHide"/> and <paramref name="canUnhideAll"/> are the
-    /// camera's and the scene's to answer; the rest is answered here.
+    /// <paramref name="canFocus"/>, <paramref name="focusFramesAll"/>, <paramref name="canHide"/> and
+    /// <paramref name="canUnhideAll"/> are the camera's and the scene's to answer; the rest is answered here.
     /// </summary>
-    public bool SendViewportContextMenuRequest(Camera3D camera, Vector2 screenPosition, bool canFocus, bool canHide, bool canUnhideAll)
+    public bool SendViewportContextMenuRequest(Camera3D camera, Vector2 screenPosition, bool canFocus, bool focusFramesAll, bool canHide, bool canUnhideAll)
     {
         if (!IsWebSocketConnectedSafe())
             return false;
@@ -2224,6 +2226,7 @@ public partial class CommandsEditorConnection : Node3D
             context_menu_has_selection = HasEntitySelection,
             context_menu_can_paste = CanPasteEntities,
             context_menu_can_focus = canFocus,
+            context_menu_focus_frames_all = focusFramesAll,
             context_menu_can_snap_to_floor = CanSnapSelectionToFloor(),
             context_menu_can_hide = canHide,
             context_menu_can_unhide_all = canUnhideAll,
@@ -4450,6 +4453,59 @@ public partial class CommandsEditorConnection : Node3D
             + " | pos=" + (target?.Position.ToString() ?? "?"));
     }
 
+    /* The path the gizmo's target at <paramref name="targetIndex"/> (its place in the selection) is addressed by:
+       everything selected together shares the selected entity's path, so each one's path is that path with its own id
+       on the end. False with nothing selected, or nothing to address that target by. */
+    private bool TryGizmoTargetPath(int targetIndex, out List<uint> pathEntities, out List<uint> pathComposites)
+    {
+        bool entitySelected;
+        List<uint> gizmoTargetEntityIds;
+        lock (_lock)
+        {
+            pathEntities   = _pathEntities;
+            pathComposites = _pathComposites;
+            entitySelected = _entitySelected;
+            gizmoTargetEntityIds = _gizmoTargetEntityIds;
+        }
+
+        if (!entitySelected || pathEntities == null || pathEntities.Count == 0 || pathComposites == null || pathComposites.Count == 0)
+            return false;
+
+        uint movedEntityId = gizmoTargetEntityIds != null && targetIndex >= 0 && targetIndex < gizmoTargetEntityIds.Count
+            ? gizmoTargetEntityIds[targetIndex]
+            : 0;
+        if (movedEntityId != 0 && movedEntityId != pathEntities[pathEntities.Count - 1])
+        {
+            pathEntities = new List<uint>(pathEntities);
+            pathEntities[pathEntities.Count - 1] = movedEntityId;
+        }
+        else if (movedEntityId == 0 && targetIndex != 0)
+        {
+            return false; //nothing to address it by
+        }
+        return true;
+    }
+
+    /* A drag still under way has moved this target: OpenCAGE is told where it is now (transform_preview 1), to follow in
+       the inspector and Live Link. Nothing changes on this side - the drag's own edit does that when it is let go. Not
+       for a spline point (its working copy is the spline editor's), nor in Animation Mode (the drag becomes a keyframe). */
+    private void OnGizmoTransformPreview(int targetIndex, Vector3 godotPos, Vector3 godotRotDeg, uint gesture)
+    {
+        if (SplineEdit.Active || AnimationPreview.Active)
+            return;
+        if (TryGizmoTargetPath(targetIndex, out List<uint> pathEntities, out List<uint> pathComposites))
+            SendEntityTransform(godotPos, godotRotDeg, pathEntities, pathComposites, gesture, 1);
+    }
+
+    /* The drag made no edit to that target after all: OpenCAGE puts back what the level holds (transform_preview 2) */
+    private void OnGizmoTransformPreviewEnded(int targetIndex, uint gesture)
+    {
+        if (SplineEdit.Active || AnimationPreview.Active)
+            return;
+        if (TryGizmoTargetPath(targetIndex, out List<uint> pathEntities, out List<uint> pathComposites))
+            SendEntityTransform(Vector3.Zero, Vector3.Zero, pathEntities, pathComposites, gesture, 2);
+    }
+
     /* One of the gizmo's targets finished being dragged. <paramref name="targetIndex"/> is its place
        in the selection, which names the entity: everything selected together shares the selected
        entity's path, so each one's path is that path with its own id on the end. <paramref name="gesture"/>
@@ -4473,33 +4529,8 @@ public partial class CommandsEditorConnection : Node3D
             return;
         }
 
-        List<uint> pathEntities;
-        List<uint> pathComposites;
-        bool entitySelected;
-        List<uint> gizmoTargetEntityIds;
-        lock (_lock)
-        {
-            pathEntities   = _pathEntities;
-            pathComposites = _pathComposites;
-            entitySelected = _entitySelected;
-            gizmoTargetEntityIds = _gizmoTargetEntityIds;
-        }
-
-        if (!entitySelected || pathEntities == null || pathEntities.Count == 0 || pathComposites == null || pathComposites.Count == 0)
+        if (!TryGizmoTargetPath(targetIndex, out List<uint> pathEntities, out List<uint> pathComposites))
             return;
-
-        uint movedEntityId = gizmoTargetEntityIds != null && targetIndex >= 0 && targetIndex < gizmoTargetEntityIds.Count
-            ? gizmoTargetEntityIds[targetIndex]
-            : 0;
-        if (movedEntityId != 0 && movedEntityId != pathEntities[pathEntities.Count - 1])
-        {
-            pathEntities = new List<uint>(pathEntities);
-            pathEntities[pathEntities.Count - 1] = movedEntityId;
-        }
-        else if (movedEntityId == 0 && targetIndex != 0)
-        {
-            return; //nothing to address it by
-        }
 
         ShortGuid compositeId = new ShortGuid(pathComposites[pathComposites.Count - 1]);
         ShortGuid entityId = new ShortGuid(pathEntities[pathEntities.Count - 1]);
@@ -4549,10 +4580,11 @@ public partial class CommandsEditorConnection : Node3D
     /// Send a position parameter update packet to OpenCAGE for the currently selected entity.
     /// <paramref name="godotPos"/> and <paramref name="godotRotDeg"/> are in Godot parent-local space
     /// (matches the entity position parameter, not GlobalPosition). <paramref name="gesture"/> is the
-    /// drag it came from (<see cref="LevelViewerTransformGizmo.NextGesture"/>), or 0.
+    /// drag it came from (<see cref="LevelViewerTransformGizmo.NextGesture"/>), or 0. <paramref name="preview"/> is the
+    /// packet's <see cref="Packet.transform_preview"/>: 0 for the edit itself.
     /// </summary>
     public void SendEntityTransform(Vector3 godotPos, Vector3 godotRotDeg,
-        List<uint> pathEntities, List<uint> pathComposites, uint gesture = 0)
+        List<uint> pathEntities, List<uint> pathComposites, uint gesture = 0, int preview = 0)
     {
         if (pathComposites == null || pathComposites.Count == 0 ||
             pathEntities   == null || pathEntities.Count   == 0)
@@ -4581,9 +4613,17 @@ public partial class CommandsEditorConnection : Node3D
             entity          = pathEntities[pathEntities.Count - 1],
             parameters      = new System.Collections.Generic.List<SyncedParameter>() { sync },
             gesture         = gesture,
+            transform_preview = preview,
         };
 
         TryFillEntityMetadata(packet);
+
+        //A preview is never echoed back: nothing to hold off
+        if (preview != 0)
+        {
+            SendMessage(packet);
+            return;
+        }
 
         _suppressParameterResync = true;
         try

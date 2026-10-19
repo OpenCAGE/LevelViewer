@@ -1,12 +1,18 @@
 uniform sampler2D separate_alpha_map : source_color, filter_linear_mipmap_anisotropic;
 uniform bool use_separate_alpha_map = false;
 uniform bool separate_alpha_from_green = false;
+// SEPARATE_ALPHA_MAP_USE_GREEN_CHANNEL on CA_ENVIRONMENT: retail samples the map's FIRST channel (.x) there, whatever the
+// name says (CA_DECAL_ENVIRONMENT's reads green); its glass maps are cyan, so green would make clear glass solid
+uniform bool separate_alpha_from_red = false;
 uniform vec2 separate_alpha_uv_mult = vec2(1.0);
 uniform bool alpha_from_luminance = false;
 uniform bool alpha_cutout = false;
 uniform float alpha_cutout_threshold = 0.5;
 
 float model_reference_sample_mask(vec4 sample) {
+	if (separate_alpha_from_red) {
+		return sample.r;
+	}
 	if (alpha_from_luminance) {
 		return separate_alpha_from_green
 			? sample.g

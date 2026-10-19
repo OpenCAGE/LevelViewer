@@ -205,6 +205,28 @@ public static class AlienSceneShaderParams
 		return Mathf.Clamp(GetFloat(shader, material, (int)CA_ENVIRONMENT.PARAMETERS.OPACITY_MODIFIER_VALUE, 1f), 0f, 1f);
 	}
 
+	/// <summary>
+	/// Whether this is a CA_ENVIRONMENT GLASS material, and its transmission constants if so. Retail draws glass as
+	/// absorption through GLASS_TINT at GLASS_DENSITY (the glass variant in AlienSceneMaterials), so its DIFFUSE_TINT - black
+	/// on most retail glass - only colours what its coverage (the separate alpha times the vertex alpha) makes solid.
+	/// </summary>
+	public static bool TryGetGlass(Materials.Material material, Shaders.Shader shader, out Color tint, out float density, out float lightness, out float fresnel)
+	{
+		tint = Colors.White;
+		density = 0f;
+		lightness = 0f;
+		fresnel = 1f;
+		if (shader == null || shader.Ubershader != SHADER_LIST.CA_ENVIRONMENT || !HasFeature(shader, "GLASS"))
+			return false;
+
+		if (!TryGetColour(material, shader, (int)CA_ENVIRONMENT.PARAMETERS.GLASS_TINT, "GLASS_TINT", true, out tint))
+			tint = Colors.White;
+		density = Mathf.Max(0f, GetFloat(shader, material, (int)CA_ENVIRONMENT.PARAMETERS.GLASS_DENSITY, 0f));
+		lightness = Mathf.Max(0f, GetFloat(shader, material, (int)CA_ENVIRONMENT.PARAMETERS.GLASS_LIGHTNESS, 0f));
+		fresnel = Mathf.Max(0f, GetFloat(shader, material, (int)CA_ENVIRONMENT.PARAMETERS.FRESNEL_INTENSITY, 1f));
+		return true;
+	}
+
 	public static float GetAlphaScissorThreshold(Materials.Material material, Shaders.Shader shader)
 	{
 		return Mathf.Clamp(GetFloat(shader, material, GetAlphaThresholdIndex(shader.Ubershader), 0.5f), 0f, 1f);

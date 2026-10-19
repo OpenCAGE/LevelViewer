@@ -26,6 +26,7 @@ public static class AlienSceneMaterials
 	private static readonly StringName DiffuseMapParam = new StringName("diffuse_map");
 	private static readonly StringName UseSeparateAlphaMapParam = new StringName("use_separate_alpha_map");
 	private static readonly StringName SeparateAlphaFromGreenParam = new StringName("separate_alpha_from_green");
+	private static readonly StringName SeparateAlphaFromRedParam = new StringName("separate_alpha_from_red");
 	private static readonly StringName SeparateAlphaUvMultParam = new StringName("separate_alpha_uv_mult");
 	private static readonly StringName SeparateAlphaMapParam = new StringName("separate_alpha_map");
 	private static readonly StringName AlphaFromLuminanceParam = new StringName("alpha_from_luminance");
@@ -35,13 +36,19 @@ public static class AlienSceneMaterials
 	private static readonly StringName SecondaryDiffuseUvMultParam = new StringName("secondary_diffuse_uv_mult");
 	private static readonly StringName SecondaryDiffuseTintParam = new StringName("secondary_diffuse_tint");
 	private static readonly StringName SecondaryDiffuseMaskedParam = new StringName("secondary_diffuse_masked");
+	private static readonly StringName GlassTintParam = new StringName("glass_tint");
+	private static readonly StringName GlassDensityParam = new StringName("glass_density");
+	private static readonly StringName GlassLightnessParam = new StringName("glass_lightness");
+	private static readonly StringName GlassFresnelParam = new StringName("glass_fresnel");
+	private static readonly StringName GlassVertexAlphaParam = new StringName("glass_vertex_alpha");
 
 	private static Shader _shadedShader;
 	private static Shader _shadedShaderDoubleSided;
 	private static Shader _shadedShaderTransparent;
 	private static Shader _shadedShaderTransparentDoubleSided;
-	//The shaded shaders with a secondary diffuse layer, built from them on first use: [transparent * 2 + doubleSided]
-	private static readonly Shader[] _shadedSecondaryDiffuseShaders = new Shader[4];
+	//The shaded shaders with a secondary diffuse layer and/or glass, built from them on first use, by variant
+	//(doubleSided + transparent * 2 + secondary diffuse * 4 + glass * 8)
+	private static readonly Dictionary<int, Shader> _shadedVariantShaders = new Dictionary<int, Shader>();
 	private static Shader _wireframeShader;
 	private static Shader _wireframeShaderDoubleSided;
 	private static Shader _wireframeShaderTransparent;
@@ -307,12 +314,23 @@ public static class AlienSceneMaterials
 		Texture2D secondaryDiffuse = TryGetSecondaryDiffuseMap(material, shader, scene);
 		bool useTransparentBlend = ShouldUseTransparentBlend(shader, separateAlphaMap);
 		bool useAlphaCutout = ShouldUseAlphaCutout(shader);
+		bool glass = AlienSceneShaderParams.TryGetGlass(material, shader, out Color glassTint, out float glassDensity, out float glassLightness, out float glassFresnel)
+			&& useTransparentBlend;
 		ShaderMaterial godotMaterial = new ShaderMaterial
 		{
 			ResourceName = name,
-			Shader = GetShadedShader(doubleSided, useTransparentBlend, secondaryDiffuse != null),
+			Shader = GetShadedShader(doubleSided, useTransparentBlend, secondaryDiffuse != null, glass),
 			RenderPriority = useTransparentBlend ? TransparentRenderPriority : OpaqueRenderPriority,
 		};
+		if (glass)
+		{
+			godotMaterial.SetShaderParameter(GlassTintParam, glassTint);
+			godotMaterial.SetShaderParameter(GlassDensityParam, glassDensity);
+			godotMaterial.SetShaderParameter(GlassLightnessParam, glassLightness);
+			godotMaterial.SetShaderParameter(GlassFresnelParam, glassFresnel);
+			//Retail's coverage is the alpha times the vertex alpha, where the mesh carries vertex colours
+			godotMaterial.SetShaderParameter(GlassVertexAlphaParam, HasShaderFeature(shader, "VERTEX_COLOUR"));
+		}
 
 		ApplyDiffuseParameters(
 			godotMaterial,
@@ -497,9 +515,11 @@ public static class AlienSceneMaterials
 
 		bool useSeparateAlpha = separateAlphaMap != null;
 		godotMaterial.SetShaderParameter(UseSeparateAlphaMapParam, useSeparateAlpha);
-		godotMaterial.SetShaderParameter(
-			SeparateAlphaFromGreenParam,
-			useSeparateAlpha && HasShaderFeature(shader, "SEPARATE_ALPHA_MAP_USE_GREEN_CHANNEL"));
+		//CA_ENVIRONMENT's "green channel" flag samples the map's first channel in retail; the decal shader's samples green
+		bool separateAlphaChannel = useSeparateAlpha && HasShaderFeature(shader, "SEPARATE_ALPHA_MAP_USE_GREEN_CHANNEL");
+		bool separateAlphaFromRed = separateAlphaChannel && shader.Ubershader == SHADER_LIST.CA_ENVIRONMENT;
+		godotMaterial.SetShaderParameter(SeparateAlphaFromGreenParam, separateAlphaChannel && !separateAlphaFromRed);
+		godotMaterial.SetShaderParameter(SeparateAlphaFromRedParam, separateAlphaFromRed);
 		godotMaterial.SetShaderParameter(SeparateAlphaUvMultParam, AlienSceneShaderParams.GetSeparateAlphaUvScale(material, shader));
 		if (useSeparateAlpha)
 			godotMaterial.SetShaderParameter(SeparateAlphaMapParam, separateAlphaMap);
@@ -693,24 +713,88 @@ public static class AlienSceneMaterials
 	}
 
 	/// <summary>
-	/// The shaded shader, with a secondary diffuse layer multiplied over the tinted diffuse if asked for.
+	/// The shaded shader, with a secondary diffuse layer multiplied over the tinted diffuse and/or retail's glass
+	/// transmission (transparent only) if asked for.
 	/// </summary>
 	/// <remarks>
-	/// The layer variants are built here from the exported shaders' own source rather than shipped as
-	/// shaders of their own, so they need no re-export and stay in step with the plain ones. The layer
-	/// goes in just ahead of the vertex colour tint - retail applies it straight after the diffuse tint -
-	/// and if that line has gone from the source the plain shader is used and the layer is not drawn.
+	/// The variants are built here from the exported shaders' own source rather than shipped as shaders of their own,
+	/// so they need no re-export and stay in step with the plain ones. The layer goes in just ahead of the vertex colour
+	/// tint - retail applies it straight after the diffuse tint - and the glass straight after the plain alpha is set;
+	/// if either line has gone from the source, that variant falls back to the shader without it and logs.
 	/// </remarks>
-	private static Shader GetShadedShader(bool doubleSided, bool transparent, bool secondaryDiffuse)
+	private static Shader GetShadedShader(bool doubleSided, bool transparent, bool secondaryDiffuse, bool glass = false)
 	{
 		Shader shader = GetShadedShader(doubleSided, transparent);
-		if (!secondaryDiffuse || shader == null)
+		glass = glass && transparent;
+		if ((!secondaryDiffuse && !glass) || shader == null)
 			return shader;
 
-		int variant = (transparent ? 2 : 0) + (doubleSided ? 1 : 0);
-		if (_shadedSecondaryDiffuseShaders[variant] == null)
-			_shadedSecondaryDiffuseShaders[variant] = BuildSecondaryDiffuseShader(shader) ?? shader;
-		return _shadedSecondaryDiffuseShaders[variant];
+		int variant = (doubleSided ? 1 : 0) + (transparent ? 2 : 0) + (secondaryDiffuse ? 4 : 0) + (glass ? 8 : 0);
+		if (!_shadedVariantShaders.TryGetValue(variant, out Shader built))
+		{
+			built = shader;
+			if (glass)
+				built = BuildGlassShader(built) ?? built;
+			if (secondaryDiffuse)
+				built = BuildSecondaryDiffuseShader(built) ?? built;
+			_shadedVariantShaders[variant] = built;
+		}
+		return built;
+	}
+
+	private const string GlassInsertAfter = "ALPHA = alpha;";
+
+	private const string GlassDeclarations = @"uniform vec4 glass_tint = vec4(1.0);
+uniform float glass_density = 0.0;
+uniform float glass_lightness = 0.0;
+uniform float glass_fresnel = 1.0;
+uniform bool glass_vertex_alpha = false;
+
+";
+
+	// Retail's CA_ENVIRONMENT GLASS (decoded from the forward-alpha master): Beer-Lambert transmission through glass_tint
+	// at glass_density along a path that lengthens towards grazing. What it lets through (luma) is how see-through the pane
+	// is, and what it absorbs tints it, scaled by glass_lightness. Coverage - the separate alpha (or diffuse alpha) times the
+	// mesh's vertex alpha - is solid diffuse instead (smudges, frames). Retail's fresnel comes from a lookup table: Schlick
+	// stands in, and with no environment map to reflect, the fresnel's share draws as a soft grey sheen.
+	private const string GlassBlock = @"
+	{
+		float g_cover = clamp(alpha * (glass_vertex_alpha ? COLOR.a : 1.0), 0.0, 1.0);
+		float g_nv = abs(dot(normalize(NORMAL), normalize(VIEW)));
+		float g_path = g_nv * g_nv * 0.255 + 0.745;
+		vec3 g_log = log2(max(glass_tint.rgb, vec3(0.001))) * glass_density;
+		vec3 g_through = exp2(g_log / g_path);
+		vec3 g_through_head_on = exp2(g_log);
+		vec3 g_luma = vec3(0.299, 0.587, 0.114);
+		float g_fresnel = clamp(glass_fresnel * (0.04 + 0.96 * pow(1.0 - g_nv, 5.0)), 0.0, 1.0);
+		float g_keep = 1.0 - g_fresnel;
+		float g_clear = 1.0 - g_cover;
+		float g_alpha = clamp((1.0 - dot(g_luma, g_through) * g_keep) * g_clear + g_cover, 0.0, 1.0);
+		vec3 g_colour = g_clear * (1.0 - dot(g_luma, g_through_head_on)) * g_through * g_keep * glass_lightness;
+		vec3 g_sum = color.rgb * g_cover + g_colour + vec3(0.18) * g_fresnel * g_clear;
+		ALBEDO = model_reference_apply_preview_shading(g_sum / max(g_alpha, 0.001), ndl);
+		ALPHA = g_alpha;
+	}";
+
+	private static Shader BuildGlassShader(Shader plain)
+	{
+		string code = plain.Code;
+		int fragment = string.IsNullOrEmpty(code) ? -1 : code.IndexOf("void fragment()", System.StringComparison.Ordinal);
+		int anchor = fragment < 0 ? -1 : code.IndexOf(GlassInsertAfter, fragment, System.StringComparison.Ordinal);
+		if (anchor < 0)
+		{
+			ViewerLog.PrintErr("[Materials] " + plain.ResourcePath + " has no '" + GlassInsertAfter + "' line to add glass after; glass will draw as plain alpha.");
+			return null;
+		}
+
+		code = code
+			.Insert(anchor + GlassInsertAfter.Length, GlassBlock.Replace("\r\n", "\n"))
+			.Insert(fragment, GlassDeclarations.Replace("\r\n", "\n"));
+
+		//Picking, zones and composite focus tell double-sided and transparent shaders by their path: keep the plain one's
+		Shader shader = new Shader { Code = code };
+		shader.ResourcePath = plain.ResourcePath.Replace(".gdshader", "_glass.gdshader");
+		return shader;
 	}
 
 	private const string SecondaryDiffuseInsertBefore = "color = model_reference_apply_vertex_colour_tint(";

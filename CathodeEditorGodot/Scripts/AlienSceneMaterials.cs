@@ -41,6 +41,35 @@ public static class AlienSceneMaterials
 	private static readonly StringName GlassLightnessParam = new StringName("glass_lightness");
 	private static readonly StringName GlassFresnelParam = new StringName("glass_fresnel");
 	private static readonly StringName GlassVertexAlphaParam = new StringName("glass_vertex_alpha");
+	private static readonly StringName DirtModeParam = new StringName("dirt_mode");
+	private static readonly StringName DirtMapParam = new StringName("dirt_map");
+	private static readonly StringName DirtUvMultParam = new StringName("dirt_uv_mult");
+	private static readonly StringName DirtAmountParam = new StringName("dirt_amount");
+	private static readonly StringName DirtSpecPowerParam = new StringName("dirt_spec_power");
+	private static readonly StringName DirtAoAmountParam = new StringName("dirt_ao_amount");
+	private static readonly StringName UseAlphablendNoiseParam = new StringName("use_alphablend_noise");
+	private static readonly StringName AlphablendNoiseMapParam = new StringName("alphablend_noise_map");
+	private static readonly StringName AlphablendNoiseUvMultParam = new StringName("alphablend_noise_uv_mult");
+	private static readonly StringName AlphablendNoisePowerParam = new StringName("alphablend_noise_power");
+	private static readonly StringName AlphaFadeModeParam = new StringName("alpha_fade_mode");
+	private static readonly StringName UseVertexLanesParam = new StringName("use_vertex_lanes");
+	private static readonly StringName VertexColourScaleParam = new StringName("vertex_colour_scale");
+	private static readonly StringName UseVertexAoParam = new StringName("use_vertex_ao");
+	private static readonly StringName VertexAoTintParam = new StringName("vertex_ao_tint");
+	private static readonly StringName UseSpecularParam = new StringName("use_specular");
+	private static readonly StringName SpecularMapParam = new StringName("specular_map");
+	private static readonly StringName SpecularUvMultParam = new StringName("specular_uv_mult");
+	private static readonly StringName SpecularTintParam = new StringName("specular_tint");
+	private static readonly StringName SpecularPowerParam = new StringName("specular_power");
+	private static readonly StringName FresnelIntensityParam = new StringName("fresnel_intensity");
+	internal static readonly StringName UseEnvironmentParam = new StringName("use_environment");
+	private static readonly StringName EnvironmentMapMultParam = new StringName("environment_map_mult");
+	private static readonly StringName ReflectivePlasticParam = new StringName("reflective_plastic");
+	private static readonly StringName UseEnvironmentCubeParam = new StringName("use_environment_cube");
+	private static readonly StringName EnvironmentCubeParam = new StringName("environment_cube");
+	//The room's cube, on the copies AlienScene makes for instances the level gives one (WithRoomEnvironmentMap)
+	internal static readonly StringName UseEnvironmentRoomCubeParam = new StringName("use_environment_room_cube");
+	internal static readonly StringName EnvironmentRoomCubeParam = new StringName("environment_room_cube");
 
 	private static Shader _shadedShader;
 	private static Shader _shadedShaderDoubleSided;
@@ -343,7 +372,114 @@ public static class AlienSceneMaterials
 			environmentScalars);
 		if (secondaryDiffuse != null)
 			ApplySecondaryDiffuseParameters(godotMaterial, material, shader, secondaryDiffuse);
+		ApplySurfaceLayerParameters(godotMaterial, material, shader, scene, environmentScalars);
 		return new MaterialResult(godotMaterial, true);
+	}
+
+	/// <summary>
+	/// What CA_ENVIRONMENT draws over its tinted diffuse that the preview can show (model_reference_surface.gdshaderinc):
+	/// the dirt map, faded by the vertex colours and the alpha-blend noise; the vertex AO; and a stand-in for its specular
+	/// and environment reflection. Each only where the material has it.
+	/// </summary>
+	/// <remarks>
+	/// Without the dirt, a lerp-dirt material showed its base where the game shows the dirt map, and a multiply-dirt one
+	/// stayed clean; without the reflection stand-in, the dark metals - TECH_HUB's grey ceilings have a diffuse tint of
+	/// 0.016, the grey is all reflection - drew black.
+	/// </remarks>
+	private static void ApplySurfaceLayerParameters(
+		ShaderMaterial godotMaterial,
+		Materials.Material material,
+		Shaders.Shader shader,
+		AlienScene scene,
+		ModelReferenceMaterialOverrides.EnvironmentColourScalars? environmentScalars)
+	{
+		if (shader.Ubershader != SHADER_LIST.CA_ENVIRONMENT)
+			return;
+
+		bool vertexColour = HasShaderFeature(shader, "VERTEX_COLOUR");
+		bool noise = HasShaderFeature(shader, "ALPHABLEND_NOISE");
+		bool vertexAo = HasShaderFeature(shader, "VERTEX_AMBIENT_OCCLUSION");
+
+		int dirtMode = 0;
+		if (HasShaderFeature(shader, "DIRT_MAPPING"))
+		{
+			Texture2D dirt = scene.GetSamplerTexture(material, shader, (int)CA_ENVIRONMENT.SAMPLERS.DIRT_MAP);
+			if (dirt != null)
+			{
+				dirtMode = HasShaderFeature(shader, "DIRT_BLEND_MULTIPLY") ? 2 : 1;
+				godotMaterial.SetShaderParameter(DirtMapParam, dirt);
+				godotMaterial.SetShaderParameter(DirtUvMultParam, AlienSceneShaderParams.GetEnvironmentFloat(material, shader, CA_ENVIRONMENT.PARAMETERS.DIRT_UV_MULT, 1f));
+				float dirtPower = AlienSceneShaderParams.GetEnvironmentFloat(material, shader, CA_ENVIRONMENT.PARAMETERS.DIRT_BLEND_MULT_SPEC_POWER, 1f);
+				godotMaterial.SetShaderParameter(DirtAmountParam, Mathf.Clamp(dirtPower, 0f, 1f));
+				godotMaterial.SetShaderParameter(DirtSpecPowerParam, dirtPower);
+				godotMaterial.SetShaderParameter(DirtAoAmountParam, AlienSceneShaderParams.GetEnvironmentFloat(material, shader, CA_ENVIRONMENT.PARAMETERS.DIRT_AO_AMOUNT, 0f));
+			}
+		}
+		godotMaterial.SetShaderParameter(DirtModeParam, dirtMode);
+
+		/* What the game fades the alpha of a cut-out, decal or blended surface by (its clip and its blend both): with
+		   vertex colours, the alpha-blend noise blend - ALPHABLEND_NOISE without dirt, so a scrape or grime overlay like the
+		   doors' DECAL_Scrapes shows only where the mesh paints it, where the viewer drew all of it - or else the vertex alpha
+		   (a plain vertex-coloured material already takes that through its tint). */
+		int alphaFade = 0;
+		if (vertexColour)
+		{
+			bool separateClip = HasShaderFeature(shader, "SEPARATE_ALPHA") && HasShaderFeature(shader, "ALPHA_TEST")
+				&& HasShaderFeature(shader, "SPECULAR_MAPPING") && !HasShaderFeature(shader, "DECAL");
+			if (noise && !HasShaderFeature(shader, "DIRT_MAPPING") && !HasShaderFeature(shader, "EMISSIVE") && !separateClip)
+				alphaFade = 2;
+			else if (!ModelReferenceMaterialOverrides.TintsWithVertexColour(shader))
+				alphaFade = 1;
+		}
+		godotMaterial.SetShaderParameter(AlphaFadeModeParam, alphaFade);
+
+		//The noise moves the dirt's edge, or the alpha fade's; without either (or vertex colours to carry its blend) it does nothing here
+		Texture2D noiseMap = noise && vertexColour && (dirtMode != 0 || alphaFade == 2)
+			? scene.GetSamplerTexture(material, shader, (int)CA_ENVIRONMENT.SAMPLERS.ALPHABLEND_NOISE_MAP)
+			: null;
+		godotMaterial.SetShaderParameter(UseAlphablendNoiseParam, noiseMap != null);
+		if (noiseMap != null)
+		{
+			godotMaterial.SetShaderParameter(AlphablendNoiseMapParam, noiseMap);
+			godotMaterial.SetShaderParameter(AlphablendNoiseUvMultParam, AlienSceneShaderParams.GetEnvironmentFloat(material, shader, CA_ENVIRONMENT.PARAMETERS.ALPHABLEND_NOISE_UV_MULT, 1f));
+			godotMaterial.SetShaderParameter(AlphablendNoisePowerParam, AlienSceneShaderParams.GetEnvironmentVertexValues(material, shader, CA_ENVIRONMENT.PARAMETERS.ALPHABLEND_NOISE_POWER, 1, 1f)[0]);
+		}
+
+		//The vertex colours are blend amounts and an AO term here, not a tint (ModelReferenceMaterialOverrides.TintsWithVertexColour)
+		bool lanes = vertexColour && (dirtMode != 0 || vertexAo);
+		godotMaterial.SetShaderParameter(UseVertexLanesParam, lanes);
+		Vector4 scale = environmentScalars.HasValue ? environmentScalars.Value.VertexScale : Vector4.One;
+		godotMaterial.SetShaderParameter(VertexColourScaleParam, new Color(scale.X, scale.Y, scale.Z, scale.W));
+		godotMaterial.SetShaderParameter(UseVertexAoParam, vertexAo && vertexColour);
+		if (vertexAo && vertexColour)
+		{
+			float[] aoTint = AlienSceneShaderParams.GetEnvironmentVertexValues(material, shader, CA_ENVIRONMENT.PARAMETERS.VERT_AO_TINT, 3, 1f);
+			godotMaterial.SetShaderParameter(VertexAoTintParam, new Vector3(aoTint[0], aoTint[1], aoTint[2]));
+		}
+
+		Texture2D specular = HasShaderFeature(shader, "SPECULAR_MAPPING")
+			? scene.GetSamplerTexture(material, shader, (int)CA_ENVIRONMENT.SAMPLERS.SPECULAR_MAP)
+			: null;
+		godotMaterial.SetShaderParameter(UseSpecularParam, specular != null);
+		if (specular != null)
+		{
+			godotMaterial.SetShaderParameter(SpecularMapParam, specular);
+			godotMaterial.SetShaderParameter(SpecularUvMultParam, AlienSceneShaderParams.GetEnvironmentFloat(material, shader, CA_ENVIRONMENT.PARAMETERS.SPECULAR_UV_MULT, 1f));
+			godotMaterial.SetShaderParameter(SpecularTintParam, AlienSceneShaderParams.GetEnvironmentFloat(material, shader, CA_ENVIRONMENT.PARAMETERS.SPECULAR_TINT, 0f));
+			godotMaterial.SetShaderParameter(SpecularPowerParam, AlienSceneShaderParams.GetEnvironmentFloat(material, shader, CA_ENVIRONMENT.PARAMETERS.SPECULAR_POWER, 0f));
+			godotMaterial.SetShaderParameter(FresnelIntensityParam, AlienSceneShaderParams.GetEnvironmentFloat(material, shader, CA_ENVIRONMENT.PARAMETERS.FRESNEL_INTENSITY, 1f));
+			bool environment = HasShaderFeature(shader, "ENVIRONMENT_MAPPING");
+			godotMaterial.SetShaderParameter(UseEnvironmentParam, environment);
+			godotMaterial.SetShaderParameter(EnvironmentMapMultParam, environment
+				? AlienSceneShaderParams.GetEnvironmentFloat(material, shader, CA_ENVIRONMENT.PARAMETERS.ENVIRONMENT_MAP_MULT, 1f)
+				: 1f);
+			godotMaterial.SetShaderParameter(ReflectivePlasticParam, HasShaderFeature(shader, "REFLECTIVE_PLASTIC"));
+			//The cube it reflects: chrome and brass are mostly that reflection, tinted by their own colour
+			Cubemap environmentCube = environment ? scene.GetSamplerCubemap(material, shader, (int)CA_ENVIRONMENT.SAMPLERS.ENVIRONMENT_MAP) : null;
+			godotMaterial.SetShaderParameter(UseEnvironmentCubeParam, environmentCube != null);
+			if (environmentCube != null)
+				godotMaterial.SetShaderParameter(EnvironmentCubeParam, environmentCube);
+		}
 	}
 
 	public static ShaderMaterial CreateWireframeMaterial(
@@ -524,11 +660,9 @@ public static class AlienSceneMaterials
 		if (useSeparateAlpha)
 			godotMaterial.SetShaderParameter(SeparateAlphaMapParam, separateAlphaMap);
 
-		bool alphaFromLuminance = false;
-		if (useSeparateAlpha)
-			alphaFromLuminance = !AlienSceneTextures.HasTransparency(separateAlphaMap);
-		else if (useAlphaCutout && diffuse != null && !AlienSceneTextures.HasTransparency(diffuse))
-			alphaFromLuminance = true;
+		//A greyscale separate mask is its own alpha. A cut-out's diffuse without alpha is not: the game reads its .w as 1 and
+		//cuts nothing there (only the vertex fade can), where taking the brightness cut holes in dark texels
+		bool alphaFromLuminance = useSeparateAlpha && !AlienSceneTextures.HasTransparency(separateAlphaMap);
 
 		godotMaterial.SetShaderParameter(AlphaFromLuminanceParam, alphaFromLuminance);
 		godotMaterial.SetShaderParameter(AlphaCutoutParam, useAlphaCutout);
@@ -560,18 +694,18 @@ public static class AlienSceneMaterials
 	}
 
 	/// <summary>
-	/// Alpha-test cutout on the opaque shader path (discard, not alpha blending).
-	/// The ALPHA_TEST <em>feature</em> only selects a shader permutation that supports
-	/// alpha testing; cutout is only active when the material render state enables it
-	/// (D3D AlphaTestEnable). OpenCAGE's MaterialApplier ignores the feature flag for
-	/// transparency — this matches that behaviour.
+	/// Alpha-test cutout on the opaque shader path (discard, not alpha blending): every shader
+	/// with the ALPHA_TEST feature, as the game's permutation clips.
 	/// </summary>
 	public static bool ShouldUseAlphaCutout(Shaders.Shader shader)
 	{
-		if (shader == null || !HasShaderFeature(shader, "ALPHA_TEST"))
-			return false;
-
-		return IsRenderStateEnabled(shader, Shaders.RenderState.AlphaTestEnable);
+		/* The ALPHA_TEST permutations clip in the pixel shader (clip(alpha * fade - 0.5), decoded masters): D3D11 has no
+		   fixed-function alpha test, and the AlphaTestEnable render state is a D3D9 leftover no retail ALPHA_TEST shader sets
+		   (0 of 114; 47 others set it, at an AlphaRef of 0). Gated on that state, every cut-out drew solid - the doors'
+		   DECAL_Scrapes overlays, which the game fades out by their vertex colours, covered the doors in grime (19 Oct 2026).
+		   Not signed-distance-field text, though: it stays blended, as the viewer doesn't sharpen the field as the game does,
+		   and a hard cut at 0.5 of the mip-blurred field broke up the signs' thin strokes. */
+		return shader != null && HasShaderFeature(shader, "ALPHA_TEST") && !HasShaderFeature(shader, "SIGNED_DISTANCE_FIELD");
 	}
 
 	/// <summary>Whether the shader permutation includes alpha-test code (not necessarily active at runtime).</summary>

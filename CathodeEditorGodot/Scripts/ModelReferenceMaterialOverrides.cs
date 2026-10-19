@@ -58,13 +58,23 @@ public static class ModelReferenceMaterialOverrides
 
 	{
 
-		public EnvironmentColourScalars(Vector4 vertex, Vector4 diffuse)
+		public EnvironmentColourScalars(Vector4 vertex, Vector4 diffuse) : this(vertex, diffuse, Vector4.One)
+
+		{
+
+		}
+
+
+
+		public EnvironmentColourScalars(Vector4 vertex, Vector4 diffuse, Vector4 vertexScale)
 
 		{
 
 			Vertex = vertex;
 
 			Diffuse = diffuse;
+
+			VertexScale = vertexScale;
 
 		}
 
@@ -73,6 +83,13 @@ public static class ModelReferenceMaterialOverrides
 		public Vector4 Vertex { get; }
 
 		public Vector4 Diffuse { get; }
+
+		/// <summary>
+		/// vertex_colour_scale and vertex_opacity_scale as the game multiplies the mesh's vertex colours by, unclamped -
+		/// where the material reads them as dirt/noise blend amounts and an AO term, not a tint (<see cref="Vertex"/> is
+		/// white then).
+		/// </summary>
+		public Vector4 VertexScale { get; }
 
 
 
@@ -84,7 +101,11 @@ public static class ModelReferenceMaterialOverrides
 
 			&& Mathf.IsEqualApprox(Diffuse.X, 1f) && Mathf.IsEqualApprox(Diffuse.Y, 1f)
 
-			&& Mathf.IsEqualApprox(Diffuse.Z, 1f) && Mathf.IsEqualApprox(Diffuse.W, 1f);
+			&& Mathf.IsEqualApprox(Diffuse.Z, 1f) && Mathf.IsEqualApprox(Diffuse.W, 1f)
+
+			&& Mathf.IsEqualApprox(VertexScale.X, 1f) && Mathf.IsEqualApprox(VertexScale.Y, 1f)
+
+			&& Mathf.IsEqualApprox(VertexScale.Z, 1f) && Mathf.IsEqualApprox(VertexScale.W, 1f);
 
 	}
 
@@ -526,7 +547,7 @@ public static class ModelReferenceMaterialOverrides
 
 			diffuseOpacityScale);
 
-		scalars = new EnvironmentColourScalars(vertex, diffuse);
+		scalars = new EnvironmentColourScalars(vertex, diffuse, new Vector4(vertexColourScale.X, vertexColourScale.Y, vertexColourScale.Z, vertexOpacityScale));
 
 		return true;
 

@@ -3,10 +3,12 @@ render_mode blend_mix, depth_draw_opaque, cull_back, unshaded, specular_disabled
 
 #include "res://shaders/model_reference_alpha.gdshaderinc"
 #include "res://shaders/model_reference_shading.gdshaderinc"
+#include "res://shaders/model_reference_surface.gdshaderinc"
 
 uniform sampler2D diffuse_map : source_color, filter_linear_mipmap_anisotropic;
 uniform bool use_diffuse_map = false;
-uniform vec4 diffuse_tint : source_color = vec4(1.0);
+// Not source_color: the game multiplies its DIFFUSE_TINT in as it is, and model_reference_tint says how it's read
+uniform vec4 diffuse_tint = vec4(1.0);
 uniform vec4 vertex_colour_tint : source_color = vec4(1.0);
 uniform vec2 diffuse_uv_mult = vec2(1.0);
 
@@ -15,6 +17,7 @@ uniform vec3 emission : source_color = vec3(0.0);
 uniform float emission_energy = 1.0;
 
 void fragment() {
+	vec4 tint = model_reference_tint(diffuse_tint);
 	vec2 uv = UV * diffuse_uv_mult;
 	vec4 tex = vec4(1.0);
 	if (use_diffuse_map) {
@@ -22,10 +25,11 @@ void fragment() {
 	}
 
 	vec4 color = use_separate_alpha_map
-		? model_reference_apply_diffuse_color(diffuse_tint, tex, use_diffuse_map)
-		: diffuse_tint * tex;
+		? model_reference_apply_diffuse_color(tint, tex, use_diffuse_map)
+		: tint * tex;
 	vec4 vertex_tint = model_reference_vertex_tint(vertex_colour_tint, COLOR);
 	color = model_reference_apply_vertex_colour_tint(color, vertex_tint);
+	color.rgb = model_reference_surface_layers(color.rgb, UV, COLOR, NORMAL, VIEW, mat3(INV_VIEW_MATRIX));
 
 	vec4 separate_sample = vec4(1.0);
 	if (use_separate_alpha_map) {
@@ -35,8 +39,9 @@ void fragment() {
 	vec3 normal = normalize(NORMAL);
 	float ndl = max(dot(normal, MODEL_REFERENCE_PREVIEW_LIGHT_DIR), 0.0);
 
-	float alpha = model_reference_blend_alpha(tex, separate_sample, diffuse_tint.a);
+	float alpha = model_reference_blend_alpha(tex, separate_sample, tint.a);
 	alpha *= vertex_tint.a;
+	alpha *= model_reference_alpha_fade(UV, COLOR);
 	model_reference_finish_alpha(alpha);
 
 	ALBEDO = model_reference_apply_preview_shading(color.rgb, ndl);

@@ -66,6 +66,9 @@ public partial class CompositePreviewCapture : Node3D
 	//The ambient light scenes/main.tscn gives the viewport, over nothing instead of the sky
 	private static readonly Color AmbientColour = new Color(0.85f, 0.88f, 0.92f);
 	private const float AmbientEnergy = 0.35f;
+	//The viewport's tonemap (scenes/main.tscn): Reinhard, matched to the game's look (19 Oct 2026)
+	private const float TonemapExposure = 1.15f;
+	private const float TonemapWhite = 2f;
 
 	/// <summary>
 	/// Frames to wait after asking for the render before reading the texture back. The mode change is
@@ -247,7 +250,9 @@ public partial class CompositePreviewCapture : Node3D
 				AmbientLightSource = Godot.Environment.AmbientSource.Color,
 				AmbientLightColor = AmbientColour,
 				AmbientLightEnergy = AmbientEnergy,
-				TonemapMode = Godot.Environment.ToneMapper.Filmic,
+				TonemapMode = Godot.Environment.ToneMapper.Reinhardt,
+				TonemapExposure = TonemapExposure,
+				TonemapWhite = TonemapWhite,
 			},
 			Current = true,
 		};
@@ -450,13 +455,13 @@ public partial class CompositePreviewCapture : Node3D
 	}
 
 	/* What a byte of the render means in linear light, and the way back. The renderer draws in linear
-	   light, tonemaps (the capture environment's Filmic, as the viewport's) and sRGB-encodes what it
+	   light, tonemaps (the capture environment's Reinhard, as the viewport's) and sRGB-encodes what it
 	   hands back; the scaling and the un-premultiplying in FinishCapture need the linear value, so both
 	   curves are undone by this table and done again by LinearToByte. The tonemap is Godot's
-	   tonemap_filmic (Uncharted 2's operator with its exposure bias of 2) at the default white of 1,
-	   inverted by bisection since it rises from 0 at 0 to 1 at 1. Were the curve ever to differ from the
-	   renderer's, a fully covered pixel would still come back as it went in (the two here are exact
-	   inverses of each other); only the colour along an edge would be off by the difference. */
+	   tonemap_reinhard after the exposure, inverted by bisection since it rises from 0 at 0 to 1 where the
+	   exposed value reaches the white. Were the curve ever to differ from the renderer's, a fully covered
+	   pixel would still come back as it went in (the two here are exact inverses of each other); only the
+	   colour along an edge would be off by the difference. */
 	private static readonly float[] ByteToLinear = BuildByteToLinear();
 
 	private static float[] BuildByteToLinear()
@@ -466,11 +471,11 @@ public partial class CompositePreviewCapture : Node3D
 		{
 			float target = SrgbToLinear(value / 255f);
 			float low = 0f;
-			float high = 1f;
+			float high = TonemapTop;
 			for (int i = 0; i < 40; i++)
 			{
 				float mid = (low + high) * 0.5f;
-				if (Filmic(mid) < target)
+				if (Tonemap(mid) < target)
 					low = mid;
 				else
 					high = mid;
@@ -484,22 +489,18 @@ public partial class CompositePreviewCapture : Node3D
 
 	private static byte LinearToByte(float linear)
 	{
-		float encoded = LinearToSrgb(Filmic(Mathf.Clamp(linear, 0f, 1f)));
+		float encoded = LinearToSrgb(Tonemap(Mathf.Clamp(linear, 0f, TonemapTop)));
 		return (byte)Mathf.Clamp(Mathf.RoundToInt(encoded * 255f), 0, 255);
 	}
 
-	private static float Filmic(float x)
+	//The linear value the tonemap takes to 1
+	private const float TonemapTop = TonemapWhite / TonemapExposure;
+
+	private static float Tonemap(float x)
 	{
-		const float A = 0.22f * 2f * 2f;
-		const float B = 0.30f * 2f;
-		const float C = 0.10f;
-		const float D = 0.20f;
-		const float E = 0.01f;
-		const float F = 0.30f;
-		const float White = 1f;
-		float mapped = (x * (A * x + C * B) + D * E) / (x * (A * x + B) + D * F) - E / F;
-		float white = (White * (A * White + C * B) + D * E) / (White * (A * White + B) + D * F) - E / F;
-		return mapped / white;
+		float c = x * TonemapExposure;
+		float whiteSquared = TonemapWhite * TonemapWhite;
+		return (whiteSquared * c + c * c) / (whiteSquared * c + whiteSquared);
 	}
 
 	private static float SrgbToLinear(float value)

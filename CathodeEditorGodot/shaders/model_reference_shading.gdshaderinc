@@ -2,13 +2,28 @@
 
 const vec3 MODEL_REFERENCE_PREVIEW_LIGHT_DIR = normalize(vec3(0.45, 0.82, 0.35));
 
-// Max display brightness for lit surfaces (lower = less blown-out whites).
-const float PREVIEW_PEAK_CAP = 0.68;
+// The shading's knobs (project settings, shader globals): the max display brightness for lit surfaces (lower = less
+// blown-out whites), how hard bright texels are pulled down, a scale on every surface before it's levelled, and how
+// dark a surface facing away from the preview light goes.
+global uniform float viewer_peak_cap;
+global uniform float viewer_highlight_compress;
+global uniform float viewer_exposure;
+global uniform float viewer_shade_floor;
+// How the material's diffuse tint is read: 0 as an sRGB colour (decoded to linear), 1 as the linear multiplier the game
+// applies it as - and how much colour is left in the levelled albedo (1 = all of it)
+global uniform float viewer_tint_linear;
+global uniform float viewer_saturation;
+
+vec4 model_reference_tint(vec4 tint) {
+	vec3 c = clamp(tint.rgb, vec3(0.0), vec3(1.0));
+	vec3 decoded = mix(c / 12.92, pow((c + 0.055) / 1.055, vec3(2.4)), step(vec3(0.04045), c));
+	return vec4(mix(decoded, tint.rgb, viewer_tint_linear), tint.a);
+}
 
 vec3 model_reference_cap_peak(vec3 rgb) {
 	float peak = max(max(rgb.r, rgb.g), rgb.b);
-	if (peak > PREVIEW_PEAK_CAP) {
-		rgb *= PREVIEW_PEAK_CAP / peak;
+	if (peak > viewer_peak_cap) {
+		rgb *= viewer_peak_cap / peak;
 	}
 	return rgb;
 }
@@ -20,16 +35,17 @@ vec3 model_reference_compress_highlights(vec3 albedo) {
 		return albedo;
 	}
 
-	float blend = smoothstep(0.38, 0.82, luma);
+	float blend = smoothstep(0.38, 0.82, luma) * viewer_highlight_compress;
 	float compressed = luma / (luma + 0.55);
 	float new_luma = mix(luma, compressed, blend);
 	return albedo * (new_luma / luma);
 }
 
 vec3 model_reference_level_albedo(vec3 albedo) {
-	albedo = min(max(albedo, vec3(0.0)), vec3(4.0));
+	albedo = min(max(albedo * viewer_exposure, vec3(0.0)), vec3(4.0));
 
 	float luma = dot(albedo, vec3(0.299, 0.587, 0.114));
+	albedo = max(mix(vec3(luma), albedo, viewer_saturation), vec3(0.0));
 	float toe = 1.0 - smoothstep(0.06, 0.26, luma);
 	vec3 lifted = pow(albedo, vec3(0.82));
 	albedo = mix(albedo, lifted, toe * 0.45);
@@ -40,7 +56,7 @@ vec3 model_reference_level_albedo(vec3 albedo) {
 
 vec3 model_reference_apply_preview_shading(vec3 albedo, float ndl) {
 	albedo = model_reference_level_albedo(albedo);
-	float shade = 0.50 + 0.50 * ndl;
+	float shade = viewer_shade_floor + (1.0 - viewer_shade_floor) * ndl;
 	vec3 lit = albedo * shade;
 	lit = model_reference_compress_highlights(lit);
 	return model_reference_cap_peak(lit);

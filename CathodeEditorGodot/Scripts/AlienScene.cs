@@ -75,6 +75,16 @@ public partial class AlienScene : Node3D
 	//And the colour values it was built with: an entry is reused only for the same values, and replaced for new ones
 	private readonly Dictionary<ModelReferenceOverrideKey, ModelReferenceMaterialOverrides.EnvironmentColourScalars> _modelReferenceOverrideMaterialScalars = new Dictionary<ModelReferenceOverrideKey, ModelReferenceMaterialOverrides.EnvironmentColourScalars>();
 	private Dictionary<MeshInstance3D, Materials.Material> _modelReferenceMeshes = new Dictionary<MeshInstance3D, Materials.Material>();
+	/* The room cubes (WithRoomEnvironmentMap): each mover's, by its entity handle; what each render target resolved to; the
+	   copies of a material made to reflect one; and which materials reflect a cube at all. All per populate. */
+	private Dictionary<(uint, uint), Textures.TEX4> _moverEnvironmentMaps;
+	private HashSet<uint> _moverEnvironmentMapEntities;
+	private readonly Dictionary<Node3D, Textures.TEX4> _roomEnvironmentMapByTarget = new Dictionary<Node3D, Textures.TEX4>();
+	private readonly Dictionary<(ShaderMaterial, Textures.TEX4), ShaderMaterial> _roomCubeMaterials = new Dictionary<(ShaderMaterial, Textures.TEX4), ShaderMaterial>();
+	private readonly Dictionary<ShaderMaterial, bool> _materialReflects = new Dictionary<ShaderMaterial, bool>();
+	private long _roomCubeTicks;
+	private int _roomCubeMeshes;
+	private int _roomCubeMisses;
 
 	/// <summary>What a spawned mesh was built from, for remapping it later.</summary>
 	private readonly struct MeshBinding
@@ -172,7 +182,8 @@ public partial class AlienScene : Node3D
 	public class TexOrCube
 	{
 		public Texture2D Texture = null;
-		public Texture2D Cubemap = null;
+		//A cube texture's six faces, for the environment reflection (model_reference_surface.gdshaderinc); Texture is its first face
+		public Cubemap Cubemap = null;
 	}
 
 	private LevelViewerLoadingScreen _loadingScreen;
@@ -1517,6 +1528,10 @@ public partial class AlienScene : Node3D
 			//Spent: kept, one per mesh (76k on SCI_AndroidLab), they held each render target until the next populate
 			_bulkMeshSpawnJobs.Clear();
 		}
+		ViewerLog.Print("Room cubes: " + _roomCubeMeshes + " reflecting meshes given their room's, " + _roomCubeMisses + " without one (" + _roomCubeMaterials.Count
+			+ " material copies, " + (_roomCubeTicks * 1000 / System.Diagnostics.Stopwatch.Frequency) + " ms)");
+		_roomCubeMeshes = _roomCubeMisses = 0;
+		_roomCubeTicks = 0;
 
 		/* The content goes to its focus point now, before the meshes just spawned are in the renderer's culling BVH (they
 		   join it when it next draws). Moved there by the camera's framing a frame later instead, every mesh in the level
@@ -3940,11 +3955,11 @@ public partial class AlienScene : Node3D
 				out Entity overrideParameterEntity,
 				out Entity fallbackParameterEntity);
 			_modelReferenceMeshes[mesh] = remappedMaterial;
-			mesh.MaterialOverride = GetSolidMaterialForModelReference(
+			mesh.MaterialOverride = WithRoomEnvironmentMap(GetSolidMaterialForModelReference(
 				remappedMaterial,
 				modelReferenceEntity,
 				overrideParameterEntity,
-				fallbackParameterEntity);
+				fallbackParameterEntity), mesh.GetParent() as Node3D);
 			if (ModelReferenceRenderSettings.WireframeEnabled)
 			{
 				UpdateWireframeOverlay(
@@ -5310,11 +5325,11 @@ public partial class AlienScene : Node3D
 		if (!_bulkMeshSpawning)
 			meshInstance.TreeExited += () => { _modelReferenceMeshes.Remove(meshInstance); _meshBindings.Remove(meshInstance); };
 		_modelReferenceMeshes[meshInstance] = material;
-		meshInstance.MaterialOverride = GetSolidMaterialForModelReference(
+		meshInstance.MaterialOverride = WithRoomEnvironmentMap(GetSolidMaterialForModelReference(
 			material,
 			modelReferenceEntity,
 			parameterEntity,
-			fallbackEntity);
+			fallbackEntity), parent);
 		parent.AddChild(meshInstance);
 		if (!_bulkMeshSpawning && ModelReferenceRenderSettings.WireframeEnabled)
 			UpdateWireframeOverlay(meshInstance, material, modelReferenceEntity, parameterEntity, fallbackEntity);
@@ -5608,7 +5623,8 @@ public partial class AlienScene : Node3D
 			&& GodotObject.IsInstanceValid(cachedMaterial)
 			&& _modelReferenceOverrideMaterialScalars.TryGetValue(cacheKey, out ModelReferenceMaterialOverrides.EnvironmentColourScalars cachedScalars)
 			&& cachedScalars.Vertex == scalars.Vertex
-			&& cachedScalars.Diffuse == scalars.Diffuse)
+			&& cachedScalars.Diffuse == scalars.Diffuse
+			&& cachedScalars.VertexScale == scalars.VertexScale)
 		{
 			shaderMaterial = cachedMaterial;
 			return true;
@@ -5775,6 +5791,117 @@ public partial class AlienScene : Node3D
 		_modelReferenceOverrideMaterials.Clear();
 		_modelReferenceOverrideMaterialSources.Clear();
 		_modelReferenceOverrideMaterialScalars.Clear();
+
+		foreach (ShaderMaterial copy in _roomCubeMaterials.Values)
+		{
+			if (copy != null && GodotObject.IsInstanceValid(copy))
+				copy.Dispose();
+		}
+		_roomCubeMaterials.Clear();
+		_roomEnvironmentMapByTarget.Clear();
+		_materialReflects.Clear();
+		_moverEnvironmentMaps = null;
+	}
+
+	/* The game reflects the cube of the room an instance is in - the EnvironmentMap whose area claims it - rather than the
+	   material's own ENVIRONMENT_MAP, a generic one most materials share (TECH_HUB's metals all point at env_base or
+	   env_base_2: dark, with hard white lights, where the lobby's own cube is a dim warm hall). The claims aren't resolved
+	   here, which would mean following each EnvironmentMap's links as the zone highlight does: the movers carry them as
+	   WORLD/ENVIRONMENTMAP.BIN had them, so this is the level as last saved, and an instance added or moved since reflects
+	   its material's cube until then. A material that reflects one gets a copy per room cube it's seen under. */
+	private ShaderMaterial WithRoomEnvironmentMap(ShaderMaterial material, Node3D renderTarget)
+	{
+		if (material == null || renderTarget == null)
+			return material;
+		if (!_materialReflects.TryGetValue(material, out bool reflects))
+		{
+			reflects = material.GetShaderParameter(AlienSceneMaterials.UseEnvironmentParam).AsBool();
+			_materialReflects[material] = reflects;
+		}
+		if (!reflects)
+			return material;
+
+		long start = System.Diagnostics.Stopwatch.GetTimestamp();
+		Textures.TEX4 cube = GetRoomEnvironmentMap(renderTarget);
+		ShaderMaterial result = material;
+		if (cube != null)
+		{
+			if (_roomCubeMaterials.TryGetValue((material, cube), out ShaderMaterial copy) && copy != null && GodotObject.IsInstanceValid(copy))
+			{
+				result = copy;
+			}
+			else
+			{
+				Cubemap cubemap = GetTexOrCube(new TexturePtr() { Texture = cube, Location = TexturePtr.Source.LEVEL })?.Cubemap;
+				if (cubemap != null)
+				{
+					/* Every uniform copied by hand: Duplicate() drops the ones whose value isn't the uniform's own type (the
+					   diffuse tint, a Color on a vec4), and the stairwell's black floor came out white */
+					copy = new ShaderMaterial() { Shader = material.Shader, RenderPriority = material.RenderPriority, NextPass = material.NextPass };
+					foreach (Godot.Collections.Dictionary uniform in material.Shader.GetShaderUniformList())
+					{
+						StringName name = uniform["name"].AsStringName();
+						copy.SetShaderParameter(name, material.GetShaderParameter(name));
+					}
+					copy.SetShaderParameter(AlienSceneMaterials.UseEnvironmentRoomCubeParam, true);
+					copy.SetShaderParameter(AlienSceneMaterials.EnvironmentRoomCubeParam, cubemap);
+					_materialReflects[copy] = true;
+					_roomCubeMaterials[(material, cube)] = copy;
+					result = copy;
+				}
+			}
+		}
+		if (result == material)
+			_roomCubeMisses++;
+		else
+			_roomCubeMeshes++;
+		_roomCubeTicks += System.Diagnostics.Stopwatch.GetTimestamp() - start;
+		return result;
+	}
+
+	/// <summary>The cube the level's movers give the instance a render target belongs to; null when they give it none.</summary>
+	private Textures.TEX4 GetRoomEnvironmentMap(Node3D renderTarget)
+	{
+		if (_roomEnvironmentMapByTarget.TryGetValue(renderTarget, out Textures.TEX4 known))
+			return known;
+
+		if (_moverEnvironmentMaps == null)
+		{
+			_moverEnvironmentMaps = new Dictionary<(uint, uint), Textures.TEX4>();
+			_moverEnvironmentMapEntities = new HashSet<uint>();
+			List<Movers.MOVER_DESCRIPTOR> movers = _content?.Level?.Movers?.Entries;
+			if (movers != null)
+			{
+				foreach (Movers.MOVER_DESCRIPTOR mover in movers)
+				{
+					if (mover?.EnvironmentMap == null || mover.Entity == null)
+						continue;
+					_moverEnvironmentMaps[(mover.Entity.composite_instance_id.AsUInt32, mover.Entity.entity_id.AsUInt32)] = mover.EnvironmentMap;
+					_moverEnvironmentMapEntities.Add(mover.Entity.entity_id.AsUInt32);
+				}
+			}
+		}
+
+		//Most movers have no room cube (TECH_HUB: 1,282 of 36,130), so the chain is only walked for a ModelReference one of
+		//those is an instance of - the nearest node up with an entity is it
+		Textures.TEX4 cube = null;
+		Entity owner = null;
+		for (Node node = renderTarget; owner == null && node != null && node != _parentNode; node = node.GetParent())
+		{
+			if (node is Node3D node3D)
+				_nodeEntities.TryGetValue(node3D, out owner);
+		}
+		if (owner != null && _moverEnvironmentMapEntities.Contains(owner.shortGUID.AsUInt32) && TryBuildEntityIdChainFromNode(renderTarget, out List<uint> chain))
+		{
+			//The instance as a mover names it: the composites it's in, hashed, and the ModelReference within the last
+			List<ShortGuid> path = new List<ShortGuid>(chain.Count);
+			foreach (uint id in chain)
+				path.Add(new ShortGuid(id));
+			uint instance = path.GenerateCompositeInstanceID().AsUInt32;
+			_moverEnvironmentMaps.TryGetValue((instance, chain[chain.Count - 1]), out cube);
+		}
+		_roomEnvironmentMapByTarget[renderTarget] = cube;
+		return cube;
 	}
 
 	private void EnsureSolidMaterial(Materials.Material material)
@@ -5808,11 +5935,11 @@ public partial class AlienScene : Node3D
 				out overrideParameterEntity,
 				out fallbackParameterEntity);
 
-		solidMesh.MaterialOverride = GetSolidMaterialForModelReference(
+		solidMesh.MaterialOverride = WithRoomEnvironmentMap(GetSolidMaterialForModelReference(
 			material,
 			modelReferenceEntity,
 			overrideParameterEntity,
-			fallbackParameterEntity);
+			fallbackParameterEntity), solidMesh.GetParent() as Node3D);
 		UpdateWireframeOverlay(
 			solidMesh,
 			material,
@@ -6046,6 +6173,7 @@ public partial class AlienScene : Node3D
 							ptr.Texture.Format));
 				}
 			}
+			tex.Cubemap = CreateCubemap(texPart, format, ptr.Texture);
 		}
 		else
 		{
@@ -6061,6 +6189,91 @@ public partial class AlienScene : Node3D
 			cache[writeIndex] = tex;
 
 		return tex;
+	}
+
+	/// <summary>
+	/// The six faces of a cube texture (each with its own mip chain, one after another) as a cubemap, decompressed, with the
+	/// game's own blurred mips so a rough surface samples it as the game does by glossiness. Null if a face won't read.
+	/// </summary>
+	private static Cubemap CreateCubemap(Textures.TEX4.Texture texPart, Image.Format format, Textures.TEX4 texture)
+	{
+		int faceByteCount = texPart.Content.Length / 6;
+		Godot.Collections.Array<Image> faces = new Godot.Collections.Array<Image>();
+		for (int face = 0; face < 6; face++)
+		{
+			byte[] faceData = new byte[faceByteCount];
+			Array.Copy(texPart.Content, face * faceByteCount, faceData, 0, faceByteCount);
+			Image image = CreateCubeFace(faceData, (int)texPart.Width, (int)texPart.Height, format, texture);
+			if (image == null)
+				return null;
+			faces.Add(image);
+		}
+		Cubemap cubemap = new Cubemap();
+		if (cubemap.CreateFromImages(faces) != Error.Ok)
+		{
+			cubemap.Dispose();
+			ViewerLog.PrintErr("Could not make a cubemap of " + texture.Name);
+			return null;
+		}
+		cubemap.ResourceLocalToScene = false;
+		return cubemap;
+	}
+
+	/* One face with the game's own mips: they're pre-blurred (by mip 3 of a 128 cube a light is a soft glow, by mip 4 near
+	   enough flat), where mips made here keep every light a hard blob - which a rough metal then shows as chrome stripes.
+	   The levels the file has, each decoded on its own; below that (and under 4x4 for a block format), halved down to 1x1. */
+	private static Image CreateCubeFace(byte[] faceData, int width, int height, Image.Format format, Textures.TEX4 texture)
+	{
+		List<byte> chain = new List<byte>();
+		Image level = null;
+		int offset = 0, w = width, h = height;
+		bool block = format == Image.Format.Dxt1 || format == Image.Format.Dxt3 || format == Image.Format.Dxt5 || format == Image.Format.BptcRgba;
+		while (w >= 1 && h >= 1 && (!block || (w >= 4 && h >= 4)))
+		{
+			int size = AlienSceneTextures.GetBaseMipByteSize(w, h, format, texture.Format);
+			if (size <= 0 || offset + size > faceData.Length)
+				break;
+			byte[] bytes = new byte[size];
+			Array.Copy(faceData, offset, bytes, 0, size);
+			Image read = AlienSceneTextures.CreateImageFromRaw(bytes, w, h, format, texture.Format, texture.Name);
+			if (read == null || read.IsEmpty())
+				break;
+			if (read.IsCompressed())
+				read.Decompress();
+			read.ClearMipmaps();
+			if (read.GetFormat() != Image.Format.Rgba8)
+				read.Convert(Image.Format.Rgba8);
+			chain.AddRange(read.GetData());
+			level = read;
+			offset += size;
+			if (w == 1 && h == 1)
+				break;
+			w = Math.Max(1, w / 2);
+			h = Math.Max(1, h / 2);
+		}
+		if (level == null)
+			return null;
+		while (level.GetWidth() > 1 || level.GetHeight() > 1)
+		{
+			level.Resize(Math.Max(1, level.GetWidth() / 2), Math.Max(1, level.GetHeight() / 2), Image.Interpolation.Bilinear);
+			chain.AddRange(level.GetData());
+		}
+		Image face = Image.CreateFromData(width, height, true, Image.Format.Rgba8, chain.ToArray());
+		return face == null || face.IsEmpty() ? null : face;
+	}
+
+	/// <summary>A material's cube texture at a sampler, as a cubemap (its environment map); null when it isn't one.</summary>
+	public Cubemap GetSamplerCubemap(Materials.Material material, Shaders.Shader shader, int samplerIndex)
+	{
+		if (samplerIndex < 0 || shader.SamplerRemaps.Count <= samplerIndex)
+			return null;
+		int index = shader.SamplerRemaps[samplerIndex];
+		if (index == 255 || index >= material.TextureReferences.Count)
+			return null;
+		TexturePtr texturePtr = material.TextureReferences[index];
+		if (texturePtr == null || texturePtr.Location == TexturePtr.Source.NONE || texturePtr.Texture == null)
+			return null;
+		return GetTexOrCube(texturePtr)?.Cubemap;
 	}
 
 

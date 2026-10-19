@@ -296,6 +296,32 @@ public static class AlienSceneShaderParams
 		}
 	}
 
+	/// <summary>A CA_ENVIRONMENT pixel constant by its parameter, or the fallback where this permutation has none.</summary>
+	public static float GetEnvironmentFloat(Materials.Material material, Shaders.Shader shader, CA_ENVIRONMENT.PARAMETERS parameter, float fallback)
+	{
+		return GetFloat(shader, material, (int)parameter, fallback);
+	}
+
+	/// <summary>
+	/// A CA_ENVIRONMENT vertex constant (VERT_AO_TINT, ALPHABLEND_NOISE_POWER - the game feeds those to the vertex shader),
+	/// its first <paramref name="width"/> lanes, or the fallback where this permutation has none.
+	/// </summary>
+	public static float[] GetEnvironmentVertexValues(Materials.Material material, Shaders.Shader shader, CA_ENVIRONMENT.PARAMETERS parameter, int width, float fallback)
+	{
+		float[] values = new float[width];
+		for (int i = 0; i < width; i++)
+			values[i] = fallback;
+		int index = (int)parameter;
+		if (shader.VertexShaderParameterRemaps == null || index < 0 || index >= shader.VertexShaderParameterRemaps.Count)
+			return values;
+		int remap = shader.VertexShaderParameterRemaps[index];
+		if (remap == 255 || material.VertexShaderConstants == null)
+			return values;
+		for (int i = 0; i < width && remap + i < material.VertexShaderConstants.Count; i++)
+			values[i] = material.VertexShaderConstants[remap + i];
+		return values;
+	}
+
 	private static float GetFloat(Shaders.Shader shader, Materials.Material material, int index, float fallback)
 	{
 		if (index < 0 || shader.PixelShaderParameterRemaps.Count <= index)

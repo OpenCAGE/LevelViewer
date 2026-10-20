@@ -341,6 +341,9 @@ public static class AlienSceneMaterials
 	private static Shader _waterShader;
 	public const string WaterShaderPath = "res://shaders/water_surface.gdshader";
 
+	//A water material (CreateWaterMaterial): a SimpleWater sheet's, or a puddle's on a model
+	public static bool IsWaterMaterial(Material material) => material is ShaderMaterial water && water.Shader?.ResourcePath == WaterShaderPath;
+
 	private static MaterialResult CreateWaterMaterial(Materials.Material material, Shaders.Shader shader, AlienScene scene, string name)
 	{
 		_waterShader ??= GD.Load<Shader>(WaterShaderPath);

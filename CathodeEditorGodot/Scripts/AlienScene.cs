@@ -6167,7 +6167,7 @@ public partial class AlienScene : Node3D
 		if (mesh == null || !GodotObject.IsInstanceValid(mesh))
 			return;
 		//Never water: the mirror doesn't mirror the water reading it
-		bool water = mesh.MaterialOverride is ShaderMaterial material && material.Shader?.ResourcePath == AlienSceneMaterials.WaterShaderPath;
+		bool water = AlienSceneMaterials.IsWaterMaterial(mesh.MaterialOverride);
 		bool reflective = !water && IsReflectiveInstance(renderTarget);
 		mesh.Layers = reflective ? mesh.Layers | LevelViewerPlanarReflection.ReflectionLayer : mesh.Layers & ~LevelViewerPlanarReflection.ReflectionLayer;
 	}
@@ -6175,7 +6175,7 @@ public partial class AlienScene : Node3D
 	//A model drawn with a water material (a puddle) is a plane the water's mirror can be taken from: flat on the floor
 	private static void RegisterIfWater(MeshInstance3D mesh)
 	{
-		if (mesh?.MaterialOverride is ShaderMaterial material && material.Shader?.ResourcePath == AlienSceneMaterials.WaterShaderPath)
+		if (mesh != null && AlienSceneMaterials.IsWaterMaterial(mesh.MaterialOverride))
 			LevelViewerPlanarReflection.Register(mesh, false);
 	}
 

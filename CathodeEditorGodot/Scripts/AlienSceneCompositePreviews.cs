@@ -625,11 +625,16 @@ public partial class AlienScene
 		}
 	}
 
-	//Overlays that live inside the level's tree and are never part of a composite's preview (the wireframe pass is the viewport's own)
+	/* Overlays that live inside the level's tree and are never part of a composite's preview (the wireframe pass is the viewport's
+	   own), and what the viewport's render options draw that a preview leaves out whatever they say: the water - SimpleWater
+	   sheets with their caustics, and puddles drawn with a water material - and the planets. A preview is the composite's models
+	   alone, on nothing. The galaxy and the fog are drawn outside the level's tree, so the capture's camera never sees them. */
 	private bool IsExcludedFromPreview(Node node)
 	{
 		return node == _collisionOverlay || node == _stateInfoOverlay || node.Name == LightRadiusVisualNodeName
-			|| node.IsInGroup(LevelViewerPick.WireframeOverlayGroupName);
+			|| node.IsInGroup(LevelViewerPick.WireframeOverlayGroupName)
+			|| node is WaterSurface
+			|| (node is GeometryInstance3D geometry && (PlanetLook.IsPlanet(geometry) || AlienSceneMaterials.IsWaterMaterial(geometry.MaterialOverride)));
 	}
 
 	/// <summary>

@@ -46,6 +46,10 @@ instance uniform float detail_uv_scale = 1.0;
 // flow_cycle_time, flow_speed, flow_tex_scale, flow_warp_strength; atmosphere_scroll_speed, atmosphere_detail_scroll_speed
 instance uniform vec4 instance_flow = vec4(1.0, 1.0, 1.0, 1.0);
 instance uniform vec2 instance_scroll = vec2(0.0);
+// 0 where the level starts it hidden (its mover not visible: a sun the script swaps in later)
+instance uniform float planet_shown = 1.0;
+// OpenCAGE's Render Planets: 0 draws none at all
+global uniform float viewer_planets;
 
 varying vec3 world_normal;
 varying vec3 to_eye;
@@ -66,6 +70,10 @@ void vertex() {
 #else
 	POSITION = vec4(clip.xy, 0.0, clip.w);
 #endif
+	// Hidden: every vertex behind the camera, so nothing is drawn
+	if (planet_shown < 0.5 || viewer_planets < 0.5) {
+		POSITION = vec4(0.0, 0.0, 0.0, -1.0);
+	}
 }
 
 void fragment() {

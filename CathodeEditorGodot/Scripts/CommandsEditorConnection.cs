@@ -220,6 +220,14 @@ public partial class CommandsEditorConnection : Node3D
     /// <summary>Where the selection waiting in _pathEntities came from; consumed by ApplySelectionNow.</summary>
     private AlienScene.SelectionOrigin _pendingSelectionOrigin = AlienScene.SelectionOrigin.Remote;
     private readonly HashSet<uint> _viewerOriginatedEntityAdds = new HashSet<uint>();
+    private bool _antialiasApplied;
+    //As the packets last asked (applied on the main thread a moment after)
+    private LevelViewerDrawDistance _drawDistance = LevelViewerViewportDefinitions.DefaultDrawDistance;
+    /* The links out of entities taken out of the script's copy, by composite and entity, until they come back. Links aren't
+       part of the entity sync, and OpenCAGE resends a changed entity as removed and added again (and an undone delete brings
+       it back the same way): added from its record alone it lost them, and with them whatever is wired into its pins - a
+       FogSetting's distance and density, fed from constants. Under _lock; emptied when a level loads. */
+    private readonly Dictionary<(uint composite, uint entity), List<EntityConnector>> _linksOfRemoved = new Dictionary<(uint composite, uint entity), List<EntityConnector>>();
     private readonly HashSet<uint> _releasedEphemeralAliases = new HashSet<uint>();
     private uint _progressiveDeepSelectLeafId;
     private int _progressiveDeepSelectDepth;
@@ -675,6 +683,8 @@ public partial class CommandsEditorConnection : Node3D
                 {
                     if (forced)
                         _scene.SetSceneRootForLevelLoad(new ShortGuid(sceneRoot));
+                    lock (_lock)
+                        _linksOfRemoved.Clear();
                     _scene.QueueLoadLevel(level, pathToAi);
                 }).CallDeferred();
         }
@@ -761,6 +771,9 @@ public partial class CommandsEditorConnection : Node3D
             }
             if (adds > 0 || removedAny)
                 _scene.RefreshEntityHighlights();
+            //The level's fog and planets read their values from the script's entities, some of which just came or went
+            LevelViewerFog.Rescan(_scene);
+            PlanetLook.RequestRefresh(_scene);
             //Worth a line when it is long enough for OpenCAGE to have noticed: this is the viewer's busiest path outside a populate
             if (batchTime.ElapsedMilliseconds > 1000)
                 ViewerLog.Print("Entity batch (" + adds + " added, " + removals + " removed) took " + (batchTime.ElapsedMilliseconds / 1000.0).ToString("0.0") + " s");
@@ -1743,6 +1756,16 @@ public partial class CommandsEditorConnection : Node3D
         pointedOverride = !sync.removed;
     }
 
+    private static readonly StringName ViewerWaterGlobal = new StringName("viewer_water");
+    private static readonly StringName ViewerPlanetsGlobal = new StringName("viewer_planets");
+
+    //A viewer_* shader global switched on or off, with the frame drawn again (in low processor mode nothing else would)
+    private static void SetGlobalSwitch(StringName global, bool on)
+    {
+        RenderingServer.GlobalShaderParameterSet(global, on ? 1f : 0f);
+        LevelViewerRenderIdleThrottle.NotifyUserActivity();
+    }
+
     private bool ApplyViewerSettings(Packet packet)
     {
         _focusOnSelected = packet.focus_object;
@@ -1786,6 +1809,46 @@ public partial class CommandsEditorConnection : Node3D
             bool renderGalaxy = packet.render_galaxy;
             PreviewVisibilitySettings.RenderGalaxy = renderGalaxy;
             Callable.From(() => LevelViewerGalaxy.SetEnabled(_scene, renderGalaxy)).CallDeferred();
+        }
+        if (PreviewVisibilitySettings.RenderFog != packet.render_fog)
+        {
+            bool renderFog = packet.render_fog;
+            PreviewVisibilitySettings.RenderFog = renderFog;
+            Callable.From(() => LevelViewerFog.SetEnabled(renderFog)).CallDeferred();
+        }
+        //Water and planets are shader globals (project.godot's viewer_water / viewer_planets, 1 to draw them): main thread too
+        if (PreviewVisibilitySettings.RenderWater != packet.render_water)
+        {
+            bool renderWater = packet.render_water;
+            PreviewVisibilitySettings.RenderWater = renderWater;
+            Callable.From(() => SetGlobalSwitch(ViewerWaterGlobal, renderWater)).CallDeferred();
+        }
+        //Planets are drawn in the galaxy's sky: Render Galaxy off takes them off too, whatever Render Planets says
+        bool renderPlanets = packet.render_planets && packet.render_galaxy;
+        if (PreviewVisibilitySettings.RenderPlanets != renderPlanets)
+        {
+            PreviewVisibilitySettings.RenderPlanets = renderPlanets;
+            Callable.From(() => SetGlobalSwitch(ViewerPlanetsGlobal, renderPlanets)).CallDeferred();
+        }
+        //Read by LevelViewerPlanarReflection each frame, which falls back to the screen-space reflection while it is off
+        if (PreviewVisibilitySettings.PlanarReflections != packet.planar_reflections)
+        {
+            PreviewVisibilitySettings.PlanarReflections = packet.planar_reflections;
+            Callable.From(() => LevelViewerRenderIdleThrottle.NotifyUserActivity()).CallDeferred();
+        }
+        //Draw distance: every culled mesh in the scene gets its new distance, so main thread too
+        LevelViewerDrawDistance drawDistance = LevelViewerViewportDefinitions.NormalizeDrawDistance(packet.draw_distance);
+        if (drawDistance != _drawDistance)
+        {
+            _drawDistance = drawDistance;
+            Callable.From(() => LevelViewerMeshUtil.SetDrawDistancePreset(drawDistance, GetTree())).CallDeferred();
+        }
+        //Set on the window's viewport, so main thread too. Always on the first settings: the project's own is none at all
+        LevelViewerAntialiasMode antialias = LevelViewerViewportDefinitions.NormalizeAntialiasMode(packet.antialias_mode);
+        if (!_antialiasApplied || LevelViewerAntialiasing.Mode != antialias)
+        {
+            _antialiasApplied = true;
+            Callable.From(() => LevelViewerAntialiasing.Apply(GetViewport(), antialias)).CallDeferred();
         }
 
         /* Switched on, the pose goes straight away rather than when the camera next moves: the game goes to the viewport
@@ -4395,6 +4458,8 @@ public partial class CommandsEditorConnection : Node3D
                 {
                     ShortGuid entityId = new ShortGuid(ids[i]);
                     Entity removedEntity = composite.GetEntityByID(entityId);
+                    if (removedEntity?.childLinks != null && removedEntity.childLinks.Count != 0)
+                        _linksOfRemoved[(packet.composite, ids[i])] = removedEntity.childLinks;
                     _scene.ForgetModelReferenceOverrideMaterials(removedEntity);
                     ModelReferenceMaterialMapping.NoteEntityRemoved(_scene.Content.Level?.Commands, composite, removedEntity);
                     //By what the entity is here; the packet says only what its first one is
@@ -5075,6 +5140,7 @@ public partial class CommandsEditorConnection : Node3D
                 FunctionEntity functionEntity = new FunctionEntity() { shortGUID = entityId, function = new ShortGuid(function) };
                 composite.AddFunction(functionEntity);
                 ApplyEntityAddedParameters(functionEntity, parameters);
+                TakeBackLinks(composite, functionEntity);
                 ModelReferenceMaterialMapping.NoteEntityAdded(composite, functionEntity);
                 return true;
             }
@@ -5083,6 +5149,7 @@ public partial class CommandsEditorConnection : Node3D
                 VariableEntity variableEntity = new VariableEntity() { shortGUID = entityId };
                 composite.AddVariable(variableEntity);
                 ApplyEntityAddedParameters(variableEntity, parameters);
+                TakeBackLinks(composite, variableEntity);
                 ModelReferenceMaterialMapping.NoteEntityAdded(composite, variableEntity);
                 return true;
             }
@@ -5092,6 +5159,7 @@ public partial class CommandsEditorConnection : Node3D
                 AliasEntity aliasEntity = new AliasEntity() { shortGUID = entityId, alias = aliasPath };
                 composite.AddAlias(aliasEntity);
                 ApplyEntityAddedParameters(aliasEntity, parameters);
+                TakeBackLinks(composite, aliasEntity);
                 ModelReferenceMaterialMapping.NoteEntityAdded(composite, aliasEntity);
                 return true;
             }
@@ -5101,11 +5169,19 @@ public partial class CommandsEditorConnection : Node3D
                 ProxyEntity proxyEntity = new ProxyEntity() { shortGUID = entityId, proxy = proxy };
                 composite.AddProxy(proxyEntity);
                 ApplyEntityAddedParameters(proxyEntity, parameters);
+                TakeBackLinks(composite, proxyEntity);
                 ModelReferenceMaterialMapping.NoteEntityAdded(composite, proxyEntity);
                 return true;
             }
         }
         return false;
+    }
+
+    //An entity back under an id it was removed from keeps the links out of it it had (see _linksOfRemoved). Under _lock.
+    private void TakeBackLinks(Composite composite, Entity entity)
+    {
+        if (_linksOfRemoved.Remove((composite.shortGUID.AsUInt32, entity.shortGUID.AsUInt32), out List<EntityConnector> links) && entity.childLinks.Count == 0)
+            entity.childLinks.AddRange(links);
     }
 
     private static ShortGuid[] PathOf(List<uint> pointed)

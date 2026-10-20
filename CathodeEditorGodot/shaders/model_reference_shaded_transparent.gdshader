@@ -18,6 +18,7 @@ uniform vec3 emission : source_color = vec3(0.0);
 uniform float emission_energy = 1.0;
 
 void fragment() {
+	model_reference_clip_to_reflection(VERTEX, INV_VIEW_MATRIX, CAMERA_VISIBLE_LAYERS);
 	vec4 tint = model_reference_tint(diffuse_tint);
 	vec2 uv = UV * diffuse_uv_mult;
 	vec4 tex = vec4(1.0);

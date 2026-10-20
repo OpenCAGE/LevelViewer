@@ -457,6 +457,31 @@ namespace OpenCAGE.UnityConnection
         // an OpenCAGE from before this means by never saying, so a viewer from after it shows the stars.
         public bool render_galaxy = true;
 
+        // OpenCAGE -> Level Viewer, with the rest of the settings: draw the distance fog the level switches on as it starts, as
+        // the game does (Options > Viewport > Render Distance Fog, off by default). Off, the whole level shows clear however far out the
+        // camera goes - and off is what an OpenCAGE from before this means by never saying.
+        public bool render_fog = false;
+
+        // OpenCAGE -> Level Viewer, with the rest of the settings: draw the level's water (SimpleWater sheets, puddles and their
+        // caustics) and its planets (Options > Viewport > Render Water / Render Planets). True is what an OpenCAGE from
+        // before these means by never saying. render_planets is the option's own value: the viewer draws planets only while
+        // render_galaxy is on as well.
+        public bool render_water = true;
+        public bool render_planets = true;
+
+        // OpenCAGE -> Level Viewer, with the rest of the settings: mirror the water as the game does, from the level drawn again
+        // (Options > Viewport > Use Planar Reflections, under Render Water); off, the cheaper screen-space reflection. True by
+        // default.
+        public bool planar_reflections = true;
+
+        // OpenCAGE -> Level Viewer, with the rest of the settings: how the viewport smooths edges (LevelViewerAntialiasMode,
+        // Options > Viewport > Anti-aliasing). An OpenCAGE from before this never says, and gets the default.
+        public int antialias_mode = (int)LevelViewerViewportDefinitions.DefaultAntialiasMode;
+
+        // OpenCAGE -> Level Viewer, with the rest of the settings: how far the viewport draws each model by its size
+        // (LevelViewerDrawDistance, Options > Viewport > Draw Distance). An OpenCAGE from before this never says, and gets the default.
+        public int draw_distance = (int)LevelViewerViewportDefinitions.DefaultDrawDistance;
+
         // LEVEL_RESOURCES_MODIFIED: a scratch copy of GALAXY.ITEMS_BIN when the galaxy was regenerated (the Galaxy
         // Editor), null when it wasn't. Loaded and shown like the other resource_sync_* tables.
         public string resource_sync_galaxy = null;

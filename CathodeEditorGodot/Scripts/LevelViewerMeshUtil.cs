@@ -1,4 +1,5 @@
 using Godot;
+using OpenCAGE.UnityConnection;
 
 /// <summary>
 /// Frustum / occlusion culling tweaks for dynamically spawned level meshes, and the one safe way to
@@ -72,20 +73,56 @@ public static class LevelViewerMeshUtil
 		meshInstance.IgnoreOcclusionCulling = false;
 		meshInstance.GIMode = GeometryInstance3D.GIModeEnum.Disabled;
 		float sized = DrawDistanceFor(meshInstance.Mesh != null ? meshInstance.Mesh.GetAabb() : new Aabb());
-		ApplyDistanceCulling(meshInstance, visibilityRangeEnd > 0f ? Mathf.Min(visibilityRangeEnd, sized) : sized);
+		ApplyDistanceCulling(meshInstance, Capped(sized, visibilityRangeEnd));
 	}
 
-	/* How far a mesh is drawn: 100 times its radius, 15 m at the least - a 1 m prop to 50 m, a 10 m wall to half a kilometre.
-	   The viewer's frame is bound by how many things it draws, not by the GPU (TECH_HUB: ~74k objects, 61 ms on the render
-	   thread, the GPU 7 ms of it), and the level's every prop was drawn from anywhere in it, walls between or not: this took
-	   TECH_HUB's views from 15 to 34 fps with nothing missing from them. The level's own LOD ranges don't cull (98% are
-	   10,000 m - the game leaves that to its zones). Composite previews lift it for their capture. */
-	public const float DrawDistancePerRadius = 100f;
-	public const float MinDrawDistance = 15f;
+	//The large scene's cap (ModelReferenceRenderSettings) on a draw distance; unlimited stays unlimited
+	private static float Capped(float sized, float cap) => sized <= 0f ? 0f : cap > 0f ? Mathf.Min(cap, sized) : sized;
+
+	/* How far a mesh is drawn: DrawDistancePerRadius times its radius, MinDrawDistance at the least - at Medium (OpenCAGE's
+	   Options > Viewport > Draw Distance, LevelViewerViewportDefinitions) 100 times and 15 m: a 1 m prop to 50 m, a 10 m wall to
+	   half a kilometre. The viewer's frame is bound by how many things it draws, not by the GPU (TECH_HUB: ~74k objects, 61 ms
+	   on the render thread, the GPU 7 ms of it), and the level's every prop was drawn from anywhere in it, walls between or
+	   not: this took TECH_HUB's views from 15 to 34 fps with nothing missing from them - but small things pop out at their
+	   distance, so it's the user's to set. The level's own LOD ranges don't cull (98% are 10,000 m - the game leaves that to
+	   its zones). Composite previews lift it for their capture. */
+	public static float DrawDistancePerRadius { get; private set; } = 100f;
+	public static float MinDrawDistance { get; private set; } = 15f;
+	public static LevelViewerDrawDistance DrawDistancePreset { get; private set; } = LevelViewerViewportDefinitions.DefaultDrawDistance;
+
+	//What ApplyDistanceCulling has set a distance on: what a change of preset goes over again
+	public const string DrawDistanceGroupName = "viewer_draw_distance";
 
 	public static float DrawDistanceFor(Aabb bounds)
 	{
+		if (DrawDistancePerRadius <= 0f)
+			return 0f;
 		return Mathf.Max(bounds.Size.Length() * 0.5f * DrawDistancePerRadius, MinDrawDistance);
+	}
+
+	/// <summary>
+	/// Sets how far models are drawn, and draws everything already in the scene that far: each by its bounds as drawn (a unit
+	/// volume by the size it's scaled to), under the large scene's cap.
+	/// </summary>
+	public static void SetDrawDistancePreset(LevelViewerDrawDistance preset, SceneTree tree)
+	{
+		LevelViewerViewportDefinitions.GetDrawDistanceFactors(preset, out float perRadius, out float minimum);
+		DrawDistancePreset = preset;
+		DrawDistancePerRadius = perRadius;
+		MinDrawDistance = minimum;
+		if (tree == null)
+			return;
+
+		float cap = ModelReferenceRenderSettings.VisibilityRangeEnd;
+		foreach (Node node in tree.GetNodesInGroup(DrawDistanceGroupName))
+		{
+			if (node is not MeshInstance3D mesh || !GodotObject.IsInstanceValid(mesh) || PlanetLook.IsPlanet(mesh))
+				continue;
+			Aabb bounds = mesh.GetAabb();
+			Vector3 scale = mesh.Scale.Abs();
+			ApplyDistanceCulling(mesh, Capped(DrawDistanceFor(new Aabb(bounds.Position * scale, bounds.Size * scale)), cap));
+		}
+		LevelViewerRenderIdleThrottle.NotifyUserActivity();
 	}
 
 	/// <summary>
@@ -98,16 +135,17 @@ public static class LevelViewerMeshUtil
 			ApplyDistanceCulling(meshInstance, DrawDistanceFor(new Aabb(Vector3.Zero, drawnSize)));
 	}
 
+	//0: drawn however far (Unlimited)
 	private static void ApplyDistanceCulling(MeshInstance3D meshInstance, float visibilityRangeEnd)
 	{
-		if (visibilityRangeEnd <= 0f)
-			return;
-
+		visibilityRangeEnd = Mathf.Max(visibilityRangeEnd, 0f);
 		meshInstance.VisibilityRangeBegin = 0f;
 		meshInstance.VisibilityRangeEnd = visibilityRangeEnd;
 		meshInstance.VisibilityRangeBeginMargin = 0f;
 		meshInstance.VisibilityRangeEndMargin = Mathf.Min(visibilityRangeEnd * 0.1f, 384f);
 		meshInstance.VisibilityRangeFadeMode = GeometryInstance3D.VisibilityRangeFadeModeEnum.Disabled;
+		if (!meshInstance.IsInGroup(DrawDistanceGroupName))
+			meshInstance.AddToGroup(DrawDistanceGroupName);
 	}
 
 	public static Aabb ComputeAabb(Vector3[] vertices)

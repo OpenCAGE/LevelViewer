@@ -18,6 +18,18 @@ public static class PreviewVisibilitySettings
     /// <summary>Draw the level's galaxy as the sky, rather than the plain sky ('Render Galaxy' in OpenCAGE).</summary>
     public static bool RenderGalaxy { get; set; } = true;
 
+    /// <summary>Draw the distance fog the level switches on as it starts ('Render Distance Fog' in OpenCAGE, off by default).</summary>
+    public static bool RenderFog { get; set; } = false;
+
+    /// <summary>Draw the level's water and its caustics ('Render Water' in OpenCAGE).</summary>
+    public static bool RenderWater { get; set; } = true;
+
+    /// <summary>Draw the level's planets: 'Render Planets' in OpenCAGE, and only with 'Render Galaxy' on too.</summary>
+    public static bool RenderPlanets { get; set; } = true;
+
+    /// <summary>Mirror the water from the level drawn again, as the game does; off, the screen-space reflection ('Use Planar Reflections' in OpenCAGE, under 'Render Water').</summary>
+    public static bool PlanarReflections { get; set; } = true;
+
     /// <summary>How the selected entity is marked. Owned by OpenCAGE, arrives on the settings packet.</summary>
     public static OpenCAGE.UnityConnection.LevelViewerHighlightMode SelectionHighlightMode { get; set; }
         = OpenCAGE.UnityConnection.LevelViewerHighlightMode.Green;

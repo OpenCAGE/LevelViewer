@@ -7,6 +7,7 @@ uniform vec4 base_grey : source_color = vec4(0.09, 0.09, 0.10, 1.0);
 uniform float opacity : hint_range(0.0, 1.0) = 0.24;
 
 void fragment() {
+	model_reference_clip_to_reflection(VERTEX, INV_VIEW_MATRIX, CAMERA_VISIBLE_LAYERS);
 	vec3 normal = normalize(NORMAL);
 	float ndl = max(dot(normal, MODEL_REFERENCE_PREVIEW_LIGHT_DIR), 0.0);
 	ALBEDO = model_reference_apply_preview_shading(base_grey.rgb, ndl);

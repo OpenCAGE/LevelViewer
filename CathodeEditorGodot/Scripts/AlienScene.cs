@@ -78,16 +78,31 @@ public partial class AlienScene : Node3D
 	/* What the level's movers give an instance of their own (WithMoverLook): its room's cube and its glow. Each mover's, by
 	   its entity handle; the entities any of them is an instance of; what each render target resolved to; the copies of a
 	   material made for one; and what each material takes at all. All per populate. */
-	private readonly record struct MoverEmissive(Vector3 Tint, bool ReplaceTint);
+	//An instance's own EMISSIVE_TINT, as the game sets it on the material it draws (see InstanceEmissiveTint)
+	private readonly record struct MoverEmissive(Vector4 Tint);
 	private readonly record struct MoverLook(Textures.TEX4 Cube, MoverEmissive? Emissive);
 	private Dictionary<(uint, uint), Textures.TEX4> _moverEnvironmentMaps;
 	private Dictionary<(uint, uint), MoverEmissive> _moverEmissives;
 	private HashSet<uint> _moverLookEntities;
 	private readonly Dictionary<Node3D, MoverLook> _moverLookByTarget = new Dictionary<Node3D, MoverLook>();
-	private readonly Dictionary<(ShaderMaterial, Textures.TEX4, MoverEmissive?), ShaderMaterial> _roomCubeMaterials = new Dictionary<(ShaderMaterial, Textures.TEX4, MoverEmissive?), ShaderMaterial>();
+	private readonly Dictionary<(ShaderMaterial, Textures.TEX4, MoverEmissive?), ShaderMaterial> _roomCubeMaterials = new Dictionary<(ShaderMaterial, Textures.TEX4, MoverEmissive?), ShaderMaterial>(MoverLookKeyComparer.Instance);
 	private readonly Dictionary<ShaderMaterial, (bool Reflects, bool Emissive)> _materialMoverUse = new Dictionary<ShaderMaterial, (bool Reflects, bool Emissive)>();
 	//Room cubes that would not convert: not tried again for the next mesh in the room
-	private readonly HashSet<Textures.TEX4> _roomCubesUnavailable = new HashSet<Textures.TEX4>();
+	private readonly HashSet<Textures.TEX4> _roomCubesUnavailable = new HashSet<Textures.TEX4>(ReferenceEqualityComparer.Instance);
+	/* The cubes by reference, here and in every TEX4-keyed table: TEX4 hashes the first bytes of its content, which a populate
+	   lets go of once converted - by its own hash the same cube was another before and after, and the copy made for an
+	   instance in it wasn't found again for the next (a new copy per incremental spawn), nor a cube already known not to convert */
+	private sealed class MoverLookKeyComparer : IEqualityComparer<(ShaderMaterial, Textures.TEX4, MoverEmissive?)>
+	{
+		public static readonly MoverLookKeyComparer Instance = new MoverLookKeyComparer();
+
+		public bool Equals((ShaderMaterial, Textures.TEX4, MoverEmissive?) x, (ShaderMaterial, Textures.TEX4, MoverEmissive?) y) =>
+			ReferenceEquals(x.Item1, y.Item1) && ReferenceEquals(x.Item2, y.Item2) && Nullable.Equals(x.Item3, y.Item3);
+
+		public int GetHashCode((ShaderMaterial, Textures.TEX4, MoverEmissive?) key) =>
+			HashCode.Combine(System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(key.Item1),
+				System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(key.Item2), key.Item3);
+	}
 	private long _roomCubeTicks;
 	private int _roomCubeMeshes;
 	private int _roomCubeMisses;
@@ -238,6 +253,9 @@ public partial class AlienScene : Node3D
 		SplinePathPreview.AfterEditRefresh = OnSplinePreviewEditRefreshed;
 		SplinePathPreview.AfterEditRefreshAll = LevelViewerSelection.ReapplyAfterSplineEditRefresh;
 		Callable.From(EnsureLoadingScreen).CallDeferred();
+		//The water's mirror: idle until some water with a plane to mirror is on screen. Beside the scene, not in it - a level's
+		//reset frees what the scene holds
+		Callable.From(() => (GetTree().CurrentScene ?? GetParent())?.AddChild(new LevelViewerPlanarReflection())).CallDeferred();
 	}
 
 	/* Edit in Viewport draws the working points in every placement of the spline: the follow-up a spline parameter edit gets
@@ -728,6 +746,7 @@ public partial class AlienScene : Node3D
 		}
 		_texturesGlobalByIndex.Clear();
 		_texturesByPath.Clear();
+		_volumeTextures.Clear();
 
 		AlienSceneTextures.ClearTransparencyCache();
 
@@ -762,6 +781,7 @@ public partial class AlienScene : Node3D
 		_loadedComposite = null;
 		_entitiesAtLevelLoad = null;
 		_effectsShownByOwnFlag.Clear();
+		_reflectiveByOwnFlag.Clear();
 		ResetResourceSyncState();
 		_content.Reset();
 	}
@@ -2458,7 +2478,8 @@ public partial class AlienScene : Node3D
 		return plan;
 	}
 
-	/* The textures the populate's surface effects paint with (SurfaceEffectOverlay), into its plan with the models': the
+	/* The textures the populate's surface effects paint with (SurfaceEffectOverlay) and its water ripples and shimmers with
+	   (WaterSurface, WaterCaustics), into its plan with the models': the
 	   source binaries are let go of once the plan is converted, before the entities are, and one asked for after that came
 	   back empty - the airport's frost drew as flat white. */
 	private void AddSurfaceEffectTextures(LevelViewerPopulateTree.Plan spawnPlan, LevelViewerPopulatePrewarm.Plan plan)
@@ -2467,26 +2488,44 @@ public partial class AlienScene : Node3D
 			return;
 
 		HashSet<string> seen = null;
+		List<string> paths = new List<string>();
 		for (int i = 0; i < spawnPlan.Commands.Count; i++)
 		{
-			if (spawnPlan.Commands[i].Entity is not FunctionEntity function || !SurfaceEffectOverlay.IsSurfaceEffect(function))
+			if (spawnPlan.Commands[i].Entity is not FunctionEntity function)
 				continue;
-			string path = (function.GetParameter("TEXTURE_MAP")?.content as cString)?.value;
-			if (string.IsNullOrEmpty(path) || !(seen ??= new HashSet<string>(StringComparer.OrdinalIgnoreCase)).Add(path))
-				continue;
-
-			TexturePtr.Source source = TexturePtr.Source.LEVEL;
-			Textures.TEX4 tex = _content.Level.Textures?.GetEnvironmentMapByPath(path);
-			if (tex == null)
+			paths.Clear();
+			if (SurfaceEffectOverlay.IsSurfaceEffect(function))
+				paths.Add((function.GetParameter("TEXTURE_MAP")?.content as cString)?.value);
+			//And the water's ripples and caustics (WaterSurface), the caustics' a volume built while the binaries are held
+			else if (WaterSurface.IsWater(function))
 			{
-				source = TexturePtr.Source.GLOBAL;
-				tex = LevelContent.Global?.Textures?.GetEnvironmentMapByPath(path);
+				paths.AddRange(WaterSurface.TexturePaths(function));
+				string caustics = (function.GetParameter("CAUSTIC_TEXTURE")?.content as cString)?.value;
+				paths.Add(caustics);
+				if (!string.IsNullOrEmpty(caustics))
+					_pendingVolumePaths.Add(caustics);
 			}
-			if (tex == null)
-				continue;
-			plan.Textures.Add(tex);
-			plan.TextureLocations[tex] = source;
+			foreach (string path in paths)
+				AddEntityTexture(path, plan, ref seen);
 		}
+	}
+
+	private void AddEntityTexture(string path, LevelViewerPopulatePrewarm.Plan plan, ref HashSet<string> seen)
+	{
+		if (string.IsNullOrEmpty(path) || !(seen ??= new HashSet<string>(StringComparer.OrdinalIgnoreCase)).Add(path))
+			return;
+
+		TexturePtr.Source source = TexturePtr.Source.LEVEL;
+		Textures.TEX4 tex = _content.Level.Textures?.GetEnvironmentMapByPath(path);
+		if (tex == null)
+		{
+			source = TexturePtr.Source.GLOBAL;
+			tex = LevelContent.Global?.Textures?.GetEnvironmentMapByPath(path);
+		}
+		if (tex == null)
+			return;
+		plan.Textures.Add(tex);
+		plan.TextureLocations[tex] = source;
 	}
 
 	private bool IsPlanMeshCached(int writeIndex)
@@ -3810,6 +3849,8 @@ public partial class AlienScene : Node3D
 			RespawnInstancesDeletedBy(dataComposite, dataEntity, new ShortGuid(sync.name));
 		//The fog, if this is its setting or something feeding it
 		LevelViewerFog.RefreshIfIn(this, dataComposite);
+		//And the planets, whose values come from all over their SpaceVista composite and its placement
+		PlanetLook.RequestRefresh(this);
 
 		//A resource pointed at a model or texture nothing has displayed yet needs the same restore as a new entity.
 		if (diagDataType == DataType.RESOURCE)
@@ -4086,6 +4127,7 @@ public partial class AlienScene : Node3D
 				overrideParameterEntity,
 				fallbackParameterEntity), mesh.GetParent() as Node3D);
 			PlanetLook.TryApply(this, mesh);
+			RegisterIfWater(mesh);
 			if (ModelReferenceRenderSettings.WireframeEnabled)
 			{
 				UpdateWireframeOverlay(
@@ -4843,6 +4885,9 @@ public partial class AlienScene : Node3D
 		if (context.Sync != null && new ShortGuid(context.Sync.name) == ShortGuidUtils.Generate("show_on_reset") && context.Entity is FunctionEntity edited
 			&& (SurfaceEffectOverlay.IsSurfaceEffect(edited) || WaterSurface.IsWater(edited)))
 			_effectsShownByOwnFlag.Add(edited.shortGUID.AsUInt32);
+		//In the water's mirror or not: the model's own, or every model a composite instance places
+		if (context.Sync != null && new ShortGuid(context.Sync.name) == ShortGuidUtils.Generate("include_in_planar_reflections"))
+			RefreshReflectionLayersUnder(context.Entity);
 		SurfaceEffectOverlay.RefreshUnder(context.EntityNode);
 		WaterSurface.RefreshUnder(context.EntityNode);
 		if (context.Sync != null && new ShortGuid(context.Sync.name) != ShortGuidUtils.Generate("loop"))
@@ -5469,6 +5514,8 @@ public partial class AlienScene : Node3D
 			fallbackEntity), parent);
 		parent.AddChild(meshInstance);
 		PlanetLook.TryApply(this, meshInstance);
+		ApplyReflectionLayer(meshInstance, parent);
+		RegisterIfWater(meshInstance);
 		if (!_bulkMeshSpawning && ModelReferenceRenderSettings.WireframeEnabled)
 			UpdateWireframeOverlay(meshInstance, material, modelReferenceEntity, parameterEntity, fallbackEntity);
 		if (_deferBulkPickRegistration)
@@ -5972,6 +6019,8 @@ public partial class AlienScene : Node3D
 		_moverEnvironmentMaps = null;
 		_moverEmissives = null;
 		_moverVisible = null;
+		_moverReflective = null;
+		_moverReflectiveEntities = null;
 	}
 
 	/* What the movers give an instance of its own, on a copy of its material:
@@ -5979,10 +6028,11 @@ public partial class AlienScene : Node3D
 	     material's own ENVIRONMENT_MAP, a generic one most materials share (TECH_HUB's metals all point at env_base or
 	     env_base_2: dark, with hard white lights, where the lobby's own cube is a dim warm hall). The claims aren't resolved
 	     here, which would mean following each EnvironmentMap's links as the zone highlight does.
-	   - An EMISSIVE instance takes its ModelReference's emissive_tint: a light fitting the colour of its light. With
-	     replace_tint it is the fitting's colour outright (those materials carry their colour in the diffuse tint:
-	     HAB_SHOPPINGCENTRE's Bright_Warm panels are cyan in the game), otherwise it tints the glow. The instance's intensity is
-	     left out: the game's x0.1 panels glow as brightly as the material alone, and taken as a scale they barely lit.
+	   - An EMISSIVE instance has its own EMISSIVE_TINT in place of its material's, from its mover (InstanceEmissiveTint):
+	     its tint and intensity, with replace_tint and replace_intensity as the constant's negative lanes. So a replaced
+	     tint colours the glow from the diffuse's brightness and leaves the surface as it is (HAB_SHOPPINGCENTRE's
+	     Bright_Warm panels glow cyan), and an instance at intensity 0, or with its lighting master off, doesn't glow (the
+	     alien nest's generator coils, 80 of its light panels).
 	   Both as WORLD/ENVIRONMENTMAP.BIN and the MVR had them, so this is the level as last saved: an instance added, moved or
 	   retinted since keeps its material's until then. A copy per (material, cube, glow) it's seen with. */
 	private ShaderMaterial WithMoverLook(ShaderMaterial material, Node3D renderTarget)
@@ -6004,6 +6054,10 @@ public partial class AlienScene : Node3D
 		if (cube != null && _roomCubesUnavailable.Contains(cube))
 			cube = null;
 		MoverEmissive? emissive = use.Emissive ? look.Emissive : null;
+		//The game only sets it on a material with an EMISSIVE_TINT of its own, and where it's that already nothing changes
+		if (emissive is MoverEmissive own && (!material.HasMeta(AlienSceneMaterials.EmissiveTintMeta)
+			|| material.GetMeta(AlienSceneMaterials.EmissiveTintMeta).AsVector4() == own.Tint))
+			emissive = null;
 
 		ShaderMaterial result = material;
 		ShaderMaterial copy = null;
@@ -6039,18 +6093,7 @@ public partial class AlienScene : Node3D
 					copy.SetShaderParameter(AlienSceneMaterials.EnvironmentRoomCubeParam, cubemap);
 				}
 				if (emissive is MoverEmissive glow)
-				{
-					if (glow.ReplaceTint)
-					{
-						Vector4 diffuse = material.GetShaderParameter(AlienSceneMaterials.DiffuseTintParam).AsVector4();
-						copy.SetShaderParameter(AlienSceneMaterials.DiffuseTintParam, new Vector4(glow.Tint.X, glow.Tint.Y, glow.Tint.Z, diffuse.W));
-						copy.SetShaderParameter(AlienSceneMaterials.EmissiveTintParam, Vector3.One);
-					}
-					else
-					{
-						copy.SetShaderParameter(AlienSceneMaterials.EmissiveTintParam, material.GetShaderParameter(AlienSceneMaterials.EmissiveTintParam).AsVector3() * glow.Tint);
-					}
-				}
+					AlienSceneMaterials.ApplyEmissiveTint(copy, glow.Tint, (float)material.GetMeta(AlienSceneMaterials.EmissiveMultMeta, 1f));
 				//A copy already wears its look: handed back in, it's left as it is
 				_materialMoverUse[copy] = (false, false);
 				_roomCubeMaterials[(material, cube, emissive)] = copy;
@@ -6068,6 +6111,22 @@ public partial class AlienScene : Node3D
 			_moverEmissiveMeshes++;
 		_roomCubeTicks += System.Diagnostics.Stopwatch.GetTimestamp() - start;
 		return result;
+	}
+
+	/* The EMISSIVE_TINT the game sets on an instance's material from its mover: the tint's bytes as sRGB, made linear, and the
+	   intensity - the tint negated where it replaces the material's colour (replace_tint), the intensity where it replaces
+	   its strength (replace_intensity), and none at all while its lighting master is off. */
+	private static Vector4 InstanceEmissiveTint(Movers.MOVER_DESCRIPTOR mover)
+	{
+		static float Linear(float value)
+		{
+			float c = value / 255f;
+			return c <= 0.04045f ? c / 12.92f : Mathf.Pow((c + 0.055f) / 1.055f, 2.4f);
+		}
+		float sign = mover.EmissiveFlags.HasFlag(Movers.EmissiveFlag.ReplaceTint) ? -1f : 1f;
+		float intensity = mover.EmissiveFlags.HasFlag(Movers.EmissiveFlag.MasterOff) ? 0f
+			: mover.EmissiveFlags.HasFlag(Movers.EmissiveFlag.ReplaceIntensity) ? -mover.EmissiveIntensityMultiplier : mover.EmissiveIntensityMultiplier;
+		return new Vector4(Linear(mover.EmissiveTint.X) * sign, Linear(mover.EmissiveTint.Y) * sign, Linear(mover.EmissiveTint.Z) * sign, intensity);
 	}
 
 	private bool TryGetMoverLookCopy(ShaderMaterial material, Textures.TEX4 cube, MoverEmissive? emissive, out ShaderMaterial copy)
@@ -6093,6 +6152,115 @@ public partial class AlienScene : Node3D
 
 	//Each mover's Visible flag, by its entity handle (GetMoverShown); per populate
 	private Dictionary<(uint, uint), bool> _moverVisible;
+	//The movers in the water's mirror (CullFlag INCLUDE_IN_REFLECTIVE), by entity handle, and their entities; per populate
+	private HashSet<(uint, uint)> _moverReflective;
+	private HashSet<uint> _moverReflectiveEntities;
+	//Models whose include_in_planar_reflections has been edited since the level was loaded: their own flag is newer
+	private readonly HashSet<uint> _reflectiveByOwnFlag = new HashSet<uint>();
+
+	/* Puts a model's mesh in the water's mirror (LevelViewerPlanarReflection's layer) or out of it: as the level was built - its
+	   mover's INCLUDE_IN_REFLECTIVE - while the root is open and the instance was there when the level loaded, else as the
+	   script has it now: include_in_planar_reflections on its ModelReference, or on the composite instance placing it
+	   (CathodeLib's rule, Instancing) */
+	private void ApplyReflectionLayer(MeshInstance3D mesh, Node3D renderTarget)
+	{
+		if (mesh == null || !GodotObject.IsInstanceValid(mesh))
+			return;
+		//Never water: the mirror doesn't mirror the water reading it
+		bool water = mesh.MaterialOverride is ShaderMaterial material && material.Shader?.ResourcePath == AlienSceneMaterials.WaterShaderPath;
+		bool reflective = !water && IsReflectiveInstance(renderTarget);
+		mesh.Layers = reflective ? mesh.Layers | LevelViewerPlanarReflection.ReflectionLayer : mesh.Layers & ~LevelViewerPlanarReflection.ReflectionLayer;
+	}
+
+	//A model drawn with a water material (a puddle) is a plane the water's mirror can be taken from: flat on the floor
+	private static void RegisterIfWater(MeshInstance3D mesh)
+	{
+		if (mesh?.MaterialOverride is ShaderMaterial material && material.Shader?.ResourcePath == AlienSceneMaterials.WaterShaderPath)
+			LevelViewerPlanarReflection.Register(mesh, false);
+	}
+
+	//The entity a mesh draws for: the nearest node up from it with one
+	private Entity FindRenderOwner(Node3D renderTarget, out Node3D ownerNode)
+	{
+		ownerNode = null;
+		for (Node node = renderTarget; node != null && node != _parentNode; node = node.GetParent())
+		{
+			if (node is Node3D node3D && _nodeEntities.TryGetValue(node3D, out Entity owner))
+			{
+				ownerNode = node3D;
+				return owner;
+			}
+		}
+		return null;
+	}
+
+	private bool IsReflectiveInstance(Node3D renderTarget)
+	{
+		Entity owner = FindRenderOwner(renderTarget, out Node3D ownerNode);
+		if (owner == null)
+			return false;
+
+		uint ownerId = owner.shortGUID.AsUInt32;
+		if (HasMovers && IsShowingLevelRoot && _entitiesAtLevelLoad != null && _entitiesAtLevelLoad.Contains(ownerId) && !_reflectiveByOwnFlag.Contains(ownerId))
+		{
+			if (_moverReflective == null)
+			{
+				_moverReflective = new HashSet<(uint, uint)>();
+				_moverReflectiveEntities = new HashSet<uint>();
+				foreach (Movers.MOVER_DESCRIPTOR mover in _content.Level.Movers.Entries)
+				{
+					if (mover?.Entity == null || !mover.CullFlags.HasFlag(Movers.CullFlag.INCLUDE_IN_REFLECTIVE))
+						continue;
+					_moverReflective.Add((mover.Entity.composite_instance_id.AsUInt32, mover.Entity.entity_id.AsUInt32));
+					_moverReflectiveEntities.Add(mover.Entity.entity_id.AsUInt32);
+				}
+			}
+			//Most aren't: only one any mover of is walked for its placement
+			if (!_moverReflectiveEntities.Contains(ownerId))
+				return false;
+			if (TryBuildEntityIdChainFromNode(ownerNode, out List<uint> chain) && chain.Count != 0 && chain.All(_entitiesAtLevelLoad.Contains))
+			{
+				List<ShortGuid> path = new List<ShortGuid>(chain.Count);
+				foreach (uint id in chain)
+					path.Add(new ShortGuid(id));
+				return _moverReflective.Contains((path.GenerateCompositeInstanceID().AsUInt32, chain[chain.Count - 1]));
+			}
+		}
+
+		if ((owner.GetParameter("include_in_planar_reflections")?.content as cBool)?.value == true)
+			return true;
+		for (Node node = ownerNode?.GetParent(); node != null && node != _parentNode; node = node.GetParent())
+		{
+			if (node is Node3D node3D && _nodeEntities.TryGetValue(node3D, out Entity entity) && entity is FunctionEntity function && !function.function.IsFunctionType)
+				return (function.GetParameter("include_in_planar_reflections")?.content as cBool)?.value == true;
+		}
+		return false;
+	}
+
+	/// <summary>After include_in_planar_reflections is edited on an entity: every model it places goes in or out of the mirror.</summary>
+	private void RefreshReflectionLayersUnder(Entity edited)
+	{
+		if (edited == null)
+			return;
+		_reflectiveByOwnFlag.Add(edited.shortGUID.AsUInt32);
+		foreach (MeshInstance3D mesh in _modelReferenceMeshes.Keys)
+		{
+			if (mesh == null || !GodotObject.IsInstanceValid(mesh))
+				continue;
+			for (Node node = mesh.GetParent(); node != null && node != _parentNode; node = node.GetParent())
+			{
+				if (node is Node3D node3D && _nodeEntities.TryGetValue(node3D, out Entity entity) && entity == edited)
+				{
+					//The edit is the model's own, or its placement's: either way the script speaks for it from now on
+					Entity model = FindRenderOwner(mesh.GetParent() as Node3D, out _);
+					if (model != null)
+						_reflectiveByOwnFlag.Add(model.shortGUID.AsUInt32);
+					ApplyReflectionLayer(mesh, mesh.GetParent() as Node3D);
+					break;
+				}
+			}
+		}
+	}
 
 	/// <summary>Whether the level has movers at all (a level made new has none until it's built).</summary>
 	public bool HasMovers => _content?.Level?.Movers?.Entries != null && _content.Level.Movers.Entries.Count != 0;
@@ -6115,7 +6283,9 @@ public partial class AlienScene : Node3D
 				continue;
 			foreach (FunctionEntity function in composite.functions)
 			{
-				if (function != null && (!function.function.IsFunctionType || SurfaceEffectOverlay.IsSurfaceEffect(function) || WaterSurface.IsWater(function)))
+				//(and the models, for whether they're in the water's mirror: IsReflectiveInstance)
+				if (function != null && (!function.function.IsFunctionType || SurfaceEffectOverlay.IsSurfaceEffect(function) || WaterSurface.IsWater(function)
+					|| function.function.AsFunctionType == FunctionType.ModelReference))
 					_entitiesAtLevelLoad.Add(function.shortGUID.AsUInt32);
 			}
 		}
@@ -6178,15 +6348,15 @@ public partial class AlienScene : Node3D
 					if (mover?.Entity == null)
 						continue;
 					(uint, uint) key = (mover.Entity.composite_instance_id.AsUInt32, mover.Entity.entity_id.AsUInt32);
-					bool replaceTint = mover.EmissiveFlags.HasFlag(Movers.EmissiveFlag.ReplaceTint);
-					//Only what changes anything: white and not replacing glows as the material does
-					bool ownGlow = replaceTint || mover.EmissiveTint.X != 255f || mover.EmissiveTint.Y != 255f || mover.EmissiveTint.Z != 255f;
-					if (mover.EnvironmentMap == null && !ownGlow)
+					//Every instance drawing an EMISSIVE material has its own glow, even a plain white x1 one (in place of the
+					//material's tint); one that's the material's own already is left as it is (WithMoverLook)
+					bool glows = mover.RenderableElements.Any(o => AlienSceneMaterials.IsEmissiveEnvironment(o?.Material));
+					if (mover.EnvironmentMap == null && !glows)
 						continue;
 					if (mover.EnvironmentMap != null)
 						_moverEnvironmentMaps[key] = mover.EnvironmentMap;
-					if (ownGlow)
-						_moverEmissives[key] = new MoverEmissive(new Vector3(mover.EmissiveTint.X, mover.EmissiveTint.Y, mover.EmissiveTint.Z) / 255f, replaceTint);
+					if (glows)
+						_moverEmissives[key] = new MoverEmissive(InstanceEmissiveTint(mover));
 					_moverLookEntities.Add(key.Item2);
 				}
 			}
@@ -6252,6 +6422,7 @@ public partial class AlienScene : Node3D
 			overrideParameterEntity,
 			fallbackParameterEntity), solidMesh.GetParent() as Node3D);
 		PlanetLook.TryApply(this, solidMesh);
+		RegisterIfWater(solidMesh);
 		UpdateWireframeOverlay(
 			solidMesh,
 			material,
@@ -6438,6 +6609,64 @@ public partial class AlienScene : Node3D
 		Texture2D texture = GetTexOrCube(new TexturePtr() { Texture = tex, Location = source })?.Texture;
 		_texturesByPath[path] = texture;
 		return texture;
+	}
+
+	/* Volume textures an entity names by path (a SimpleWater's CAUSTIC_TEXTURE: sixteen slices played as a loop), built from the
+	   source binaries while a populate holds them - the water's are in its plan (AddSurfaceEffectTextures) and built as soon
+	   as it is restored (RestoreReleasedSourceData), before converting it lets go of them - and kept for the level. Null
+	   where it can't be: not found, not a volume, or its bytes gone (an entity added after the populates). */
+	//By the texture itself: TEX4 hashes its content's first bytes, so once they're let go of it would hash as another
+	private readonly Dictionary<Textures.TEX4, Texture3D> _volumeTextures = new Dictionary<Textures.TEX4, Texture3D>(ReferenceEqualityComparer.Instance);
+
+	public Texture3D GetVolumeTextureByPath(string path)
+	{
+		if (string.IsNullOrEmpty(path))
+			return null;
+		Textures.TEX4 tex = _content?.Level?.Textures?.GetEnvironmentMapByPath(path) ?? LevelContent.Global?.Textures?.GetEnvironmentMapByPath(path);
+		if (tex == null)
+			return null;
+		if (_volumeTextures.TryGetValue(tex, out Texture3D known) && GodotObject.IsInstanceValid(known))
+			return known;
+
+		Textures.TEX4.Texture part = SelectTexPartForConversion(tex);
+		Image.Format format = AlienSceneTextures.MapImageFormat(tex.Format);
+		if (part == null || part.Depth <= 1 || format == Image.Format.Max)
+		{
+			ViewerLog.Print("[Texture] No volume of " + path + ": " + (part == null ? "its data is let go of" : "depth " + part.Depth + ", " + tex.Format));
+			return null;
+		}
+		int width = part.Width, height = part.Height, depth = part.Depth;
+		int sliceBytes = AlienSceneTextures.GetBaseMipByteSize(width, height, format, tex.Format);
+		if (sliceBytes <= 0 || part.Content.Length < sliceBytes * depth)
+			return null;
+
+		//The slices are stored one after another, a mip each
+		Godot.Collections.Array<Image> slices = new Godot.Collections.Array<Image>();
+		for (int i = 0; i < depth; i++)
+		{
+			byte[] bytes = new byte[sliceBytes];
+			System.Array.Copy(part.Content, i * sliceBytes, bytes, 0, sliceBytes);
+			slices.Add(Image.CreateFromData(width, height, false, format, bytes));
+		}
+		//Kept compressed where the renderer takes it so; otherwise as plain colour
+		ImageTexture3D volume = new ImageTexture3D { ResourceName = path };
+		if (volume.Create(slices[0].GetFormat(), width, height, depth, false, slices) != Error.Ok)
+		{
+			foreach (Image slice in slices)
+			{
+				if (slice.IsCompressed())
+					slice.Decompress();
+			}
+			volume = new ImageTexture3D { ResourceName = path };
+			if (volume.Create(slices[0].GetFormat(), width, height, depth, false, slices) != Error.Ok)
+			{
+				ViewerLog.Print("[Texture] Volume " + path + " would not build (" + width + "x" + height + "x" + depth + ", " + format + ")");
+				return null;
+			}
+		}
+		ViewerLog.Print("[Texture] Volume " + path + ": " + width + "x" + height + "x" + depth + " " + slices[0].GetFormat() + ".");
+		_volumeTextures[tex] = volume;
+		return volume;
 	}
 
 	private Textures GetTexturesForSource(TexturePtr.Source source) =>
@@ -6781,7 +7010,14 @@ public partial class AlienScene : Node3D
 
 		RestoreReleasedModelData(plan);
 		RestoreReleasedTextureData(plan);
+
+		//The volumes the plan's water named, built now: converting the plan lets go of the bytes they're made from
+		foreach (string path in _pendingVolumePaths)
+			GetVolumeTextureByPath(path);
+		_pendingVolumePaths.Clear();
 	}
+
+	private readonly HashSet<string> _pendingVolumePaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
 	/* Submeshes this file cannot give back - it has no data for them (the "non-parsed model" ones), or the table has drifted
 	   from it since an import: each populate that planned one read the whole model pak again and restored nothing -

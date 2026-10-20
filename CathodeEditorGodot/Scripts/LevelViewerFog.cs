@@ -23,9 +23,12 @@ public static class LevelViewerFog
 {
 	private const string ShaderPath = "res://shaders/atmosphere_fog.gdshader";
 
-	private static readonly StringName FogSettingParam = new StringName("fog_setting");
-	private static readonly StringName FogNearParam = new StringName("fog_near");
-	private static readonly StringName FogFarParam = new StringName("fog_far");
+	//Shader globals (project.godot), as the water fogs what it shows of the scene by them too: the setting's values, and its
+	//strength (viewer_fog: 1 as the game, 0 off)
+	private static readonly StringName FogSettingParam = new StringName("viewer_fog_setting");
+	private static readonly StringName FogNearParam = new StringName("viewer_fog_near");
+	private static readonly StringName FogFarParam = new StringName("viewer_fog_far");
+	private static readonly StringName FogStrengthParam = new StringName("viewer_fog");
 
 	private static readonly ShortGuid TriggerParam = ShortGuidUtils.Generate("trigger");
 	private static readonly ShortGuid StartOnResetParam = ShortGuidUtils.Generate("start_on_reset");
@@ -36,10 +39,13 @@ public static class LevelViewerFog
 	//The setting drawn and the composite it is in: an edit to either, or to what feeds it, redraws it (RefreshIfIn)
 	private static FunctionEntity _fog;
 	private static Composite _fogComposite;
+	//The level's script, searched again as entities come and go (Rescan)
+	private static Commands _commands;
 
 	/// <summary>Draws the fog the level starts with, or none (a null or level-less script).</summary>
 	public static void SetFog(Node host, Commands commands)
 	{
+		_commands = commands;
 		_fog = null;
 		_fogComposite = null;
 		if (commands != null)
@@ -49,17 +55,55 @@ public static class LevelViewerFog
 			ViewerLog.Print("[Fog] " + _fogComposite.name + " :: " + ((_fog.GetParameter("name")?.content as cString)?.value ?? _fog.shortGUID.ToString()) + ".");
 	}
 
+	/// <summary>
+	/// Finds the fog the level starts with again after entities were added or removed: the setting, its trigger or what feeds
+	/// it may be among them - and an edit OpenCAGE sends as the entity removed and added again leaves the one held a copy.
+	/// </summary>
+	public static void Rescan(Node host)
+	{
+		if (_commands == null)
+			return;
+		FindStartingFog(_commands, out _fog, out _fogComposite);
+		Apply(host);
+	}
+
+	/// <summary>The viewport option (OpenCAGE's Render Distance Fog): off, the whole level shows clear however far out the camera is.</summary>
+	public static void SetEnabled(bool enabled)
+	{
+		_enabled = enabled;
+		RenderingServer.GlobalShaderParameterSet(FogStrengthParam, enabled ? 1f : 0f);
+		//Off, the pass isn't drawn at all rather than drawn as nothing
+		if (_quad != null && GodotObject.IsInstanceValid(_quad))
+			_quad.Visible = _enabled && _fog != null && _hasDensity;
+	}
+
+	//Off until OpenCAGE's Render Distance Fog says otherwise (its default is off), as project.godot's viewer_fog starts at 0
+	private static bool _enabled = false;
+	private static bool _hasDensity;
+
 	/// <summary>Redraws the fog after an edit in <paramref name="composite"/>, if that is where the fog drawn is set.</summary>
 	public static void RefreshIfIn(Node host, Composite composite)
 	{
-		if (_fog != null && composite != null && composite == _fogComposite)
+		if (_fog == null || composite == null || composite.shortGUID != _fogComposite.shortGUID)
+			return;
+		//The setting as the script has it now, not the one found at load: an edit may have brought it back as a new entity
+		_fogComposite = composite;
+		if (composite.GetEntityByID(_fog.shortGUID) is FunctionEntity current)
+		{
+			_fog = current;
 			Apply(host);
+		}
+		else
+			Rescan(host);
 	}
 
 	private static void Apply(Node host)
 	{
 		if (_fog == null)
 		{
+			//No density, no fog: the water's too
+			RenderingServer.GlobalShaderParameterSet(FogSettingParam, Vector4.Zero);
+			_hasDensity = false;
 			if (_quad != null && GodotObject.IsInstanceValid(_quad))
 				_quad.Visible = false;
 			return;
@@ -73,10 +117,11 @@ public static class LevelViewerFog
 		float linearDensity = Float(_fog, "linear_density", 0f);
 		float exponentialDensity = Float(_fog, "exponential_density", 0f);
 		float maxDistance = Float(_fog, "max_distance", 850f);
-		_material.SetShaderParameter(FogSettingParam, new Vector4(linearDistance, linearDensity, exponentialDensity, maxDistance));
-		_material.SetShaderParameter(FogNearParam, Colour(_fog, "near_colour"));
-		_material.SetShaderParameter(FogFarParam, Colour(_fog, "far_colour"));
-		quad.Visible = linearDensity > 0f || exponentialDensity > 0f;
+		RenderingServer.GlobalShaderParameterSet(FogSettingParam, new Vector4(linearDistance, linearDensity, exponentialDensity, maxDistance));
+		RenderingServer.GlobalShaderParameterSet(FogNearParam, Colour(_fog, "near_colour"));
+		RenderingServer.GlobalShaderParameterSet(FogFarParam, Colour(_fog, "far_colour"));
+		_hasDensity = linearDensity > 0f || exponentialDensity > 0f;
+		quad.Visible = _enabled && _hasDensity;
 	}
 
 	private static MeshInstance3D EnsureQuad(Node host)

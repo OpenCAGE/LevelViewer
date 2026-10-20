@@ -339,27 +339,31 @@ public static class AlienSceneMaterials
 	   a surface, its normal map stood in for a colour: MUTHUR core's wet floor was flat yellow where the game's is a dark
 	   puddle with the room in it. */
 	private static Shader _waterShader;
+	public const string WaterShaderPath = "res://shaders/water_surface.gdshader";
 
 	private static MaterialResult CreateWaterMaterial(Materials.Material material, Shaders.Shader shader, AlienScene scene, string name)
 	{
-		_waterShader ??= GD.Load<Shader>("res://shaders/water_surface.gdshader");
+		_waterShader ??= GD.Load<Shader>(WaterShaderPath);
 		ShaderMaterial water = new ShaderMaterial { ResourceName = name, Shader = _waterShader, RenderPriority = -20 };
 		bool simple = shader.Ubershader == SHADER_LIST.CA_SIMPLEWATER;
 		string[] parameterNames = System.Enum.GetNames(simple ? typeof(CA_SIMPLEWATER.PARAMETERS) : typeof(CA_NONINTERACTIVE_WATER.PARAMETERS));
-		float[] Read(string parameter, int width)
+		//SCALE and SECONDARY_SCALE are the vertex stage's alone
+		float[] Read(string parameter, int width, bool vertexStage = false)
 		{
 			int index = System.Array.IndexOf(parameterNames, parameter);
-			if (index < 0 || shader.PixelShaderParameterRemaps == null || index >= shader.PixelShaderParameterRemaps.Count)
+			List<int> remaps = vertexStage ? shader.VertexShaderParameterRemaps : shader.PixelShaderParameterRemaps;
+			List<float> constants = vertexStage ? material.VertexShaderConstants : material.PixelShaderConstants;
+			if (index < 0 || remaps == null || index >= remaps.Count)
 				return null;
-			int remap = shader.PixelShaderParameterRemaps[index];
-			if (remap == 255 || material.PixelShaderConstants == null || remap + width > material.PixelShaderConstants.Count)
+			int remap = remaps[index];
+			if (remap == 255 || constants == null || remap + width > constants.Count)
 				return null;
 			float[] values = new float[width];
 			for (int i = 0; i < width; i++)
-				values[i] = material.PixelShaderConstants[remap + i];
+				values[i] = constants[remap + i];
 			return values;
 		}
-		float One(string parameter, float fallback) => Read(parameter, 1)?[0] ?? fallback;
+		float One(string parameter, float fallback, bool vertexStage = false) => Read(parameter, 1, vertexStage)?[0] ?? fallback;
 		Vector4 Stop(string colour, string alpha, float fallbackAlpha)
 		{
 			float[] c = Read(colour, 3) ?? new float[3];
@@ -376,17 +380,38 @@ public static class AlienSceneMaterials
 		   the levels' puddles have it. A puddle lies flush on the floor, so its fog fades out to nothing there and it is the
 		   reflection alone - without it, MUTHUR core's puddle's white first stop painted it white. */
 		water.SetShaderParameter("softness", 0.01f);
+		string[] samplerNames = System.Enum.GetNames(simple ? typeof(CA_SIMPLEWATER.SAMPLERS) : typeof(CA_NONINTERACTIVE_WATER.SAMPLERS));
+		Texture2D Sampler(string sampler)
+		{
+			int index = System.Array.IndexOf(samplerNames, sampler);
+			return index >= 0 ? scene?.GetSamplerTexture(material, shader, index) : null;
+		}
 		//The puddle's outline (ALPHA_MASKING: its mesh is a square, the mask's alpha the shape)
 		if (HasShaderFeature(shader, "ALPHA_MASKING"))
 		{
-			int maskSampler = System.Array.IndexOf(System.Enum.GetNames(simple ? typeof(CA_SIMPLEWATER.SAMPLERS) : typeof(CA_NONINTERACTIVE_WATER.SAMPLERS)), "ALPHA_MASK");
-			Texture2D mask = maskSampler >= 0 ? scene?.GetSamplerTexture(material, shader, maskSampler) : null;
+			Texture2D mask = Sampler("ALPHA_MASK");
 			if (mask != null)
 			{
 				water.SetShaderParameter("alpha_mask", mask);
 				water.SetShaderParameter("use_alpha_mask", true);
 			}
 		}
+		//Its ripples, as a sheet's (WaterSurface) but from the material: CA_NONINTERACTIVE_WATER's second layer reads a map of its own
+		Texture2D normalMap = WaterTextures.Mipped(Sampler("NORMAL_MAP"));
+		water.SetShaderParameter(WaterSurface.UseNormalMapParam, normalMap != null);
+		water.SetShaderParameter(WaterSurface.NormalMapParam, normalMap);
+		bool secondary = HasShaderFeature(shader, "SECONDARY_NORMAL_MAPPING");
+		water.SetShaderParameter(WaterSurface.SecondaryNormalParam, secondary);
+		Texture2D secondaryMap = secondary && !simple ? WaterTextures.Mipped(Sampler("SECONDARY_NORMAL_MAP")) : null;
+		water.SetShaderParameter("use_secondary_map", secondaryMap != null);
+		water.SetShaderParameter("secondary_normal_map", secondaryMap);
+		water.SetShaderParameter(WaterSurface.RippleParam, new Vector4(One("SPEED", 0.01f), One("SCALE", 1f, true), One("SECONDARY_SPEED", -0.01f), One("SECONDARY_SCALE", 1f, true)));
+		water.SetShaderParameter(WaterSurface.RippleStrengthParam, new Vector2(One("NORMAL_MAP_STRENGTH", 1f), One("SECONDARY_NORMAL_MAP_STRENGTH", 1f)));
+		Texture2D flowMap = HasShaderFeature(shader, "FLOW_UV_ANIMATION") ? WaterTextures.Mipped(Sampler("FLOW_MAP")) : null;
+		water.SetShaderParameter(WaterSurface.UseFlowParam, flowMap != null);
+		water.SetShaderParameter(WaterSurface.FlowMapParam, flowMap);
+		water.SetShaderParameter(WaterSurface.FlowParam, new Vector4(One("CYCLE_TIME", 10f), One("FLOW_SPEED", 1f), One("FLOW_TEX_SCALE", 4f), One("FLOW_WARP_STRENGTH", 0.5f)));
+		water.SetShaderParameter(WaterSurface.PerturbationParam, One("REFLECTION_PERTURBATION_STRENGTH", 1f));
 		return new MaterialResult(water, true);
 	}
 
@@ -610,30 +635,47 @@ public static class AlienSceneMaterials
 				godotMaterial.SetShaderParameter(EnvironmentCubeParam, environmentCube);
 		}
 
-		/* EMISSIVE: the surface glows in what it shows - times EMISSIVE_TINT's colour and a strength of |EMISSIVE_TINT.w| times
-		   EMISSIVE_MULT (a negative w is the strength as it stands). A negative lane in the tint makes the surface the diffuse's
-		   brightness in |EMISSIVE_TINT| instead, glowing white at that strength. Lights' panels, screens and signs. Each
-		   instance's own tint comes on top (AlienScene.WithMoverLook). */
+		/* EMISSIVE: the surface glows in what it shows - see ApplyEmissiveTint. Lights' panels, screens and signs. An instance
+		   of it the level placed has its own EMISSIVE_TINT in place of this one (AlienScene.WithMoverLook), so the material
+		   keeps what it was built from for that. */
 		bool emissive = HasShaderFeature(shader, "EMISSIVE");
-		Vector3 emissiveTint = Vector3.One;
-		float emissiveStrength = 0f;
-		bool emissiveFromLuma = false;
-		Vector3 emissiveLumaTint = Vector3.One;
+		godotMaterial.SetShaderParameter(EmissiveParam, emissive);
 		if (emissive)
 		{
-			float[] tint = AlienSceneShaderParams.GetEnvironmentPixelValues(material, shader, CA_ENVIRONMENT.PARAMETERS.EMISSIVE_TINT, 4) ?? new float[] { 1f, 1f, 1f, 1f };
+			float[] own = AlienSceneShaderParams.GetEnvironmentPixelValues(material, shader, CA_ENVIRONMENT.PARAMETERS.EMISSIVE_TINT, 4);
 			float mult = AlienSceneShaderParams.GetEnvironmentFloat(material, shader, CA_ENVIRONMENT.PARAMETERS.EMISSIVE_MULT, 1f);
-			emissiveFromLuma = tint[0] < 0f || tint[1] < 0f || tint[2] < 0f;
-			emissiveStrength = tint[3] >= 0f ? Mathf.Abs(tint[3]) * mult : Mathf.Abs(tint[3]);
-			if (!emissiveFromLuma)
-				emissiveTint = new Vector3(tint[0], tint[1], tint[2]);
-			emissiveLumaTint = new Vector3(Mathf.Abs(tint[0]), Mathf.Abs(tint[1]), Mathf.Abs(tint[2]));
+			Vector4 tint = own == null ? Vector4.One : new Vector4(own[0], own[1], own[2], own[3]);
+			ApplyEmissiveTint(godotMaterial, tint, mult);
+			godotMaterial.SetMeta(EmissiveMultMeta, mult);
+			//Only one with the constant takes an instance's: the game sets it on the material it draws, where it has one
+			if (own != null)
+				godotMaterial.SetMeta(EmissiveTintMeta, tint);
 		}
-		godotMaterial.SetShaderParameter(EmissiveParam, emissive);
-		godotMaterial.SetShaderParameter(EmissiveTintParam, emissiveTint);
-		godotMaterial.SetShaderParameter(EmissiveStrengthParam, emissiveStrength);
-		godotMaterial.SetShaderParameter(EmissiveFromLumaParam, emissiveFromLuma);
-		godotMaterial.SetShaderParameter(EmissiveLumaTintParam, emissiveLumaTint);
+		else
+			ApplyEmissiveTint(godotMaterial, new Vector4(1f, 1f, 1f, 0f), 0f);
+	}
+
+	//What an EMISSIVE material was built from, for an instance's own EMISSIVE_TINT in its place (AlienScene.WithMoverLook)
+	internal static readonly StringName EmissiveMultMeta = new StringName("cathode_emissive_mult");
+	internal static readonly StringName EmissiveTintMeta = new StringName("cathode_emissive_tint");
+
+	/* An EMISSIVE_TINT as CA_ENVIRONMENT reads it: the surface glows in what it shows, times the tint's colour, at a strength
+	   of w times EMISSIVE_MULT - or |w| as it stands, where w is negative. A negative lane in the colour makes the glow the
+	   diffuse's brightness in |colour| instead (a light fitting coloured to its light). */
+	internal static void ApplyEmissiveTint(ShaderMaterial godotMaterial, Vector4 tint, float mult)
+	{
+		bool fromLuma = tint.X < 0f || tint.Y < 0f || tint.Z < 0f;
+		godotMaterial.SetShaderParameter(EmissiveTintParam, fromLuma ? Vector3.One : new Vector3(tint.X, tint.Y, tint.Z));
+		godotMaterial.SetShaderParameter(EmissiveStrengthParam, tint.W >= 0f ? tint.W * mult : -tint.W);
+		godotMaterial.SetShaderParameter(EmissiveFromLumaParam, fromLuma);
+		godotMaterial.SetShaderParameter(EmissiveLumaTintParam, new Vector3(Mathf.Abs(tint.X), Mathf.Abs(tint.Y), Mathf.Abs(tint.Z)));
+	}
+
+	/// <summary>Whether a material is CA_ENVIRONMENT with EMISSIVE: one the game gives each instance its own glow on.</summary>
+	internal static bool IsEmissiveEnvironment(Materials.Material material)
+	{
+		Shaders.Shader shader = material?.Shader;
+		return shader != null && shader.Ubershader == SHADER_LIST.CA_ENVIRONMENT && HasShaderFeature(shader, "EMISSIVE");
 	}
 
 	public static ShaderMaterial CreateWireframeMaterial(

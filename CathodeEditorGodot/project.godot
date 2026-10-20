@@ -103,5 +103,37 @@ viewer_glass_sheen={
 }
 viewer_fog={
 "type": "float",
+"value": 0.0
+}
+viewer_water={
+"type": "float",
 "value": 1.0
+}
+viewer_reflection={
+"type": "sampler2D",
+"value": ""
+}
+viewer_reflection_plane={
+"type": "vec4",
+"value": Vector4(0, 1, 0, -100000)
+}
+viewer_reflection_active={
+"type": "float",
+"value": 0.0
+}
+viewer_planets={
+"type": "float",
+"value": 1.0
+}
+viewer_fog_setting={
+"type": "vec4",
+"value": Vector4(0, 0, 0, 0)
+}
+viewer_fog_near={
+"type": "vec3",
+"value": Vector3(0, 0, 0)
+}
+viewer_fog_far={
+"type": "vec3",
+"value": Vector3(0, 0, 0)
 }

@@ -11,6 +11,7 @@ uniform vec4 vertex_colour_tint : source_color = vec4(1.0);
 uniform vec2 diffuse_uv_mult = vec2(1.0);
 
 void fragment() {
+	model_reference_clip_to_reflection(VERTEX, INV_VIEW_MATRIX, CAMERA_VISIBLE_LAYERS);
 	vec2 uv = UV * diffuse_uv_mult;
 	vec4 tex = vec4(1.0);
 	if (use_diffuse_map) {

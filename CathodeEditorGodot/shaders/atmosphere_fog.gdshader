@@ -13,13 +13,14 @@ render_mode unshaded, blend_mix, depth_draw_never, depth_test_disabled, cull_dis
 global uniform float viewer_exposure;
 // The fog's strength, 0-1 (1: as the game; 0 turns it off)
 global uniform float viewer_fog;
+// FogSetting: linear_distance, linear_density, exponential_density, max_distance (unused); near_colour, far_colour (0-255).
+// Globals, as the water fogs what it shows of the scene by them too (water_surface.gdshader): it reads the screen as it was
+// before this pass
+global uniform vec4 viewer_fog_setting;
+global uniform vec3 viewer_fog_near;
+global uniform vec3 viewer_fog_far;
 
 uniform sampler2D depth_texture : hint_depth_texture, filter_nearest, repeat_disable;
-// FogSetting: linear_distance, linear_density, exponential_density, max_distance (unused)
-uniform vec4 fog_setting = vec4(0.0);
-// near_colour, far_colour (0-255)
-uniform vec3 fog_near = vec3(0.0);
-uniform vec3 fog_far = vec3(0.0);
 
 void vertex() {
 	// A 2 x 2 quad over the whole screen, wherever the camera is
@@ -41,11 +42,11 @@ void fragment() {
 	}
 	float d = -view.z / view.w;
 
-	float x = max(d - fog_setting.x, 0.0);
-	float lin = clamp(x / max(fog_setting.x, 0.0001), 0.0, 1.0);
-	float k = fog_setting.z * fog_setting.z;
-	float w = clamp(lin * fog_setting.y + 1.0 - exp2(-k * x * x), 0.0, 1.0) * clamp(viewer_fog, 0.0, 1.0);
+	float x = max(d - viewer_fog_setting.x, 0.0);
+	float lin = clamp(x / max(viewer_fog_setting.x, 0.0001), 0.0, 1.0);
+	float k = viewer_fog_setting.z * viewer_fog_setting.z;
+	float w = clamp(lin * viewer_fog_setting.y + 1.0 - exp2(-k * x * x), 0.0, 1.0) * clamp(viewer_fog, 0.0, 1.0);
 
-	ALBEDO = mix(fog_near, fog_far, w) / 255.0 * viewer_exposure;
+	ALBEDO = mix(viewer_fog_near, viewer_fog_far, w) / 255.0 * viewer_exposure;
 	ALPHA = w;
 }

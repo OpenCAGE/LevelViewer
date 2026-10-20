@@ -3,6 +3,8 @@ using CATHODE.Scripting;
 using CATHODE.Scripting.Internal;
 using CathodeLib;
 using Godot;
+using System.Collections.Generic;
+using System.Linq;
 
 /// <summary>
 /// What a planet mesh (a CA_PLANET material: shaders/planet.gdshader) takes from its Planet entity, as the game's
@@ -24,6 +26,43 @@ public static class PlanetLook
 	private static readonly ShortGuid SunPositionParam = ShortGuidUtils.Generate("sun_position");
 	private static readonly ShortGuid PositionParam = ShortGuidUtils.Generate("position");
 
+	//The planet meshes in the scene, for RefreshAll (a level has a dozen or two; freed ones drop out as they are met)
+	private static readonly HashSet<MeshInstance3D> _planets = new HashSet<MeshInstance3D>();
+
+	/// <summary>
+	/// Works every planet's values out again after an edit: its Planet entity's, the SpaceVista composite's variables, the
+	/// placement's pins and what is wired into them (the sun) all feed them, and a planet's own mesh is far from all of them,
+	/// so each edit reaches them all - there are few, and a refresh is a handful of lookups.
+	/// </summary>
+	public static void RequestRefresh(AlienScene scene)
+	{
+		//Once per frame however many edits arrive, and after them: a moved entity's node takes its place later in the edit
+		if (_planets.Count == 0 || _refreshQueued)
+			return;
+		_refreshQueued = true;
+		Callable.From(() =>
+		{
+			_refreshQueued = false;
+			if (scene != null && GodotObject.IsInstanceValid(scene))
+				RefreshAll(scene);
+		}).CallDeferred();
+	}
+
+	private static bool _refreshQueued;
+
+	public static void RefreshAll(AlienScene scene)
+	{
+		if (_planets.Count == 0)
+			return;
+		foreach (MeshInstance3D mesh in _planets.ToArray())
+		{
+			if (mesh == null || !GodotObject.IsInstanceValid(mesh) || mesh.IsQueuedForDeletion())
+				_planets.Remove(mesh);
+			else
+				TryApply(scene, mesh);
+		}
+	}
+
 	public static bool IsPlanet(GeometryInstance3D instance)
 	{
 		return instance?.MaterialOverride is ShaderMaterial material && material.Shader != null
@@ -36,6 +75,7 @@ public static class PlanetLook
 		if (scene == null || mesh == null || !IsPlanet(mesh))
 			return;
 
+		_planets.Add(mesh);
 		mesh.CustomAabb = new Aabb(new Vector3(-1e6f, -1e6f, -1e6f), new Vector3(2e6f, 2e6f, 2e6f));
 		mesh.VisibilityRangeEnd = 0f;
 		mesh.VisibilityRangeEndMargin = 0f;
@@ -61,6 +101,8 @@ public static class PlanetLook
 			vista = function;
 			break;
 		}
+		mesh.SetInstanceShaderParameter("planet_shown", StartsShown(scene, mesh, modelInstance, vista) ? 1f : 0f);
+
 		Composite composite = vista == null ? null : scene.Content?.Level?.Commands?.GetComposite(vista.function);
 		FunctionEntity planet = composite == null ? null : FindPlanet(composite, modelInstance);
 		if (planet == null)
@@ -85,6 +127,37 @@ public static class PlanetLook
 		mesh.SetInstanceShaderParameter("anchor_offset", (anchor ?? WorldOf(vistaNode).Origin) - centre);
 		Vector3? sun = values.Position(scene, planet, SunPositionParam, vistaNode);
 		mesh.SetInstanceShaderParameter("sun_offset", sun.HasValue ? sun.Value - centre : Vector3.Up * 1000f);
+	}
+
+	/* Whether the level starts with it drawn. A planet is never culled, so what hides one is its mover's visibility - the
+	   level's start state, the script's show/hide since: TECH_RND_HZDLAB's Sun_4 starts hidden and a trigger in a ladder shaft
+	   swaps it for Sun_1_1, HAB_AIRPORT's sun is never shown - read as the movers have it while the level's root is open,
+	   and from the placements' own flags where they don't speak for it (a composite opened alone, a planet added since). */
+	private static bool StartsShown(AlienScene scene, MeshInstance3D mesh, Entity modelInstance, FunctionEntity vista)
+	{
+		for (Node node = mesh.GetParent(); node != null; node = node.GetParent())
+		{
+			if (node is not Node3D node3D || !scene.NodeEntities.TryGetValue(node3D, out Entity entity)
+				|| entity is not FunctionEntity function || !function.function.IsFunctionType
+				|| function.function.AsFunctionType != FunctionType.ModelReference)
+				continue;
+			bool? mover = scene.GetMoverShown(node3D, entity);
+			if (mover.HasValue)
+				return mover.Value;
+			if (Hidden(entity))
+				return false;
+			break;
+		}
+		return !Hidden(modelInstance) && !Hidden(vista);
+	}
+
+	private static bool Hidden(Entity entity)
+	{
+		if (entity == null)
+			return false;
+		return (entity.GetParameter("disable_display")?.content as cBool)?.value == true
+			|| (entity.GetParameter("show_on_reset")?.content as cBool)?.value == false
+			|| (entity.GetParameter("deleted")?.content as cBool)?.value == true;
 	}
 
 	private static Transform3D WorldOf(Node3D node)
@@ -216,6 +289,9 @@ public static class PlanetLook
 				return f.value;
 			if (content is cInteger i)
 				return i.value;
+			//A number a placement sets as text (HAB_AIRPORT's sun: ParallaxScale ".8")
+			if (content is cString s && float.TryParse(s.value, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out float parsed))
+				return parsed;
 			return null;
 		}
 	}

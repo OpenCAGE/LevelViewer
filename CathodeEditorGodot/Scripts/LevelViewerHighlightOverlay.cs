@@ -99,6 +99,10 @@ public static class LevelViewerHighlightOverlay
         if (meshInstance.IsInGroup(LevelViewerPick.WireframeOverlayGroupName))
             return false;
 
+        //A planet is drawn at the sky, far from its mesh (PlanetLook): an overlay of the mesh draws where nothing is
+        if (PlanetLook.IsPlanet(meshInstance))
+            return false;
+
         if (savedOverlays.ContainsKey(meshInstance))
             return false;
 
@@ -123,6 +127,10 @@ public static class LevelViewerHighlightOverlay
             return false;
 
         if (meshInstance.IsInGroup(LevelViewerPick.WireframeOverlayGroupName))
+            return false;
+
+        //A planet is drawn at the sky, far from its mesh (PlanetLook): an overlay of the mesh draws where nothing is
+        if (PlanetLook.IsPlanet(meshInstance))
             return false;
 
         if (savedOverrides.ContainsKey(meshInstance))
@@ -194,6 +202,10 @@ public static class LevelViewerHighlightOverlay
             return false;
 
         if (meshInstance.IsInGroup(LevelViewerPick.WireframeOverlayGroupName))
+            return false;
+
+        //A planet is drawn at the sky, far from its mesh (PlanetLook): an overlay of the mesh draws where nothing is
+        if (PlanetLook.IsPlanet(meshInstance))
             return false;
 
         if (savedOverlays.ContainsKey(meshInstance))

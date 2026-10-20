@@ -16,6 +16,21 @@ global uniform float viewer_saturation;
 // How far the darkest surfaces are lifted towards readable (0 = drawn as they are)
 global uniform float viewer_toe_lift;
 
+// The water's planar reflection (LevelViewerPlanarReflection.cs): its camera sees only the reflective layer (20), and
+// nothing on the far side of the water's plane (normal xyz, distance w) - the nest's floor lies a few centimetres under its
+// water. Every model shader calls this first; every other camera sees layer 1 too, so is left alone.
+global uniform vec4 viewer_reflection_plane;
+const uint MODEL_REFERENCE_REFLECTION_LAYER = 524288u;
+
+void model_reference_clip_to_reflection(vec3 view_vertex, mat4 inv_view, uint camera_layers) {
+	if ((camera_layers & 1u) == 0u && (camera_layers & MODEL_REFERENCE_REFLECTION_LAYER) != 0u) {
+		vec3 world = (inv_view * vec4(view_vertex, 1.0)).xyz;
+		if (dot(world, viewer_reflection_plane.xyz) < viewer_reflection_plane.w) {
+			discard;
+		}
+	}
+}
+
 vec4 model_reference_tint(vec4 tint) {
 	vec3 c = clamp(tint.rgb, vec3(0.0), vec3(1.0));
 	vec3 decoded = mix(c / 12.92, pow((c + 0.055) / 1.055, vec3(2.4)), step(vec3(0.04045), c));

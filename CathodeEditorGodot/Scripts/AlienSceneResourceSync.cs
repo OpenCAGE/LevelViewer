@@ -913,6 +913,8 @@ public partial class AlienScene
 		_texturesLevelByIndex.Clear();
 		foreach (KeyValuePair<int, TexOrCube> entry in textures)
 			_texturesLevelByIndex[entry.Key] = entry.Value;
+		//Looked up again by path: a texture the sync brought or replaced may be one a surface effect names
+		_texturesByPath.Clear();
 
 		//Resources synced from OpenCAGE were resolved to indexes when they arrived
 		foreach (KeyValuePair<Entity, List<Tuple<int, int>>> entry in _content.RemappedResources.ToArray())

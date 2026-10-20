@@ -6,9 +6,6 @@ using Godot;
 /// </summary>
 public static class LevelViewerMeshUtil
 {
-	private const float DefaultExtraCullMarginMin = 32f;
-	private const float LargeSceneExtraCullMarginCap = 96f;
-
 	/// <summary>
 	/// The only AddSurfaceFromArrays the viewer calls. Every site goes through here, and passes an
 	/// <paramref name="arrays"/> it is itself holding alive (a `using` local) - see CollisionMeshOverlay.BuildMesh.
@@ -52,30 +49,53 @@ public static class LevelViewerMeshUtil
 
 		Aabb bounds = meshInstance.Mesh != null ? meshInstance.Mesh.GetAabb() : new Aabb();
 		if (bounds.Size.LengthSquared() < 1e-8f && sourceVertices != null && sourceVertices.Length > 0)
+		{
 			bounds = ComputeAabb(sourceVertices);
+			if (bounds.HasVolume())
+				meshInstance.CustomAabb = bounds;
+		}
 
-		float grow = Mathf.Max(bounds.Size.Length() * 0.5f, DefaultExtraCullMarginMin);
-		if (ModelReferenceRenderSettings.UseDistanceCulling)
-			grow = Mathf.Min(grow, LargeSceneExtraCullMarginCap);
+		/* Culled by its own bounds: nothing the viewer draws moves its vertices in a shader. These used to cull by a box
+		   grown by their radius - 32 m at the least - all round, so every view drew everything within 32 m or more of the
+		   camera whichever way it faced (TECH_HUB facing a wall: 21k objects for the 547 meshes in front of it). */
+		meshInstance.ExtraCullMargin = 0f;
 
-		meshInstance.ExtraCullMargin = grow;
-
-		if (bounds.HasVolume())
-			meshInstance.CustomAabb = bounds.Grow(grow * 0.25f);
-
-		if (ModelReferenceRenderSettings.UseDistanceCulling)
-			ApplyDistanceCulling(meshInstance, ModelReferenceRenderSettings.VisibilityRangeEnd);
+		ApplyDistanceCulling(meshInstance, DrawDistanceFor(bounds));
 	}
 
 	public static void ApplyLargeSceneOptimizations(MeshInstance3D meshInstance, float visibilityRangeEnd)
 	{
-		if (meshInstance == null || !GodotObject.IsInstanceValid(meshInstance))
+		//A planet is drawn at the sky, not where its mesh is (PlanetLook): never culled by distance
+		if (meshInstance == null || !GodotObject.IsInstanceValid(meshInstance) || PlanetLook.IsPlanet(meshInstance))
 			return;
 
 		meshInstance.IgnoreOcclusionCulling = false;
 		meshInstance.GIMode = GeometryInstance3D.GIModeEnum.Disabled;
-		meshInstance.ExtraCullMargin = Mathf.Min(meshInstance.ExtraCullMargin, LargeSceneExtraCullMarginCap);
-		ApplyDistanceCulling(meshInstance, visibilityRangeEnd);
+		float sized = DrawDistanceFor(meshInstance.Mesh != null ? meshInstance.Mesh.GetAabb() : new Aabb());
+		ApplyDistanceCulling(meshInstance, visibilityRangeEnd > 0f ? Mathf.Min(visibilityRangeEnd, sized) : sized);
+	}
+
+	/* How far a mesh is drawn: 100 times its radius, 15 m at the least - a 1 m prop to 50 m, a 10 m wall to half a kilometre.
+	   The viewer's frame is bound by how many things it draws, not by the GPU (TECH_HUB: ~74k objects, 61 ms on the render
+	   thread, the GPU 7 ms of it), and the level's every prop was drawn from anywhere in it, walls between or not: this took
+	   TECH_HUB's views from 15 to 34 fps with nothing missing from them. The level's own LOD ranges don't cull (98% are
+	   10,000 m - the game leaves that to its zones). Composite previews lift it for their capture. */
+	public const float DrawDistancePerRadius = 100f;
+	public const float MinDrawDistance = 15f;
+
+	public static float DrawDistanceFor(Aabb bounds)
+	{
+		return Mathf.Max(bounds.Size.Length() * 0.5f * DrawDistancePerRadius, MinDrawDistance);
+	}
+
+	/// <summary>
+	/// The draw distance of a mesh drawn scaled - a unit volume stretched to an entity's size (SurfaceEffectOverlay) - by the
+	/// size it is drawn at: by the unit mesh's own, a 20 m frost box stopped drawing at 87 m.
+	/// </summary>
+	public static void ApplyDrawDistance(MeshInstance3D meshInstance, Vector3 drawnSize)
+	{
+		if (meshInstance != null)
+			ApplyDistanceCulling(meshInstance, DrawDistanceFor(new Aabb(Vector3.Zero, drawnSize)));
 	}
 
 	private static void ApplyDistanceCulling(MeshInstance3D meshInstance, float visibilityRangeEnd)

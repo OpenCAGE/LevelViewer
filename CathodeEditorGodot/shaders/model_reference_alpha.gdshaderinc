@@ -28,7 +28,23 @@ float model_reference_blend_alpha(vec4 diffuse_sample, vec4 separate_sample, flo
 	if (use_separate_alpha_map) {
 		return model_reference_sample_mask(separate_sample) * tint_alpha;
 	}
+
 	return model_reference_sample_mask(diffuse_sample) * tint_alpha;
+}
+
+// SIGNED_DISTANCE_FIELD text and signs: the separate mask is a distance, the glyph's edge where it crosses a half,
+// antialiased over how fast its uv moves on screen - as the game draws it (smoothstep over 8x the uv's rate, at most a
+// half). Taken as it stands, the field drew each line of text as a soft dark blob.
+uniform bool alpha_sdf = false;
+
+// sdf_rate: how fast the separate map's uv moves on screen, |ddx u| + |ddy v| (derivatives belong in fragment())
+float model_reference_blend_alpha_uv(vec4 diffuse_sample, vec4 separate_sample, float tint_alpha, float sdf_rate) {
+	if (alpha_sdf && use_separate_alpha_map) {
+		//never quite none: smoothstep with both edges at the half is undefined (text facing the camera edge-on)
+		float width = clamp(sdf_rate * 8.0, 0.0001, 0.5);
+		return smoothstep(0.5 - width, 0.5 + width, model_reference_sample_mask(separate_sample)) * tint_alpha;
+	}
+	return model_reference_blend_alpha(diffuse_sample, separate_sample, tint_alpha);
 }
 
 // Separate-alpha decals: diffuse RGB may be a white mask; colour comes from tint.

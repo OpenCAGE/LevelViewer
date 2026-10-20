@@ -75,16 +75,23 @@ public partial class AlienScene : Node3D
 	//And the colour values it was built with: an entry is reused only for the same values, and replaced for new ones
 	private readonly Dictionary<ModelReferenceOverrideKey, ModelReferenceMaterialOverrides.EnvironmentColourScalars> _modelReferenceOverrideMaterialScalars = new Dictionary<ModelReferenceOverrideKey, ModelReferenceMaterialOverrides.EnvironmentColourScalars>();
 	private Dictionary<MeshInstance3D, Materials.Material> _modelReferenceMeshes = new Dictionary<MeshInstance3D, Materials.Material>();
-	/* The room cubes (WithRoomEnvironmentMap): each mover's, by its entity handle; what each render target resolved to; the
-	   copies of a material made to reflect one; and which materials reflect a cube at all. All per populate. */
+	/* What the level's movers give an instance of their own (WithMoverLook): its room's cube and its glow. Each mover's, by
+	   its entity handle; the entities any of them is an instance of; what each render target resolved to; the copies of a
+	   material made for one; and what each material takes at all. All per populate. */
+	private readonly record struct MoverEmissive(Vector3 Tint, bool ReplaceTint);
+	private readonly record struct MoverLook(Textures.TEX4 Cube, MoverEmissive? Emissive);
 	private Dictionary<(uint, uint), Textures.TEX4> _moverEnvironmentMaps;
-	private HashSet<uint> _moverEnvironmentMapEntities;
-	private readonly Dictionary<Node3D, Textures.TEX4> _roomEnvironmentMapByTarget = new Dictionary<Node3D, Textures.TEX4>();
-	private readonly Dictionary<(ShaderMaterial, Textures.TEX4), ShaderMaterial> _roomCubeMaterials = new Dictionary<(ShaderMaterial, Textures.TEX4), ShaderMaterial>();
-	private readonly Dictionary<ShaderMaterial, bool> _materialReflects = new Dictionary<ShaderMaterial, bool>();
+	private Dictionary<(uint, uint), MoverEmissive> _moverEmissives;
+	private HashSet<uint> _moverLookEntities;
+	private readonly Dictionary<Node3D, MoverLook> _moverLookByTarget = new Dictionary<Node3D, MoverLook>();
+	private readonly Dictionary<(ShaderMaterial, Textures.TEX4, MoverEmissive?), ShaderMaterial> _roomCubeMaterials = new Dictionary<(ShaderMaterial, Textures.TEX4, MoverEmissive?), ShaderMaterial>();
+	private readonly Dictionary<ShaderMaterial, (bool Reflects, bool Emissive)> _materialMoverUse = new Dictionary<ShaderMaterial, (bool Reflects, bool Emissive)>();
+	//Room cubes that would not convert: not tried again for the next mesh in the room
+	private readonly HashSet<Textures.TEX4> _roomCubesUnavailable = new HashSet<Textures.TEX4>();
 	private long _roomCubeTicks;
 	private int _roomCubeMeshes;
 	private int _roomCubeMisses;
+	private int _moverEmissiveMeshes;
 
 	/// <summary>What a spawned mesh was built from, for remapping it later.</summary>
 	private readonly struct MeshBinding
@@ -675,6 +682,7 @@ public partial class AlienScene : Node3D
 		LevelViewerZoneHighlight.Reset();
 		//Its stars likewise: the plain sky until the next level brings its own
 		LevelViewerGalaxy.SetGalaxy(this, null);
+		LevelViewerFog.SetFog(this, null);
 
 		/* Freed here, answering sent messages as it goes, as a populate frees the scene it replaces. Queued, the whole
 		   level was deleted in one go at the end of the frame (SceneTree's delete queue, nothing answered): 15 s when
@@ -719,6 +727,7 @@ public partial class AlienScene : Node3D
 				kvp.Value.Cubemap.Dispose();
 		}
 		_texturesGlobalByIndex.Clear();
+		_texturesByPath.Clear();
 
 		AlienSceneTextures.ClearTransparencyCache();
 
@@ -751,6 +760,8 @@ public partial class AlienScene : Node3D
 
 		_contentOrigin = Vector3.Zero;
 		_loadedComposite = null;
+		_entitiesAtLevelLoad = null;
+		_effectsShownByOwnFlag.Clear();
 		ResetResourceSyncState();
 		_content.Reset();
 	}
@@ -1011,6 +1022,8 @@ public partial class AlienScene : Node3D
 
 		//The sky: the level's galaxy, as the game draws it, or the plain sky for a level without one
 		LevelViewerGalaxy.SetGalaxy(this, _content.Level?.GalaxyItems);
+		//And its fog, the one its script switches on as it starts
+		LevelViewerFog.SetFog(this, _content.Level?.Commands);
 
 		LevelViewerShaderBytecode.ClearAsync(_content.Level?.Shaders?.Entries);
 		BuildSubmeshWriteIndexCache();
@@ -1019,6 +1032,7 @@ public partial class AlienScene : Node3D
 		{
 			PreviewVisibilitySettings.LevelRootCompositeId = _content.Level.Commands.EntryPoints[0].shortGUID.AsUInt32;
 			Composite levelRoot = _content.Level.Commands.EntryPoints[0];
+			CollectEffectsAtLevelLoad();
 			//Also when the composite asked for belongs to another level (a load that waited behind a populate). A viewer that
 			//has just connected builds the scene OpenCAGE's editor is in, when it was told one and the level has it.
 			if (_queuedCompositeGuid == ShortGuid.Invalid || _content.Level.Commands.GetComposite(_queuedCompositeGuid) == null)
@@ -1351,6 +1365,7 @@ public partial class AlienScene : Node3D
 			LevelViewerPopulatePrewarm.BuildModelReferenceCache(spawnPlan.ModelReferences, _content, spawnPlan);
 		_modelRefRenderablesByEntityId = modelRefCache.RenderablesByInstanceKey;
 		LevelViewerPopulatePrewarm.Plan prewarmPlan = modelRefCache.PrewarmPlan;
+		AddSurfaceEffectTextures(spawnPlan, prewarmPlan);
 		if (!_previewBatchPopulate)
 		{
 			ViewerLog.Print(
@@ -1528,9 +1543,9 @@ public partial class AlienScene : Node3D
 			//Spent: kept, one per mesh (76k on SCI_AndroidLab), they held each render target until the next populate
 			_bulkMeshSpawnJobs.Clear();
 		}
-		ViewerLog.Print("Room cubes: " + _roomCubeMeshes + " reflecting meshes given their room's, " + _roomCubeMisses + " without one (" + _roomCubeMaterials.Count
-			+ " material copies, " + (_roomCubeTicks * 1000 / System.Diagnostics.Stopwatch.Frequency) + " ms)");
-		_roomCubeMeshes = _roomCubeMisses = 0;
+		ViewerLog.Print("Room cubes: " + _roomCubeMeshes + " reflecting meshes given their room's, " + _roomCubeMisses + " without one, " + _moverEmissiveMeshes
+			+ " glowing their own way (" + _roomCubeMaterials.Count + " material copies, " + (_roomCubeTicks * 1000 / System.Diagnostics.Stopwatch.Frequency) + " ms)");
+		_roomCubeMeshes = _roomCubeMisses = _moverEmissiveMeshes = 0;
 		_roomCubeTicks = 0;
 
 		/* The content goes to its focus point now, before the meshes just spawned are in the renderer's culling BVH (they
@@ -2091,8 +2106,9 @@ public partial class AlienScene : Node3D
 				FunctionEntity function = (FunctionEntity)entity;
 				if (!function.function.IsFunctionType)
 				{
+					//One the level leaves out keeps its node but is no instance of its composite: nothing is spawned into it
 					Composite compositeNext = _content.Level.Commands.GetComposite(function.function);
-					if (compositeNext != null)
+					if (compositeNext != null && !IsInstanceDeleted(composite, function, parentNode))
 						RegisterCompositeNode(compositeNext, entityNode);
 				}
 				else
@@ -2114,6 +2130,10 @@ public partial class AlienScene : Node3D
 						else
 							TrackMaterializedFunctionEntityPreview(entityNode);
 					}
+
+					//What a surface effect paints on the level is drawn whatever its filter says (its preview is the filter's box)
+					SurfaceEffectOverlay.TryAdd(this, function, composite, entityNode);
+					WaterSurface.TryAdd(this, function, entityNode);
 
 					if (!_isBulkPopulating)
 						LevelViewerPick.RegisterPickableSubtree(entityNode);
@@ -2413,7 +2433,8 @@ public partial class AlienScene : Node3D
 		}
 		else
 		{
-			plan = BuildCompositePrewarmPlan(_content.Level.Commands.GetComposite(function.function));
+			//As this instance sets its composite's variables: a light probe with Delete unticked needs its mirror ball's model
+			plan = BuildCompositePrewarmPlan(_content.Level.Commands.GetComposite(function.function), function);
 			if (plan == null)
 				return;
 		}
@@ -2423,16 +2444,49 @@ public partial class AlienScene : Node3D
 
 	/// <summary>
 	/// What a composite's contents, all the way down, need converting - as a populate of it would plan
-	/// it. Null when there is no composite.
+	/// it, or as <paramref name="instance"/> of it would spawn them. Null when there is no composite.
 	/// </summary>
-	private LevelViewerPopulatePrewarm.Plan BuildCompositePrewarmPlan(Composite composite)
+	private LevelViewerPopulatePrewarm.Plan BuildCompositePrewarmPlan(Composite composite, FunctionEntity instance = null)
 	{
 		if (_content?.Level == null || composite == null)
 			return null;
 
 		LevelViewerPopulateTree.Plan spawnPlan =
-			LevelViewerPopulateTree.Collect(composite, _content, deferAliasProxy: true, includeVariables: false);
-		return LevelViewerPopulatePrewarm.BuildModelReferenceCache(spawnPlan.ModelReferences, _content, spawnPlan).PrewarmPlan;
+			LevelViewerPopulateTree.Collect(composite, _content, deferAliasProxy: true, includeVariables: false, rootInstance: instance);
+		LevelViewerPopulatePrewarm.Plan plan = LevelViewerPopulatePrewarm.BuildModelReferenceCache(spawnPlan.ModelReferences, _content, spawnPlan).PrewarmPlan;
+		AddSurfaceEffectTextures(spawnPlan, plan);
+		return plan;
+	}
+
+	/* The textures the populate's surface effects paint with (SurfaceEffectOverlay), into its plan with the models': the
+	   source binaries are let go of once the plan is converted, before the entities are, and one asked for after that came
+	   back empty - the airport's frost drew as flat white. */
+	private void AddSurfaceEffectTextures(LevelViewerPopulateTree.Plan spawnPlan, LevelViewerPopulatePrewarm.Plan plan)
+	{
+		if (spawnPlan?.Commands == null || plan == null || _content?.Level == null)
+			return;
+
+		HashSet<string> seen = null;
+		for (int i = 0; i < spawnPlan.Commands.Count; i++)
+		{
+			if (spawnPlan.Commands[i].Entity is not FunctionEntity function || !SurfaceEffectOverlay.IsSurfaceEffect(function))
+				continue;
+			string path = (function.GetParameter("TEXTURE_MAP")?.content as cString)?.value;
+			if (string.IsNullOrEmpty(path) || !(seen ??= new HashSet<string>(StringComparer.OrdinalIgnoreCase)).Add(path))
+				continue;
+
+			TexturePtr.Source source = TexturePtr.Source.LEVEL;
+			Textures.TEX4 tex = _content.Level.Textures?.GetEnvironmentMapByPath(path);
+			if (tex == null)
+			{
+				source = TexturePtr.Source.GLOBAL;
+				tex = LevelContent.Global?.Textures?.GetEnvironmentMapByPath(path);
+			}
+			if (tex == null)
+				continue;
+			plan.Textures.Add(tex);
+			plan.TextureLocations[tex] = source;
+		}
 	}
 
 	private bool IsPlanMeshCached(int writeIndex)
@@ -2505,9 +2559,70 @@ public partial class AlienScene : Node3D
 		if (entity is FunctionEntity function && !function.function.IsFunctionType)
 		{
 			Composite compositeNext = _content.Level.Commands.GetComposite(function.function);
-			if (compositeNext != null)
+			if (compositeNext != null && !IsInstanceDeleted(composite, function, parentNode))
 				AddCompositeInstance(compositeNext, entityNode, function);
 		}
+	}
+
+	/// <summary>
+	/// Whether the level leaves a composite instance's contents out, as a populate does (LevelViewerPopulateTree.IsDeleted):
+	/// deleted itself, or through a variable of its composite that the composite's own instance - the entity of the node it
+	/// is spawned under - sets.
+	/// </summary>
+	private bool IsInstanceDeleted(Composite composite, FunctionEntity instance, Node3D parentNode)
+	{
+		FunctionEntity owner = parentNode != null && _nodeEntities.TryGetValue(parentNode, out Entity parentEntity) ? parentEntity as FunctionEntity : null;
+		return LevelViewerPopulateTree.IsDeleted(instance, composite, owner);
+	}
+
+	/* A bool edit that may change whether the level leaves a composite instance out (IsInstanceDeleted): the instance's own
+	   deleted, a variable of its composite its deleted is wired to, or the parameter of an instance of that composite that sets
+	   the variable - a light probe's Delete, for its mirror ball. Those instances are sent again as the editor sends an edited
+	   entity (removed, then added, which asks IsInstanceDeleted afresh), after the edit's packet rather than inside it. */
+	private static readonly ShortGuid DeletedParam = ShortGuidUtils.Generate("deleted");
+
+	private void RespawnInstancesDeletedBy(Composite composite, Entity edited, ShortGuid param)
+	{
+		if (composite == null || edited == null || _content?.Level?.Commands == null)
+			return;
+
+		List<(ShortGuid Composite, ShortGuid Instance)> respawn = null;
+		void Add(Composite owner, FunctionEntity instance) => (respawn ??= new List<(ShortGuid, ShortGuid)>()).Add((owner.shortGUID, instance.shortGUID));
+		static bool IsInstance(FunctionEntity function) => function != null && !function.function.IsFunctionType;
+
+		if (param == DeletedParam && edited is FunctionEntity own && IsInstance(own))
+			Add(composite, own);
+		if (edited is VariableEntity variable)
+		{
+			foreach (FunctionEntity function in composite.functions)
+			{
+				if (IsInstance(function) && function.childLinks.Exists(l => l.thisParamID == DeletedParam && l.linkedEntityID == variable.shortGUID))
+					Add(composite, function);
+			}
+		}
+		if (edited is FunctionEntity placement && IsInstance(placement) && _content.Level.Commands.GetComposite(placement.function) is Composite inner)
+		{
+			foreach (FunctionEntity function in inner.functions)
+			{
+				if (IsInstance(function) && function.childLinks.Exists(l => l.thisParamID == DeletedParam && l.linkedParamID == param
+					&& inner.GetEntityByID(l.linkedEntityID) is VariableEntity))
+					Add(inner, function);
+			}
+		}
+		if (respawn == null)
+			return;
+
+		int generation = _contentGeneration;
+		Callable.From(() =>
+		{
+			if (generation != _contentGeneration)
+				return;
+			foreach ((ShortGuid owner, ShortGuid instance) in respawn)
+			{
+				RemoveEntity(owner, instance, refreshHighlights: false, logEach: false);
+				AddEntity(owner, instance);
+			}
+		}).CallDeferred();
 	}
 
 	public bool TryPickSelectionTarget(Camera3D camera, Vector2 screenPosition, out LevelViewerPick.SelectionTarget target)
@@ -3687,6 +3802,14 @@ public partial class AlienScene : Node3D
 				+ " visual=" + visualEntityID.AsUInt32 + " fromPointer=" + fromPointer + ")");
 
 		ParameterSync.ApplyToEntity(dataEntity, sync, _content);
+		//A frost volume's size or strength may be fed from this entity rather than set on the volume
+		if (diagDataType == DataType.FLOAT)
+			SurfaceEffectOverlay.RefreshFedBy(this, dataComposite, dataEntity);
+		//And whether the level leaves a composite instance out may be this bool's to say
+		else if (diagDataType == DataType.BOOL)
+			RespawnInstancesDeletedBy(dataComposite, dataEntity, new ShortGuid(sync.name));
+		//The fog, if this is its setting or something feeding it
+		LevelViewerFog.RefreshIfIn(this, dataComposite);
 
 		//A resource pointed at a model or texture nothing has displayed yet needs the same restore as a new entity.
 		if (diagDataType == DataType.RESOURCE)
@@ -3842,6 +3965,8 @@ public partial class AlienScene : Node3D
 			return;
 
 		EnsureLazyFunctionEntityPreview(entityNode);
+		SurfaceEffectOverlay.RefreshUnder(entityNode);
+		WaterSurface.RefreshUnder(entityNode);
 
 		BoxPreview[] boxPreviews = EntityNodeUtil.FindPreviews<BoxPreview>(entityNode);
 		for (int i = 0; i < boxPreviews.Length; i++)
@@ -3955,11 +4080,12 @@ public partial class AlienScene : Node3D
 				out Entity overrideParameterEntity,
 				out Entity fallbackParameterEntity);
 			_modelReferenceMeshes[mesh] = remappedMaterial;
-			mesh.MaterialOverride = WithRoomEnvironmentMap(GetSolidMaterialForModelReference(
+			mesh.MaterialOverride = WithMoverLook(GetSolidMaterialForModelReference(
 				remappedMaterial,
 				modelReferenceEntity,
 				overrideParameterEntity,
 				fallbackParameterEntity), mesh.GetParent() as Node3D);
+			PlanetLook.TryApply(this, mesh);
 			if (ModelReferenceRenderSettings.WireframeEnabled)
 			{
 				UpdateWireframeOverlay(
@@ -4671,10 +4797,15 @@ public partial class AlienScene : Node3D
 	private void ApplyVectorVisual(ParameterVisualContext context)
 	{
 		RefreshBoxPreviews(context.EntityNode);
+		//A surface effect's colours and falloff are vectors too, its strengths floats, whether it shows a bool (and water's)
+		SurfaceEffectOverlay.RefreshUnder(context.EntityNode);
+		WaterSurface.RefreshUnder(context.EntityNode);
 	}
 
 	private void ApplyFloatVisual(ParameterVisualContext context)
 	{
+		SurfaceEffectOverlay.RefreshUnder(context.EntityNode);
+		WaterSurface.RefreshUnder(context.EntityNode);
 		if (context.Sync != null && new ShortGuid(context.Sync.name) != ShortGuidUtils.Generate("radius"))
 			return;
 
@@ -4708,6 +4839,12 @@ public partial class AlienScene : Node3D
 
 	private void ApplyBoolVisual(ParameterVisualContext context)
 	{
+		//Whether the level shows it is now this edit's to say, not its mover's (GetMoverShown)
+		if (context.Sync != null && new ShortGuid(context.Sync.name) == ShortGuidUtils.Generate("show_on_reset") && context.Entity is FunctionEntity edited
+			&& (SurfaceEffectOverlay.IsSurfaceEffect(edited) || WaterSurface.IsWater(edited)))
+			_effectsShownByOwnFlag.Add(edited.shortGUID.AsUInt32);
+		SurfaceEffectOverlay.RefreshUnder(context.EntityNode);
+		WaterSurface.RefreshUnder(context.EntityNode);
 		if (context.Sync != null && new ShortGuid(context.Sync.name) != ShortGuidUtils.Generate("loop"))
 			return;
 
@@ -5325,12 +5462,13 @@ public partial class AlienScene : Node3D
 		if (!_bulkMeshSpawning)
 			meshInstance.TreeExited += () => { _modelReferenceMeshes.Remove(meshInstance); _meshBindings.Remove(meshInstance); };
 		_modelReferenceMeshes[meshInstance] = material;
-		meshInstance.MaterialOverride = WithRoomEnvironmentMap(GetSolidMaterialForModelReference(
+		meshInstance.MaterialOverride = WithMoverLook(GetSolidMaterialForModelReference(
 			material,
 			modelReferenceEntity,
 			parameterEntity,
 			fallbackEntity), parent);
 		parent.AddChild(meshInstance);
+		PlanetLook.TryApply(this, meshInstance);
 		if (!_bulkMeshSpawning && ModelReferenceRenderSettings.WireframeEnabled)
 			UpdateWireframeOverlay(meshInstance, material, modelReferenceEntity, parameterEntity, fallbackEntity);
 		if (_deferBulkPickRegistration)
@@ -5651,6 +5789,8 @@ public partial class AlienScene : Node3D
 
 		if (shaderMaterial != null)
 		{
+			if (cachedMaterial != null && cachedMaterial != shaderMaterial)
+				ForgetMoverLookCopies(cachedMaterial);
 			_modelReferenceOverrideMaterials[cacheKey] = shaderMaterial;
 			_modelReferenceOverrideMaterialSources[cacheKey] = material;
 			_modelReferenceOverrideMaterialScalars[cacheKey] = scalars;
@@ -5696,9 +5836,37 @@ public partial class AlienScene : Node3D
 
 		foreach (ModelReferenceOverrideKey key in stale)
 		{
+			if (_modelReferenceOverrideMaterials.TryGetValue(key, out ShaderMaterial gone))
+				ForgetMoverLookCopies(gone);
 			_modelReferenceOverrideMaterials.Remove(key);
 			_modelReferenceOverrideMaterialSources.Remove(key);
 			_modelReferenceOverrideMaterialScalars.Remove(key);
+		}
+	}
+
+	/* The room cube and glow copies made from an override material that has been replaced or forgotten (WithMoverLook): keyed
+	   by it, they kept it and themselves until the next populate - two materials for every tick of a colour drag on a light
+	   fitting. Like it, they stay with any mesh still showing them, and go with it. */
+	private void ForgetMoverLookCopies(ShaderMaterial source)
+	{
+		if (source == null)
+			return;
+		_materialMoverUse.Remove(source);
+		if (_roomCubeMaterials.Count == 0)
+			return;
+
+		List<(ShaderMaterial, Textures.TEX4, MoverEmissive?)> stale = null;
+		foreach (KeyValuePair<(ShaderMaterial, Textures.TEX4, MoverEmissive?), ShaderMaterial> entry in _roomCubeMaterials)
+		{
+			if (entry.Key.Item1 == source)
+				(stale ??= new List<(ShaderMaterial, Textures.TEX4, MoverEmissive?)>()).Add(entry.Key);
+		}
+		if (stale == null)
+			return;
+		foreach ((ShaderMaterial, Textures.TEX4, MoverEmissive?) key in stale)
+		{
+			if (_roomCubeMaterials.Remove(key, out ShaderMaterial copy) && copy != null)
+				_materialMoverUse.Remove(copy);
 		}
 	}
 
@@ -5798,110 +5966,253 @@ public partial class AlienScene : Node3D
 				copy.Dispose();
 		}
 		_roomCubeMaterials.Clear();
-		_roomEnvironmentMapByTarget.Clear();
-		_materialReflects.Clear();
+		_roomCubesUnavailable.Clear();
+		_moverLookByTarget.Clear();
+		_materialMoverUse.Clear();
 		_moverEnvironmentMaps = null;
+		_moverEmissives = null;
+		_moverVisible = null;
 	}
 
-	/* The game reflects the cube of the room an instance is in - the EnvironmentMap whose area claims it - rather than the
-	   material's own ENVIRONMENT_MAP, a generic one most materials share (TECH_HUB's metals all point at env_base or
-	   env_base_2: dark, with hard white lights, where the lobby's own cube is a dim warm hall). The claims aren't resolved
-	   here, which would mean following each EnvironmentMap's links as the zone highlight does: the movers carry them as
-	   WORLD/ENVIRONMENTMAP.BIN had them, so this is the level as last saved, and an instance added or moved since reflects
-	   its material's cube until then. A material that reflects one gets a copy per room cube it's seen under. */
-	private ShaderMaterial WithRoomEnvironmentMap(ShaderMaterial material, Node3D renderTarget)
+	/* What the movers give an instance of its own, on a copy of its material:
+	   - The game reflects the cube of the room an instance is in - the EnvironmentMap whose area claims it - rather than the
+	     material's own ENVIRONMENT_MAP, a generic one most materials share (TECH_HUB's metals all point at env_base or
+	     env_base_2: dark, with hard white lights, where the lobby's own cube is a dim warm hall). The claims aren't resolved
+	     here, which would mean following each EnvironmentMap's links as the zone highlight does.
+	   - An EMISSIVE instance takes its ModelReference's emissive_tint: a light fitting the colour of its light. With
+	     replace_tint it is the fitting's colour outright (those materials carry their colour in the diffuse tint:
+	     HAB_SHOPPINGCENTRE's Bright_Warm panels are cyan in the game), otherwise it tints the glow. The instance's intensity is
+	     left out: the game's x0.1 panels glow as brightly as the material alone, and taken as a scale they barely lit.
+	   Both as WORLD/ENVIRONMENTMAP.BIN and the MVR had them, so this is the level as last saved: an instance added, moved or
+	   retinted since keeps its material's until then. A copy per (material, cube, glow) it's seen with. */
+	private ShaderMaterial WithMoverLook(ShaderMaterial material, Node3D renderTarget)
 	{
 		if (material == null || renderTarget == null)
 			return material;
-		if (!_materialReflects.TryGetValue(material, out bool reflects))
+		if (!_materialMoverUse.TryGetValue(material, out (bool Reflects, bool Emissive) use))
 		{
-			reflects = material.GetShaderParameter(AlienSceneMaterials.UseEnvironmentParam).AsBool();
-			_materialReflects[material] = reflects;
+			use = (material.GetShaderParameter(AlienSceneMaterials.UseEnvironmentParam).AsBool(),
+				material.GetShaderParameter(AlienSceneMaterials.EmissiveParam).AsBool());
+			_materialMoverUse[material] = use;
 		}
-		if (!reflects)
+		if (!use.Reflects && !use.Emissive)
 			return material;
 
 		long start = System.Diagnostics.Stopwatch.GetTimestamp();
-		Textures.TEX4 cube = GetRoomEnvironmentMap(renderTarget);
+		MoverLook look = GetMoverLook(renderTarget);
+		Textures.TEX4 cube = use.Reflects ? look.Cube : null;
+		if (cube != null && _roomCubesUnavailable.Contains(cube))
+			cube = null;
+		MoverEmissive? emissive = use.Emissive ? look.Emissive : null;
+
 		ShaderMaterial result = material;
-		if (cube != null)
+		ShaderMaterial copy = null;
+		//The cube is only converted for a copy not made yet: finding it in the texture table costs a search of the table
+		bool known = (cube != null || emissive != null) && TryGetMoverLookCopy(material, cube, emissive, out copy);
+		Cubemap cubemap = null;
+		if (!known && cube != null)
 		{
-			if (_roomCubeMaterials.TryGetValue((material, cube), out ShaderMaterial copy) && copy != null && GodotObject.IsInstanceValid(copy))
+			cubemap = GetTexOrCube(new TexturePtr() { Texture = cube, Location = TexturePtr.Source.LEVEL })?.Cubemap;
+			if (cubemap == null)
+			{
+				_roomCubesUnavailable.Add(cube);
+				cube = null;
+				known = emissive != null && TryGetMoverLookCopy(material, cube, emissive, out copy);
+			}
+		}
+		if (cube != null || emissive != null)
+		{
+			if (known)
 			{
 				result = copy;
 			}
 			else
 			{
-				Cubemap cubemap = GetTexOrCube(new TexturePtr() { Texture = cube, Location = TexturePtr.Source.LEVEL })?.Cubemap;
-				if (cubemap != null)
+				/* Every uniform copied by hand: Duplicate() drops the ones whose value isn't the uniform's own type (the
+				   diffuse tint, a Color on a vec4), and the stairwell's black floor came out white */
+				copy = new ShaderMaterial() { Shader = material.Shader, RenderPriority = material.RenderPriority, NextPass = material.NextPass };
+				foreach (StringName name in GetShaderUniformNames(material.Shader))
+					copy.SetShaderParameter(name, material.GetShaderParameter(name));
+				if (cube != null)
 				{
-					/* Every uniform copied by hand: Duplicate() drops the ones whose value isn't the uniform's own type (the
-					   diffuse tint, a Color on a vec4), and the stairwell's black floor came out white */
-					copy = new ShaderMaterial() { Shader = material.Shader, RenderPriority = material.RenderPriority, NextPass = material.NextPass };
-					foreach (Godot.Collections.Dictionary uniform in material.Shader.GetShaderUniformList())
-					{
-						StringName name = uniform["name"].AsStringName();
-						copy.SetShaderParameter(name, material.GetShaderParameter(name));
-					}
 					copy.SetShaderParameter(AlienSceneMaterials.UseEnvironmentRoomCubeParam, true);
 					copy.SetShaderParameter(AlienSceneMaterials.EnvironmentRoomCubeParam, cubemap);
-					_materialReflects[copy] = true;
-					_roomCubeMaterials[(material, cube)] = copy;
-					result = copy;
 				}
+				if (emissive is MoverEmissive glow)
+				{
+					if (glow.ReplaceTint)
+					{
+						Vector4 diffuse = material.GetShaderParameter(AlienSceneMaterials.DiffuseTintParam).AsVector4();
+						copy.SetShaderParameter(AlienSceneMaterials.DiffuseTintParam, new Vector4(glow.Tint.X, glow.Tint.Y, glow.Tint.Z, diffuse.W));
+						copy.SetShaderParameter(AlienSceneMaterials.EmissiveTintParam, Vector3.One);
+					}
+					else
+					{
+						copy.SetShaderParameter(AlienSceneMaterials.EmissiveTintParam, material.GetShaderParameter(AlienSceneMaterials.EmissiveTintParam).AsVector3() * glow.Tint);
+					}
+				}
+				//A copy already wears its look: handed back in, it's left as it is
+				_materialMoverUse[copy] = (false, false);
+				_roomCubeMaterials[(material, cube, emissive)] = copy;
+				result = copy;
 			}
 		}
-		if (result == material)
-			_roomCubeMisses++;
-		else
-			_roomCubeMeshes++;
+		if (use.Reflects)
+		{
+			if (cube == null)
+				_roomCubeMisses++;
+			else
+				_roomCubeMeshes++;
+		}
+		if (emissive != null)
+			_moverEmissiveMeshes++;
 		_roomCubeTicks += System.Diagnostics.Stopwatch.GetTimestamp() - start;
 		return result;
 	}
 
-	/// <summary>The cube the level's movers give the instance a render target belongs to; null when they give it none.</summary>
-	private Textures.TEX4 GetRoomEnvironmentMap(Node3D renderTarget)
+	private bool TryGetMoverLookCopy(ShaderMaterial material, Textures.TEX4 cube, MoverEmissive? emissive, out ShaderMaterial copy)
 	{
-		if (_roomEnvironmentMapByTarget.TryGetValue(renderTarget, out Textures.TEX4 known))
+		return _roomCubeMaterials.TryGetValue((material, cube, emissive), out copy) && copy != null && GodotObject.IsInstanceValid(copy);
+	}
+
+	/* A shader's uniform names, read once: GetShaderUniformList builds a fresh array of dictionaries on every call, and asking
+	   it for each room cube copy was most of their cost (ENG_REACTORCORE makes 3,389) */
+	private readonly Dictionary<Shader, StringName[]> _shaderUniformNames = new Dictionary<Shader, StringName[]>();
+
+	private StringName[] GetShaderUniformNames(Shader shader)
+	{
+		if (_shaderUniformNames.TryGetValue(shader, out StringName[] names))
+			return names;
+		Godot.Collections.Array uniforms = shader.GetShaderUniformList();
+		names = new StringName[uniforms.Count];
+		for (int i = 0; i < names.Length; i++)
+			names[i] = uniforms[i].AsGodotDictionary()["name"].AsStringName();
+		_shaderUniformNames[shader] = names;
+		return names;
+	}
+
+	//Each mover's Visible flag, by its entity handle (GetMoverShown); per populate
+	private Dictionary<(uint, uint), bool> _moverVisible;
+
+	/// <summary>Whether the level has movers at all (a level made new has none until it's built).</summary>
+	public bool HasMovers => _content?.Level?.Movers?.Entries != null && _content.Level.Movers.Entries.Count != 0;
+
+	/* The composite instances, surface effects and water the level had when it was loaded, by entity (GetMoverShown). Taken
+	   before any edit reaches the viewer, so one pasted in since - or an instance of a composite holding one - is not among
+	   them however often the scene is rebuilt after */
+	private HashSet<uint> _entitiesAtLevelLoad;
+	//Effects whose show_on_reset has been edited since the level was loaded: their own flag is newer than their mover's
+	private readonly HashSet<uint> _effectsShownByOwnFlag = new HashSet<uint>();
+
+	private void CollectEffectsAtLevelLoad()
+	{
+		_entitiesAtLevelLoad = new HashSet<uint>();
+		if (_content?.Level?.Commands?.Entries == null)
+			return;
+		foreach (Composite composite in _content.Level.Commands.Entries)
+		{
+			if (composite?.functions == null)
+				continue;
+			foreach (FunctionEntity function in composite.functions)
+			{
+				if (function != null && (!function.function.IsFunctionType || SurfaceEffectOverlay.IsSurfaceEffect(function) || WaterSurface.IsWater(function)))
+					_entitiesAtLevelLoad.Add(function.shortGUID.AsUInt32);
+			}
+		}
+	}
+
+	private bool IsShowingLevelRoot => _loadedComposite != null && _content?.Loaded == true
+		&& _loadedComposite == _content.Level?.Commands?.EntryPoints?[0];
+	/// <summary>
+	/// Whether the level shows a surface effect's or water's instance from the start, as its mover has it: show_on_reset as
+	/// the instance resolves it, links and overrides and all. False where the instance has no mover: one the level leaves out
+	/// (deleted, a template: HAB_CORPORATEPENT's walls are the frozen set pieces with no frost boxes built). Null where the
+	/// movers don't speak for it and its own flag says: outside the level's own scene (a composite opened on its own has none
+	/// of their handles), and for an instance added since the level was loaded or an effect shown or hidden since - the movers
+	/// are the level as last built.
+	/// </summary>
+	public bool? GetMoverShown(Node3D entityNode, Entity entity)
+	{
+		if (entityNode == null || entity == null || !HasMovers || !IsShowingLevelRoot || _entitiesAtLevelLoad == null
+			|| _effectsShownByOwnFlag.Contains(entity.shortGUID.AsUInt32))
+			return null;
+		if (!TryBuildEntityIdChainFromNode(entityNode, out List<uint> chain) || chain.Count == 0)
+			return null;
+		foreach (uint id in chain)
+		{
+			if (!_entitiesAtLevelLoad.Contains(id))
+				return null;
+		}
+
+		if (_moverVisible == null)
+		{
+			_moverVisible = new Dictionary<(uint, uint), bool>();
+			foreach (Movers.MOVER_DESCRIPTOR mover in _content.Level.Movers.Entries)
+			{
+				if (mover?.Entity != null)
+					_moverVisible[(mover.Entity.composite_instance_id.AsUInt32, mover.Entity.entity_id.AsUInt32)] = mover.Flags?.Visible ?? true;
+			}
+		}
+		List<ShortGuid> path = new List<ShortGuid>(chain.Count);
+		foreach (uint id in chain)
+			path.Add(new ShortGuid(id));
+		return _moverVisible.TryGetValue((path.GenerateCompositeInstanceID().AsUInt32, chain[chain.Count - 1]), out bool visible) && visible;
+	}
+
+	/// <summary>The cube and the glow the level's movers give the instance a render target belongs to (null where none).</summary>
+	private MoverLook GetMoverLook(Node3D renderTarget)
+	{
+		if (_moverLookByTarget.TryGetValue(renderTarget, out MoverLook known))
 			return known;
 
 		if (_moverEnvironmentMaps == null)
 		{
 			_moverEnvironmentMaps = new Dictionary<(uint, uint), Textures.TEX4>();
-			_moverEnvironmentMapEntities = new HashSet<uint>();
+			_moverEmissives = new Dictionary<(uint, uint), MoverEmissive>();
+			_moverLookEntities = new HashSet<uint>();
 			List<Movers.MOVER_DESCRIPTOR> movers = _content?.Level?.Movers?.Entries;
 			if (movers != null)
 			{
 				foreach (Movers.MOVER_DESCRIPTOR mover in movers)
 				{
-					if (mover?.EnvironmentMap == null || mover.Entity == null)
+					if (mover?.Entity == null)
 						continue;
-					_moverEnvironmentMaps[(mover.Entity.composite_instance_id.AsUInt32, mover.Entity.entity_id.AsUInt32)] = mover.EnvironmentMap;
-					_moverEnvironmentMapEntities.Add(mover.Entity.entity_id.AsUInt32);
+					(uint, uint) key = (mover.Entity.composite_instance_id.AsUInt32, mover.Entity.entity_id.AsUInt32);
+					bool replaceTint = mover.EmissiveFlags.HasFlag(Movers.EmissiveFlag.ReplaceTint);
+					//Only what changes anything: white and not replacing glows as the material does
+					bool ownGlow = replaceTint || mover.EmissiveTint.X != 255f || mover.EmissiveTint.Y != 255f || mover.EmissiveTint.Z != 255f;
+					if (mover.EnvironmentMap == null && !ownGlow)
+						continue;
+					if (mover.EnvironmentMap != null)
+						_moverEnvironmentMaps[key] = mover.EnvironmentMap;
+					if (ownGlow)
+						_moverEmissives[key] = new MoverEmissive(new Vector3(mover.EmissiveTint.X, mover.EmissiveTint.Y, mover.EmissiveTint.Z) / 255f, replaceTint);
+					_moverLookEntities.Add(key.Item2);
 				}
 			}
 		}
 
-		//Most movers have no room cube (TECH_HUB: 1,282 of 36,130), so the chain is only walked for a ModelReference one of
-		//those is an instance of - the nearest node up with an entity is it
-		Textures.TEX4 cube = null;
+		//Most movers give nothing of their own (TECH_HUB: 1,282 of 36,130 have a room cube), so the chain is only walked for
+		//a ModelReference one of those is an instance of - the nearest node up with an entity is it
+		MoverLook look = default;
 		Entity owner = null;
 		for (Node node = renderTarget; owner == null && node != null && node != _parentNode; node = node.GetParent())
 		{
 			if (node is Node3D node3D)
 				_nodeEntities.TryGetValue(node3D, out owner);
 		}
-		if (owner != null && _moverEnvironmentMapEntities.Contains(owner.shortGUID.AsUInt32) && TryBuildEntityIdChainFromNode(renderTarget, out List<uint> chain))
+		if (owner != null && _moverLookEntities.Contains(owner.shortGUID.AsUInt32) && TryBuildEntityIdChainFromNode(renderTarget, out List<uint> chain))
 		{
 			//The instance as a mover names it: the composites it's in, hashed, and the ModelReference within the last
 			List<ShortGuid> path = new List<ShortGuid>(chain.Count);
 			foreach (uint id in chain)
 				path.Add(new ShortGuid(id));
-			uint instance = path.GenerateCompositeInstanceID().AsUInt32;
-			_moverEnvironmentMaps.TryGetValue((instance, chain[chain.Count - 1]), out cube);
+			(uint, uint) key = (path.GenerateCompositeInstanceID().AsUInt32, chain[chain.Count - 1]);
+			_moverEnvironmentMaps.TryGetValue(key, out Textures.TEX4 cube);
+			look = new MoverLook(cube, _moverEmissives.TryGetValue(key, out MoverEmissive glow) ? glow : null);
 		}
-		_roomEnvironmentMapByTarget[renderTarget] = cube;
-		return cube;
+		_moverLookByTarget[renderTarget] = look;
+		return look;
 	}
 
 	private void EnsureSolidMaterial(Materials.Material material)
@@ -5935,11 +6246,12 @@ public partial class AlienScene : Node3D
 				out overrideParameterEntity,
 				out fallbackParameterEntity);
 
-		solidMesh.MaterialOverride = WithRoomEnvironmentMap(GetSolidMaterialForModelReference(
+		solidMesh.MaterialOverride = WithMoverLook(GetSolidMaterialForModelReference(
 			material,
 			modelReferenceEntity,
 			overrideParameterEntity,
 			fallbackParameterEntity), solidMesh.GetParent() as Node3D);
+		PlanetLook.TryApply(this, solidMesh);
 		UpdateWireframeOverlay(
 			solidMesh,
 			material,
@@ -6090,6 +6402,42 @@ public partial class AlienScene : Node3D
 
 		TexOrCube texture = GetTexOrCube(texturePtr);
 		return texture?.Texture;
+	}
+
+	/* Textures an entity names by path (a SurfaceEffectBox's TEXTURE_MAP): the level's pak first, then global's, converted
+	   as a material's are. The paks are only searchable by name a texture at a time, so each path found is kept; one not
+	   found is looked for again next time (a texture imported since, or a path still being typed) */
+	private readonly Dictionary<string, Texture2D> _texturesByPath = new Dictionary<string, Texture2D>(StringComparer.OrdinalIgnoreCase);
+
+	public Texture2D GetTextureByPath(string path)
+	{
+		if (string.IsNullOrEmpty(path))
+			return null;
+		//Null: found, restored, and still not convertible - not worth another read of the pak
+		if (_texturesByPath.TryGetValue(path, out Texture2D known) && (known == null || GodotObject.IsInstanceValid(known)))
+			return known;
+
+		TexturePtr.Source source = TexturePtr.Source.LEVEL;
+		Textures.TEX4 tex = _content?.Level?.Textures?.GetEnvironmentMapByPath(path);
+		if (tex == null)
+		{
+			source = TexturePtr.Source.GLOBAL;
+			tex = LevelContent.Global?.Textures?.GetEnvironmentMapByPath(path);
+		}
+		if (tex == null)
+			return null;
+
+		/* A populate converts the textures its surface effects name (AddSurfaceEffectTextures) and lets go of every texture's
+		   bytes after; one named since - a TEXTURE_MAP typed in, a frost box pasted in - had none left to convert, and the
+		   overlay drew as flat white. Restored and converted here, as an entity spawned since has its models */
+		LevelViewerPopulatePrewarm.Plan plan = new LevelViewerPopulatePrewarm.Plan();
+		plan.Textures.Add(tex);
+		plan.TextureLocations[tex] = source;
+		PrewarmPlanIfMissing(plan, "texture " + path);
+
+		Texture2D texture = GetTexOrCube(new TexturePtr() { Texture = tex, Location = source })?.Texture;
+		_texturesByPath[path] = texture;
+		return texture;
 	}
 
 	private Textures GetTexturesForSource(TexturePtr.Source source) =>

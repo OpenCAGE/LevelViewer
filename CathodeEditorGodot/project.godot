@@ -32,6 +32,7 @@ project/assembly_name="CathodeEditorGodot"
 
 [rendering]
 
+driver/depth_prepass/enable=false
 textures/vram_compression/import_etc2_astc=true
 
 [shader_globals]
@@ -46,11 +47,11 @@ viewer_highlight_compress={
 }
 viewer_exposure={
 "type": "float",
-"value": 0.75
+"value": 0.62
 }
 viewer_shade_floor={
 "type": "float",
-"value": 0.7
+"value": 0.8
 }
 viewer_dirt={
 "type": "float",
@@ -70,7 +71,7 @@ viewer_tint_linear={
 }
 viewer_saturation={
 "type": "float",
-"value": 0.8
+"value": 1.0
 }
 viewer_env_reflection={
 "type": "float",
@@ -87,4 +88,20 @@ viewer_plastic_reflect={
 viewer_fresnel_rise={
 "type": "float",
 "value": 0.0
+}
+viewer_toe_lift={
+"type": "float",
+"value": 0.0
+}
+viewer_emissive={
+"type": "float",
+"value": 1.0
+}
+viewer_glass_sheen={
+"type": "float",
+"value": 0.09
+}
+viewer_fog={
+"type": "float",
+"value": 1.0
 }

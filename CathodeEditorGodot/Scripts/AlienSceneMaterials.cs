@@ -18,7 +18,7 @@ public static class AlienSceneMaterials
 	//level builds thousands of materials.
 	private static readonly StringName FilterColourParam = new StringName("filter_colour");
 	private static readonly StringName ZoneColourParam = new StringName("zone_colour");
-	private static readonly StringName DiffuseTintParam = new StringName("diffuse_tint");
+	internal static readonly StringName DiffuseTintParam = new StringName("diffuse_tint");
 	private static readonly StringName VertexColourTintParam = new StringName("vertex_colour_tint");
 	private static readonly StringName UseVertexColourParam = new StringName("use_vertex_colour");
 	private static readonly StringName DiffuseUvMultParam = new StringName("diffuse_uv_mult");
@@ -30,6 +30,7 @@ public static class AlienSceneMaterials
 	private static readonly StringName SeparateAlphaUvMultParam = new StringName("separate_alpha_uv_mult");
 	private static readonly StringName SeparateAlphaMapParam = new StringName("separate_alpha_map");
 	private static readonly StringName AlphaFromLuminanceParam = new StringName("alpha_from_luminance");
+	private static readonly StringName AlphaSdfParam = new StringName("alpha_sdf");
 	private static readonly StringName AlphaCutoutParam = new StringName("alpha_cutout");
 	private static readonly StringName AlphaCutoutThresholdParam = new StringName("alpha_cutout_threshold");
 	private static readonly StringName SecondaryDiffuseMapParam = new StringName("secondary_diffuse_map");
@@ -52,6 +53,11 @@ public static class AlienSceneMaterials
 	private static readonly StringName AlphablendNoiseUvMultParam = new StringName("alphablend_noise_uv_mult");
 	private static readonly StringName AlphablendNoisePowerParam = new StringName("alphablend_noise_power");
 	private static readonly StringName AlphaFadeModeParam = new StringName("alpha_fade_mode");
+	internal static readonly StringName EmissiveParam = new StringName("emissive");
+	internal static readonly StringName EmissiveTintParam = new StringName("emissive_tint");
+	internal static readonly StringName EmissiveStrengthParam = new StringName("emissive_strength");
+	private static readonly StringName EmissiveFromLumaParam = new StringName("emissive_from_luma");
+	private static readonly StringName EmissiveLumaTintParam = new StringName("emissive_luma_tint");
 	private static readonly StringName UseVertexLanesParam = new StringName("use_vertex_lanes");
 	private static readonly StringName VertexColourScaleParam = new StringName("vertex_colour_scale");
 	private static readonly StringName UseVertexAoParam = new StringName("use_vertex_ao");
@@ -67,7 +73,7 @@ public static class AlienSceneMaterials
 	private static readonly StringName ReflectivePlasticParam = new StringName("reflective_plastic");
 	private static readonly StringName UseEnvironmentCubeParam = new StringName("use_environment_cube");
 	private static readonly StringName EnvironmentCubeParam = new StringName("environment_cube");
-	//The room's cube, on the copies AlienScene makes for instances the level gives one (WithRoomEnvironmentMap)
+	//The room's cube, on the copies AlienScene makes for instances the level gives one (WithMoverLook)
 	internal static readonly StringName UseEnvironmentRoomCubeParam = new StringName("use_environment_room_cube");
 	internal static readonly StringName EnvironmentRoomCubeParam = new StringName("environment_room_cube");
 
@@ -317,11 +323,131 @@ public static class AlienSceneMaterials
 
 		Shaders.Shader shader = material.Shader;
 		string baseName = material.Name + " " + shader.Ubershader;
+		if (shader.Ubershader == SHADER_LIST.CA_NONINTERACTIVE_WATER || shader.Ubershader == SHADER_LIST.CA_SIMPLEWATER)
+			return CreateWaterMaterial(material, shader, scene, baseName);
+		if (shader.Ubershader == SHADER_LIST.CA_PLANET)
+			return CreatePlanetMaterial(material, shader, scene, baseName);
 		int diffuseSampler = GetDiffuseSamplerIndex(shader);
 		if (diffuseSampler < 0 && !TryGetSeparateAlphaMap(material, shader, scene, out _))
 			return Unsupported(material, baseName + " (NO DIFFUSE SAMPLER)");
 
 		return CreateShadedMaterial(material, shader, scene, baseName, diffuseSampler, environmentScalars);
+	}
+
+	/* Water (CA_NONINTERACTIVE_WATER puddles, CA_SIMPLEWATER) drawn as water (shaders/water_surface.gdshader, as
+	   WaterSurface draws a SimpleWater sheet): dark with depth by its DEPTH_FOG_* stops, mirroring at its fresnel. Drawn as
+	   a surface, its normal map stood in for a colour: MUTHUR core's wet floor was flat yellow where the game's is a dark
+	   puddle with the room in it. */
+	private static Shader _waterShader;
+
+	private static MaterialResult CreateWaterMaterial(Materials.Material material, Shaders.Shader shader, AlienScene scene, string name)
+	{
+		_waterShader ??= GD.Load<Shader>("res://shaders/water_surface.gdshader");
+		ShaderMaterial water = new ShaderMaterial { ResourceName = name, Shader = _waterShader, RenderPriority = -20 };
+		bool simple = shader.Ubershader == SHADER_LIST.CA_SIMPLEWATER;
+		string[] parameterNames = System.Enum.GetNames(simple ? typeof(CA_SIMPLEWATER.PARAMETERS) : typeof(CA_NONINTERACTIVE_WATER.PARAMETERS));
+		float[] Read(string parameter, int width)
+		{
+			int index = System.Array.IndexOf(parameterNames, parameter);
+			if (index < 0 || shader.PixelShaderParameterRemaps == null || index >= shader.PixelShaderParameterRemaps.Count)
+				return null;
+			int remap = shader.PixelShaderParameterRemaps[index];
+			if (remap == 255 || material.PixelShaderConstants == null || remap + width > material.PixelShaderConstants.Count)
+				return null;
+			float[] values = new float[width];
+			for (int i = 0; i < width; i++)
+				values[i] = material.PixelShaderConstants[remap + i];
+			return values;
+		}
+		float One(string parameter, float fallback) => Read(parameter, 1)?[0] ?? fallback;
+		Vector4 Stop(string colour, string alpha, float fallbackAlpha)
+		{
+			float[] c = Read(colour, 3) ?? new float[3];
+			return new Vector4(c[0], c[1], c[2], Mathf.Clamp(One(alpha, fallbackAlpha), 0f, 1f));
+		}
+		water.SetShaderParameter("fog_initial", Stop("DEPTH_FOG_INITIAL_COLOUR", "DEPTH_FOG_INITIAL_ALPHA", 0f));
+		water.SetShaderParameter("fog_mid", Stop("DEPTH_FOG_MIDPOINT_COLOUR", "DEPTH_FOG_MIDPOINT_ALPHA", 0.5f));
+		water.SetShaderParameter("fog_end", Stop("DEPTH_FOG_END_COLOUR", "DEPTH_FOG_END_ALPHA", 1f));
+		water.SetShaderParameter("fog_depths", new Vector2(One("DEPTH_FOG_MIDPOINT_DEPTH", 0.5f), One("DEPTH_FOG_END_DEPTH", 1f)));
+		water.SetShaderParameter("fresnel", new Vector3(One("MIN_FRESNEL", 0f), One("MAX_FRESNEL", 1f), One("FRESNEL_POWER", 1f)));
+		water.SetShaderParameter("reflective", HasShaderFeature(shader, "REFLECTIVE_MAPPING"));
+		water.SetShaderParameter("use_mesh_normal", true);
+		/* Its soft edge is the entity's (softness_edge, an instance constant the material doesn't carry): a centimetre, as
+		   the levels' puddles have it. A puddle lies flush on the floor, so its fog fades out to nothing there and it is the
+		   reflection alone - without it, MUTHUR core's puddle's white first stop painted it white. */
+		water.SetShaderParameter("softness", 0.01f);
+		//The puddle's outline (ALPHA_MASKING: its mesh is a square, the mask's alpha the shape)
+		if (HasShaderFeature(shader, "ALPHA_MASKING"))
+		{
+			int maskSampler = System.Array.IndexOf(System.Enum.GetNames(simple ? typeof(CA_SIMPLEWATER.SAMPLERS) : typeof(CA_NONINTERACTIVE_WATER.SAMPLERS)), "ALPHA_MASK");
+			Texture2D mask = maskSampler >= 0 ? scene?.GetSamplerTexture(material, shader, maskSampler) : null;
+			if (mask != null)
+			{
+				water.SetShaderParameter("alpha_mask", mask);
+				water.SetShaderParameter("use_alpha_mask", true);
+			}
+		}
+		return new MaterialResult(water, true);
+	}
+
+	/* Planets (CA_PLANET: the gas giant and moons through the station's windows) drawn as the game draws them
+	   (shaders/planet.gdshader). Drawn as a model, each was a two metre ball floating outside the hull, or nothing. What
+	   places and sizes one is its Planet entity's, per instance (PlanetLook). */
+	public const string PlanetShaderPath = "res://shaders/planet.gdshader";
+	private static Shader _planetShader;
+
+	private static MaterialResult CreatePlanetMaterial(Materials.Material material, Shaders.Shader shader, AlienScene scene, string name)
+	{
+		_planetShader ??= GD.Load<Shader>(PlanetShaderPath);
+		bool detail = HasShaderFeature(shader, "DETAIL_MAPPING");
+		//The planets before the glows round them, as their sort keys have them
+		ShaderMaterial planet = new ShaderMaterial { ResourceName = name, Shader = _planetShader, RenderPriority = (int)Material.RenderPriorityMin + (detail ? 2 : 3) };
+		string[] parameterNames = System.Enum.GetNames(typeof(CA_PLANET.PARAMETERS));
+		float[] Read(string parameter, int width, bool vertexStage)
+		{
+			int index = System.Array.IndexOf(parameterNames, parameter);
+			List<int> remaps = vertexStage ? shader.VertexShaderParameterRemaps : shader.PixelShaderParameterRemaps;
+			List<float> constants = vertexStage ? material.VertexShaderConstants : material.PixelShaderConstants;
+			if (index < 0 || remaps == null || index >= remaps.Count || remaps[index] == 255 || constants == null || remaps[index] + width > constants.Count)
+				return null;
+			float[] values = new float[width];
+			for (int i = 0; i < width; i++)
+				values[i] = constants[remaps[index] + i];
+			return values;
+		}
+		float One(string parameter, float fallback, bool vertexStage = false) => Read(parameter, 1, vertexStage)?[0] ?? fallback;
+		Vector3 Three(string parameter)
+		{
+			float[] c = Read(parameter, 3, false);
+			return c == null ? Vector3.Zero : new Vector3(c[0], c[1], c[2]);
+		}
+		planet.SetShaderParameter("rim_transparency", One("ATMOSPHERE_RIM_TRANSPARENCY", 1f));
+		planet.SetShaderParameter("overbright", One("OVERBRIGHT_SCALAR", 1f));
+		planet.SetShaderParameter("detail_tex_scalar", One("DETAIL_TEX_SCALAR", 1f));
+		planet.SetShaderParameter("rim_fresnel", One("ATMOSPHERE_RIM_FRESNEL", 1f));
+		planet.SetShaderParameter("rim_colour", Three("ATMOSPHERE_RIM_COLOUR"));
+		planet.SetShaderParameter("rim_brightness", One("ATMOSPHERE_RIM_BRIGHTNESS", 0f));
+		planet.SetShaderParameter("horizon_booster", One("HORIZON_BOOSTER", 0f));
+		planet.SetShaderParameter("unlit_rim_colour", Three("UNLIT_ATMOSPHERE_RIM_COLOUR"));
+		planet.SetShaderParameter("unlit_rim_brightness", One("UNLIT_ATMOSPHERE_RIM_BRIGHTNESS", 0f));
+		planet.SetShaderParameter("penumbra_falloff_power", One("PENUMBRA_FALLOFF_POWER", 1f));
+		planet.SetShaderParameter("light_wrap_angle", One("LIGHT_WRAP_ANGLE", 0f, vertexStage: true));
+		planet.SetShaderParameter("scroll_speed", new Vector2(
+			HasShaderFeature(shader, "SCROLLING_UV") ? One("SCROLL_SPEED", 0f, vertexStage: true) : 0f,
+			HasShaderFeature(shader, "DETAIL_SCROLLING_UV") ? One("DETAIL_SCROLL_SPEED", 0f, vertexStage: true) : 0f));
+		planet.SetShaderParameter("flow", new Vector4(One("CYCLE_TIME", 1f), One("FLOW_SPEED", 0f), One("FLOW_TEX_SCALE", 1f), One("FLOW_WARP_STRENGTH", 0f)));
+		Texture2D flowMap = HasShaderFeature(shader, "FLOW_UV_ANIMATION") ? scene?.GetSamplerTexture(material, shader, (int)CA_PLANET.SAMPLERS.FLOW_MAP) : null;
+		planet.SetShaderParameter("use_flow", flowMap != null);
+		if (flowMap != null)
+			planet.SetShaderParameter("flow_map", flowMap);
+		Texture2D atmosphere = scene?.GetSamplerTexture(material, shader, (int)CA_PLANET.SAMPLERS.ATMOSPHERE_MAP);
+		if (atmosphere != null)
+			planet.SetShaderParameter("atmosphere_map", atmosphere);
+		Texture2D detailMap = detail ? scene?.GetSamplerTexture(material, shader, (int)CA_PLANET.SAMPLERS.DETAIL_MAP) : null;
+		planet.SetShaderParameter("use_detail_map", detailMap != null);
+		if (detailMap != null)
+			planet.SetShaderParameter("detail_map", detailMap);
+		return new MaterialResult(planet, true);
 	}
 
 	private static MaterialResult Unsupported(Materials.Material material, string name)
@@ -353,7 +479,7 @@ public static class AlienSceneMaterials
 		};
 		if (glass)
 		{
-			godotMaterial.SetShaderParameter(GlassTintParam, glassTint);
+			godotMaterial.SetShaderParameter(GlassTintParam, Raw(glassTint));
 			godotMaterial.SetShaderParameter(GlassDensityParam, glassDensity);
 			godotMaterial.SetShaderParameter(GlassLightnessParam, glassLightness);
 			godotMaterial.SetShaderParameter(GlassFresnelParam, glassFresnel);
@@ -420,15 +546,18 @@ public static class AlienSceneMaterials
 		/* What the game fades the alpha of a cut-out, decal or blended surface by (its clip and its blend both): with
 		   vertex colours, the alpha-blend noise blend - ALPHABLEND_NOISE without dirt, so a scrape or grime overlay like the
 		   doors' DECAL_Scrapes shows only where the mesh paints it, where the viewer drew all of it - or else the vertex alpha
-		   (a plain vertex-coloured material already takes that through its tint). */
+		   (a plain vertex-coloured material already takes that through its tint). Not the vertex alpha where dirt or the noise
+		   has the vertex colour for itself: the game's clip goes back to the texture and tint alone there, and taking it
+		   faded out the floor grills (HAB_AIRPORT's, the tow platform's), leaving the lit panels under them bare. */
 		int alphaFade = 0;
 		if (vertexColour)
 		{
+			bool dirt = HasShaderFeature(shader, "DIRT_MAPPING");
 			bool separateClip = HasShaderFeature(shader, "SEPARATE_ALPHA") && HasShaderFeature(shader, "ALPHA_TEST")
 				&& HasShaderFeature(shader, "SPECULAR_MAPPING") && !HasShaderFeature(shader, "DECAL");
-			if (noise && !HasShaderFeature(shader, "DIRT_MAPPING") && !HasShaderFeature(shader, "EMISSIVE") && !separateClip)
+			if (noise && !dirt && !HasShaderFeature(shader, "EMISSIVE") && !separateClip)
 				alphaFade = 2;
-			else if (!ModelReferenceMaterialOverrides.TintsWithVertexColour(shader))
+			else if (!ModelReferenceMaterialOverrides.TintsWithVertexColour(shader) && !noise && !dirt)
 				alphaFade = 1;
 		}
 		godotMaterial.SetShaderParameter(AlphaFadeModeParam, alphaFade);
@@ -449,7 +578,7 @@ public static class AlienSceneMaterials
 		bool lanes = vertexColour && (dirtMode != 0 || vertexAo);
 		godotMaterial.SetShaderParameter(UseVertexLanesParam, lanes);
 		Vector4 scale = environmentScalars.HasValue ? environmentScalars.Value.VertexScale : Vector4.One;
-		godotMaterial.SetShaderParameter(VertexColourScaleParam, new Color(scale.X, scale.Y, scale.Z, scale.W));
+		godotMaterial.SetShaderParameter(VertexColourScaleParam, scale);
 		godotMaterial.SetShaderParameter(UseVertexAoParam, vertexAo && vertexColour);
 		if (vertexAo && vertexColour)
 		{
@@ -480,6 +609,31 @@ public static class AlienSceneMaterials
 			if (environmentCube != null)
 				godotMaterial.SetShaderParameter(EnvironmentCubeParam, environmentCube);
 		}
+
+		/* EMISSIVE: the surface glows in what it shows - times EMISSIVE_TINT's colour and a strength of |EMISSIVE_TINT.w| times
+		   EMISSIVE_MULT (a negative w is the strength as it stands). A negative lane in the tint makes the surface the diffuse's
+		   brightness in |EMISSIVE_TINT| instead, glowing white at that strength. Lights' panels, screens and signs. Each
+		   instance's own tint comes on top (AlienScene.WithMoverLook). */
+		bool emissive = HasShaderFeature(shader, "EMISSIVE");
+		Vector3 emissiveTint = Vector3.One;
+		float emissiveStrength = 0f;
+		bool emissiveFromLuma = false;
+		Vector3 emissiveLumaTint = Vector3.One;
+		if (emissive)
+		{
+			float[] tint = AlienSceneShaderParams.GetEnvironmentPixelValues(material, shader, CA_ENVIRONMENT.PARAMETERS.EMISSIVE_TINT, 4) ?? new float[] { 1f, 1f, 1f, 1f };
+			float mult = AlienSceneShaderParams.GetEnvironmentFloat(material, shader, CA_ENVIRONMENT.PARAMETERS.EMISSIVE_MULT, 1f);
+			emissiveFromLuma = tint[0] < 0f || tint[1] < 0f || tint[2] < 0f;
+			emissiveStrength = tint[3] >= 0f ? Mathf.Abs(tint[3]) * mult : Mathf.Abs(tint[3]);
+			if (!emissiveFromLuma)
+				emissiveTint = new Vector3(tint[0], tint[1], tint[2]);
+			emissiveLumaTint = new Vector3(Mathf.Abs(tint[0]), Mathf.Abs(tint[1]), Mathf.Abs(tint[2]));
+		}
+		godotMaterial.SetShaderParameter(EmissiveParam, emissive);
+		godotMaterial.SetShaderParameter(EmissiveTintParam, emissiveTint);
+		godotMaterial.SetShaderParameter(EmissiveStrengthParam, emissiveStrength);
+		godotMaterial.SetShaderParameter(EmissiveFromLumaParam, emissiveFromLuma);
+		godotMaterial.SetShaderParameter(EmissiveLumaTintParam, emissiveLumaTint);
 	}
 
 	public static ShaderMaterial CreateWireframeMaterial(
@@ -607,7 +761,7 @@ public static class AlienSceneMaterials
 	{
 		godotMaterial.SetShaderParameter(SecondaryDiffuseMapParam, secondaryDiffuse);
 		godotMaterial.SetShaderParameter(SecondaryDiffuseUvMultParam, AlienSceneShaderParams.GetSecondaryDiffuseUvScale(material, shader));
-		godotMaterial.SetShaderParameter(SecondaryDiffuseTintParam, AlienSceneShaderParams.GetSecondaryDiffuseTint(material, shader));
+		godotMaterial.SetShaderParameter(SecondaryDiffuseTintParam, Raw(AlienSceneShaderParams.GetSecondaryDiffuseTint(material, shader)));
 		godotMaterial.SetShaderParameter(
 			SecondaryDiffuseMaskedParam,
 			shader.Ubershader != SHADER_LIST.CA_SKIN && HasShaderFeature(shader, "VERTEX_COLOUR"));
@@ -639,8 +793,8 @@ public static class AlienSceneMaterials
 			vertexColourTint = new Color(scalars.Vertex.X, scalars.Vertex.Y, scalars.Vertex.Z, scalars.Vertex.W);
 		}
 
-		godotMaterial.SetShaderParameter(DiffuseTintParam, diffuseTint);
-		godotMaterial.SetShaderParameter(VertexColourTintParam, vertexColourTint);
+		godotMaterial.SetShaderParameter(DiffuseTintParam, Raw(diffuseTint));
+		godotMaterial.SetShaderParameter(VertexColourTintParam, Raw(vertexColourTint));
 		//The mesh's own vertex colours tint the diffuse too, where the game's do (a mesh without them is white)
 		godotMaterial.SetShaderParameter(UseVertexColourParam, ModelReferenceMaterialOverrides.TintsWithVertexColour(shader));
 		godotMaterial.SetShaderParameter(DiffuseUvMultParam, AlienSceneShaderParams.GetUvScale(material, shader, shaderParams));
@@ -665,6 +819,7 @@ public static class AlienSceneMaterials
 		bool alphaFromLuminance = useSeparateAlpha && !AlienSceneTextures.HasTransparency(separateAlphaMap);
 
 		godotMaterial.SetShaderParameter(AlphaFromLuminanceParam, alphaFromLuminance);
+		godotMaterial.SetShaderParameter(AlphaSdfParam, HasShaderFeature(shader, "SIGNED_DISTANCE_FIELD"));
 		godotMaterial.SetShaderParameter(AlphaCutoutParam, useAlphaCutout);
 		godotMaterial.SetShaderParameter(AlphaCutoutThresholdParam, AlienSceneShaderParams.GetAlphaScissorThreshold(material, shader));
 	}
@@ -878,7 +1033,8 @@ public static class AlienSceneMaterials
 
 	private const string GlassInsertAfter = "ALPHA = alpha;";
 
-	private const string GlassDeclarations = @"uniform vec4 glass_tint = vec4(1.0);
+	private const string GlassDeclarations = @"global uniform float viewer_glass_sheen;
+uniform vec4 glass_tint = vec4(1.0);
 uniform float glass_density = 0.0;
 uniform float glass_lightness = 0.0;
 uniform float glass_fresnel = 1.0;
@@ -890,7 +1046,9 @@ uniform bool glass_vertex_alpha = false;
 	// at glass_density along a path that lengthens towards grazing. What it lets through (luma) is how see-through the pane
 	// is, and what it absorbs tints it, scaled by glass_lightness. Coverage - the separate alpha (or diffuse alpha) times the
 	// mesh's vertex alpha - is solid diffuse instead (smudges, frames). Retail's fresnel comes from a lookup table: Schlick
-	// stands in, and with no environment map to reflect, the fresnel's share draws as a soft grey sheen.
+	// stands in, and with no environment map to reflect, the fresnel's share draws as a soft grey sheen (viewer_glass_sheen:
+	// 0.09 scored closest to the game on MUTHUR core, TECH_HUB, the android lab and the hospital - 0.18 left MUTHUR's server
+	// racks' glass doors milky where the game's are dark).
 	private const string GlassBlock = @"
 	{
 		float g_cover = clamp(alpha * (glass_vertex_alpha ? COLOR.a : 1.0), 0.0, 1.0);
@@ -905,8 +1063,10 @@ uniform bool glass_vertex_alpha = false;
 		float g_clear = 1.0 - g_cover;
 		float g_alpha = clamp((1.0 - dot(g_luma, g_through) * g_keep) * g_clear + g_cover, 0.0, 1.0);
 		vec3 g_colour = g_clear * (1.0 - dot(g_luma, g_through_head_on)) * g_through * g_keep * glass_lightness;
-		vec3 g_sum = color.rgb * g_cover + g_colour + vec3(0.18) * g_fresnel * g_clear;
-		ALBEDO = model_reference_apply_preview_shading(g_sum / max(g_alpha, 0.001), ndl);
+		vec3 g_sum = color.rgb * g_cover + g_colour + vec3(viewer_glass_sheen) * g_fresnel * g_clear;
+		// a glow keeps the share it had before the glass (the covered part's, as the plain path blends it at its alpha)
+		ALBEDO = model_reference_apply_preview_shading(g_sum / max(g_alpha, 0.001), ndl)
+			+ model_reference_emission(color.rgb) * g_cover / max(g_alpha, 0.001);
 		ALPHA = g_alpha;
 	}";
 
@@ -935,7 +1095,7 @@ uniform bool glass_vertex_alpha = false;
 
 	private const string SecondaryDiffuseDeclarations = @"uniform sampler2D secondary_diffuse_map : source_color, filter_linear_mipmap_anisotropic;
 uniform vec2 secondary_diffuse_uv_mult = vec2(1.0);
-uniform vec4 secondary_diffuse_tint : source_color = vec4(1.0);
+uniform vec4 secondary_diffuse_tint = vec4(1.0);
 uniform bool secondary_diffuse_masked = false;
 
 vec3 model_reference_secondary_diffuse(vec2 uv) {
@@ -995,6 +1155,11 @@ vec3 model_reference_secondary_diffuse(vec2 uv) {
 			_wireframeShader = GD.Load<Shader>("res://shaders/model_reference_wireframe.gdshader");
 		return _wireframeShader;
 	}
+
+	/* The game's colour constants (tints, scales) are multipliers it uses as they are. Handed to a shader as a Color, Godot
+	   decodes them from sRGB on the way to the GPU - even into a uniform without source_color - so a tint of 0.33 arrived as
+	   0.09: Torrens' mustard vinyl seats drew brick red, every mid tint dark. As a Vector4 they go as they are. */
+	private static Vector4 Raw(Color c) => new Vector4(c.R, c.G, c.B, c.A);
 
 	public static int GetDiffuseSamplerIndex(Shaders.Shader shader)
 	{

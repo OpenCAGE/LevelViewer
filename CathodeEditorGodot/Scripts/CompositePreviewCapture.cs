@@ -66,9 +66,8 @@ public partial class CompositePreviewCapture : Node3D
 	//The ambient light scenes/main.tscn gives the viewport, over nothing instead of the sky
 	private static readonly Color AmbientColour = new Color(0.85f, 0.88f, 0.92f);
 	private const float AmbientEnergy = 0.35f;
-	//The viewport's tonemap (scenes/main.tscn): Reinhard, matched to the game's look (19 Oct 2026)
-	private const float TonemapExposure = 1.15f;
-	private const float TonemapWhite = 2f;
+	//The viewport's tonemap (scenes/main.tscn): Filmic at this exposure, matched to the game's look (19 Oct 2026)
+	private const float TonemapExposure = 0.6f;
 
 	/// <summary>
 	/// Frames to wait after asking for the render before reading the texture back. The mode change is
@@ -90,6 +89,8 @@ public partial class CompositePreviewCapture : Node3D
 	private SubViewport _viewport;
 	private Camera3D _camera;
 	private readonly List<VisualInstance3D> _tagged = new List<VisualInstance3D>();
+	//Draw distances lifted for the capture, put back by UntagVisuals
+	private readonly Dictionary<GeometryInstance3D, float> _liftedRanges = new Dictionary<GeometryInstance3D, float>();
 	private readonly Stack<Node> _walk = new Stack<Node>();
 
 	/// <summary>The capture node under <paramref name="host"/>, made the first time it is asked for.</summary>
@@ -131,7 +132,17 @@ public partial class CompositePreviewCapture : Node3D
 			EnsureViewport(outputSize * RenderScale);
 
 			for (int i = 0; i < _tagged.Count; i++)
+			{
 				_tagged[i].Layers |= CaptureLayer;
+				/* The level's meshes are drawn only out to a distance their size gives them (LevelViewerMeshUtil), and this
+				   camera stands back far enough to frame the whole composite: lifted for the capture, or a big composite's
+				   small props went missing from its preview */
+				if (_tagged[i] is GeometryInstance3D geometry && geometry.VisibilityRangeEnd > 0f)
+				{
+					_liftedRanges[geometry] = geometry.VisibilityRangeEnd;
+					geometry.VisibilityRangeEnd = 0f;
+				}
+			}
 
 			string what = label ?? root.Name.ToString();
 
@@ -250,9 +261,8 @@ public partial class CompositePreviewCapture : Node3D
 				AmbientLightSource = Godot.Environment.AmbientSource.Color,
 				AmbientLightColor = AmbientColour,
 				AmbientLightEnergy = AmbientEnergy,
-				TonemapMode = Godot.Environment.ToneMapper.Reinhardt,
+				TonemapMode = Godot.Environment.ToneMapper.Filmic,
 				TonemapExposure = TonemapExposure,
-				TonemapWhite = TonemapWhite,
 			},
 			Current = true,
 		};
@@ -389,6 +399,12 @@ public partial class CompositePreviewCapture : Node3D
 				visual.Layers &= ~CaptureLayer;
 		}
 
+		foreach (KeyValuePair<GeometryInstance3D, float> lifted in _liftedRanges)
+		{
+			if (lifted.Key != null && GodotObject.IsInstanceValid(lifted.Key))
+				lifted.Key.VisibilityRangeEnd = lifted.Value;
+		}
+		_liftedRanges.Clear();
 		_tagged.Clear();
 	}
 
@@ -455,11 +471,12 @@ public partial class CompositePreviewCapture : Node3D
 	}
 
 	/* What a byte of the render means in linear light, and the way back. The renderer draws in linear
-	   light, tonemaps (the capture environment's Reinhard, as the viewport's) and sRGB-encodes what it
+	   light, tonemaps (the capture environment's Filmic, as the viewport's) and sRGB-encodes what it
 	   hands back; the scaling and the un-premultiplying in FinishCapture need the linear value, so both
 	   curves are undone by this table and done again by LinearToByte. The tonemap is Godot's
-	   tonemap_reinhard after the exposure, inverted by bisection since it rises from 0 at 0 to 1 where the
-	   exposed value reaches the white. Were the curve ever to differ from the renderer's, a fully covered
+	   tonemap_filmic (Uncharted 2's operator with its exposure bias of 2) at the default white of 1, after
+	   the exposure, inverted by bisection since it rises from 0 at 0 to 1 where the exposed value reaches
+	   the white. Were the curve ever to differ from the renderer's, a fully covered
 	   pixel would still come back as it went in (the two here are exact inverses of each other); only the
 	   colour along an edge would be off by the difference. */
 	private static readonly float[] ByteToLinear = BuildByteToLinear();
@@ -494,13 +511,21 @@ public partial class CompositePreviewCapture : Node3D
 	}
 
 	//The linear value the tonemap takes to 1
-	private const float TonemapTop = TonemapWhite / TonemapExposure;
+	private const float TonemapTop = 1f / TonemapExposure;
 
 	private static float Tonemap(float x)
 	{
+		const float A = 0.22f * 2f * 2f;
+		const float B = 0.30f * 2f;
+		const float C = 0.10f;
+		const float D = 0.20f;
+		const float E = 0.01f;
+		const float F = 0.30f;
+		const float White = 1f;
 		float c = x * TonemapExposure;
-		float whiteSquared = TonemapWhite * TonemapWhite;
-		return (whiteSquared * c + c * c) / (whiteSquared * c + whiteSquared);
+		float mapped = (c * (A * c + C * B) + D * E) / (c * (A * c + B) + D * F) - E / F;
+		float white = (White * (A * White + C * B) + D * E) / (White * (A * White + B) + D * F) - E / F;
+		return mapped / white;
 	}
 
 	private static float SrgbToLinear(float value)

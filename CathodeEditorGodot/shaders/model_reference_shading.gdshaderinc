@@ -13,6 +13,8 @@ global uniform float viewer_shade_floor;
 // applies it as - and how much colour is left in the levelled albedo (1 = all of it)
 global uniform float viewer_tint_linear;
 global uniform float viewer_saturation;
+// How far the darkest surfaces are lifted towards readable (0 = drawn as they are)
+global uniform float viewer_toe_lift;
 
 vec4 model_reference_tint(vec4 tint) {
 	vec3 c = clamp(tint.rgb, vec3(0.0), vec3(1.0));
@@ -48,7 +50,7 @@ vec3 model_reference_level_albedo(vec3 albedo) {
 	albedo = max(mix(vec3(luma), albedo, viewer_saturation), vec3(0.0));
 	float toe = 1.0 - smoothstep(0.06, 0.26, luma);
 	vec3 lifted = pow(albedo, vec3(0.82));
-	albedo = mix(albedo, lifted, toe * 0.45);
+	albedo = mix(albedo, lifted, toe * viewer_toe_lift);
 
 	albedo = model_reference_compress_highlights(albedo);
 	return model_reference_cap_peak(albedo);

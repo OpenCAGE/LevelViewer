@@ -15,6 +15,8 @@ global uniform float viewer_env_room;
 // on against its specular (1 = all of it), and how far towards the gloss the weight rises at grazing angles (1 = Schlick's)
 global uniform float viewer_plastic_reflect;
 global uniform float viewer_fresnel_rise;
+// A scale on what EMISSIVE surfaces add (1 = as the material asks)
+global uniform float viewer_emissive;
 
 // 0 none, 1 lerp towards the dirt colour (DIRT_MAPPING), 2 multiply it over (with DIRT_BLEND_MULTIPLY)
 uniform int dirt_mode = 0;
@@ -31,6 +33,14 @@ uniform bool use_alphablend_noise = false;
 uniform sampler2D alphablend_noise_map : filter_linear_mipmap_anisotropic;
 uniform float alphablend_noise_uv_mult = 1.0;
 uniform float alphablend_noise_power = 1.0;
+
+// EMISSIVE: the glow's colour and strength (AlienSceneMaterials - an instance's own, from its mover, on the copy AlienScene
+// makes for it), and the negative-tint form that draws the surface as its diffuse's brightness in a colour of its own
+uniform bool emissive = false;
+uniform vec3 emissive_tint = vec3(1.0);
+uniform float emissive_strength = 0.0;
+uniform bool emissive_from_luma = false;
+uniform vec3 emissive_luma_tint = vec3(1.0);
 
 // What the game fades a cut-out or blended surface's alpha by, from its vertex colours: 0 nothing, 1 the vertex alpha, 2 the
 // alpha-blend noise blend (ALPHABLEND_NOISE without dirt) - scrape and grime overlays show only where the mesh paints them
@@ -59,6 +69,16 @@ uniform samplerCube environment_cube : filter_linear_mipmap;
 // The cube of the room the instance is in (the level's EnvironmentMap that claims it), which the game reflects instead
 uniform bool use_environment_room_cube = false;
 uniform samplerCube environment_room_cube : filter_linear_mipmap;
+
+// The surface's colour as an EMISSIVE material with a negative tint lane draws it: the diffuse texture's brightness in that tint
+vec3 model_reference_emissive_base(vec3 color, vec3 diffuse) {
+	return emissive_from_luma ? vec3(dot(diffuse, vec3(0.299, 0.587, 0.114))) * emissive_luma_tint : color;
+}
+
+// What an EMISSIVE surface adds on top of its shading: its own colour at the glow's strength - past white, as the game's is
+vec3 model_reference_emission(vec3 surface) {
+	return surface * emissive_tint * (emissive_strength * viewer_emissive);
+}
 
 float model_reference_alpha_fade(vec2 uv, vec4 vertex_colour) {
 	if (alpha_fade_mode == 0) {

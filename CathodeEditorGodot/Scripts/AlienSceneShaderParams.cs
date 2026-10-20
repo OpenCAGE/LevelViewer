@@ -322,6 +322,24 @@ public static class AlienSceneShaderParams
 		return values;
 	}
 
+	/// <summary>
+	/// A CA_ENVIRONMENT pixel constant's first <paramref name="width"/> lanes (EMISSIVE_TINT), or null where this permutation
+	/// has none.
+	/// </summary>
+	public static float[] GetEnvironmentPixelValues(Materials.Material material, Shaders.Shader shader, CA_ENVIRONMENT.PARAMETERS parameter, int width)
+	{
+		int index = (int)parameter;
+		if (shader.PixelShaderParameterRemaps == null || index < 0 || index >= shader.PixelShaderParameterRemaps.Count)
+			return null;
+		int remap = shader.PixelShaderParameterRemaps[index];
+		if (remap == 255 || material.PixelShaderConstants == null || remap + width > material.PixelShaderConstants.Count)
+			return null;
+		float[] values = new float[width];
+		for (int i = 0; i < width; i++)
+			values[i] = material.PixelShaderConstants[remap + i];
+		return values;
+	}
+
 	private static float GetFloat(Shaders.Shader shader, Materials.Material material, int index, float fallback)
 	{
 		if (index < 0 || shader.PixelShaderParameterRemaps.Count <= index)

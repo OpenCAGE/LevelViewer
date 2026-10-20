@@ -72,7 +72,9 @@ public static class LevelViewerPopulateTree
 		public double CollectCpuMs { get; set; }
 	}
 
-	public static Plan Collect(Composite root, LevelContent content, bool deferAliasProxy, bool includeVariables = true)
+	/// <param name="rootInstance">The instance <paramref name="root"/> is spawned as, whose parameters set its variables (what
+	/// IsDeleted reads); none for a composite built on its own.</param>
+	public static Plan Collect(Composite root, LevelContent content, bool deferAliasProxy, bool includeVariables = true, FunctionEntity rootInstance = null)
 	{
 		Plan plan = new Plan();
 		if (root == null || content?.Level == null)
@@ -90,7 +92,8 @@ public static class LevelViewerPopulateTree
 			deferAliasProxy,
 			includeVariables,
 			plan.ModelReferences,
-			mappingScopeInstanceEntityId: 0);
+			mappingScopeInstanceEntityId: 0,
+			instanceEntity: rootInstance);
 		plan.Commands.Capacity = segment.Total;
 		Flatten(segment, -1, plan.Commands);
 		stopwatch.Stop();
@@ -132,25 +135,49 @@ public static class LevelViewerPopulateTree
 			Flatten(segment.Children[i].Child, start + segment.Children[i].ParentLocalIndex, output);
 	}
 
+	private static readonly ShortGuid DeletedParameter = ShortGuidUtils.Generate("deleted");
+
+	/* Whether the level leaves an entity out: deleted itself, or by the variable of its composite its deleted input is wired
+	   to, as the instance sets that variable or by the variable's own value (an input fed by a variable keeps the link
+	   itself). CAGE's light probes delete the mirror ball they carry this way (AYZ\Lights\CAGE\Light_Probe: Delete = True,
+	   into Light_Probe_Sphere's deleted) - drawn regardless, every EnvironmentMap had a black ball beside it. Only a composite
+	   instance's contents are left out: its node stays, to be found and selected. AlienScene asks the same of an instance
+	   spawned live, so a pasted probe drops its ball too and an entity added to the sphere's composite skips it. */
+	internal static bool IsDeleted(Entity entity, Composite composite, FunctionEntity instanceEntity)
+	{
+		if (entity.GetParameter(DeletedParameter)?.content is cBool own && own.value)
+			return true;
+		foreach (EntityConnector link in entity.childLinks)
+		{
+			if (link.thisParamID != DeletedParameter || composite.GetEntityByID(link.linkedEntityID) is not VariableEntity variable)
+				continue;
+			ParameterData data = instanceEntity?.GetParameter(link.linkedParamID)?.content ?? variable.GetParameter(link.linkedParamID)?.content;
+			if (data is cBool flag && flag.value)
+				return true;
+		}
+		return false;
+	}
+
 	private static Segment CollectSegment(
 		Composite composite,
 		Dictionary<ShortGuid, Composite> compositesById,
 		bool deferAliasProxy,
 		bool includeVariables,
 		List<FunctionEntity> modelReferences,
-		uint mappingScopeInstanceEntityId)
+		uint mappingScopeInstanceEntityId,
+		FunctionEntity instanceEntity)
 	{
 		List<Command> commands = new List<Command>();
-		List<(int ParentLocalIndex, Composite Nested, uint NestedMappingScopeInstanceEntityId)> nestedBranches =
-			new List<(int, Composite, uint)>();
+		List<(int ParentLocalIndex, Composite Nested, uint NestedMappingScopeInstanceEntityId, FunctionEntity Instance)> nestedBranches =
+			new List<(int, Composite, uint, FunctionEntity)>();
 
-		CollectEntityList(composite.functions, composite, compositesById, commands, nestedBranches, modelReferences, mappingScopeInstanceEntityId);
+		CollectEntityList(composite.functions, composite, compositesById, commands, nestedBranches, modelReferences, mappingScopeInstanceEntityId, instanceEntity);
 		if (includeVariables)
-			CollectEntityList(composite.variables, composite, compositesById, commands, nestedBranches, modelReferences, mappingScopeInstanceEntityId);
+			CollectEntityList(composite.variables, composite, compositesById, commands, nestedBranches, modelReferences, mappingScopeInstanceEntityId, instanceEntity);
 		if (!deferAliasProxy)
 		{
-			CollectEntityList(composite.aliases, composite, compositesById, commands, nestedBranches, modelReferences, mappingScopeInstanceEntityId);
-			CollectEntityList(composite.proxies, composite, compositesById, commands, nestedBranches, modelReferences, mappingScopeInstanceEntityId);
+			CollectEntityList(composite.aliases, composite, compositesById, commands, nestedBranches, modelReferences, mappingScopeInstanceEntityId, instanceEntity);
+			CollectEntityList(composite.proxies, composite, compositesById, commands, nestedBranches, modelReferences, mappingScopeInstanceEntityId, instanceEntity);
 		}
 
 		Segment segment = new Segment { Local = commands, Total = commands.Count };
@@ -160,14 +187,14 @@ public static class LevelViewerPopulateTree
 		segment.Children = new List<(int, Segment)>(nestedBranches.Count);
 		if (nestedBranches.Count == 1)
 		{
-			(int parentLocalIndex, Composite nested, uint nestedScopeId) = nestedBranches[0];
-			Segment child = CollectSegment(nested, compositesById, deferAliasProxy, includeVariables, modelReferences, nestedScopeId);
+			(int parentLocalIndex, Composite nested, uint nestedScopeId, FunctionEntity nestedInstance) = nestedBranches[0];
+			Segment child = CollectSegment(nested, compositesById, deferAliasProxy, includeVariables, modelReferences, nestedScopeId, nestedInstance);
 			segment.Children.Add((parentLocalIndex, child));
 			segment.Total += child.Total;
 			return segment;
 		}
 
-		(int ParentLocalIndex, Composite Nested, uint NestedMappingScopeInstanceEntityId)[] branches = nestedBranches.ToArray();
+		(int ParentLocalIndex, Composite Nested, uint NestedMappingScopeInstanceEntityId, FunctionEntity Instance)[] branches = nestedBranches.ToArray();
 		Segment[] nestedSegments = new Segment[branches.Length];
 		// Each branch collects into its own model-reference list; List<T>.Add is not thread-safe,
 		// so a shared list would corrupt/crash under Parallel.For on multi-core machines.
@@ -181,7 +208,8 @@ public static class LevelViewerPopulateTree
 				deferAliasProxy,
 				includeVariables,
 				branchModelReferences,
-				branches[i].NestedMappingScopeInstanceEntityId);
+				branches[i].NestedMappingScopeInstanceEntityId,
+				branches[i].Instance);
 			nestedModelReferences[i] = branchModelReferences;
 		});
 
@@ -200,9 +228,10 @@ public static class LevelViewerPopulateTree
 		Composite composite,
 		Dictionary<ShortGuid, Composite> compositesById,
 		List<Command> commands,
-		List<(int ParentLocalIndex, Composite Nested, uint NestedMappingScopeInstanceEntityId)> nestedBranches,
+		List<(int ParentLocalIndex, Composite Nested, uint NestedMappingScopeInstanceEntityId, FunctionEntity Instance)> nestedBranches,
 		List<FunctionEntity> modelReferences,
-		uint mappingScopeInstanceEntityId)
+		uint mappingScopeInstanceEntityId,
+		FunctionEntity instanceEntity)
 	{
 		if (entities == null)
 			return;
@@ -230,8 +259,9 @@ public static class LevelViewerPopulateTree
 				continue;
 			}
 
-			if (compositesById.TryGetValue(function.function, out Composite nested) && nested != null)
-				nestedBranches.Add((localIndex, nested, function.shortGUID.AsUInt32));
+			if (compositesById.TryGetValue(function.function, out Composite nested) && nested != null
+				&& !IsDeleted(function, composite, instanceEntity))
+				nestedBranches.Add((localIndex, nested, function.shortGUID.AsUInt32, function));
 		}
 	}
 }

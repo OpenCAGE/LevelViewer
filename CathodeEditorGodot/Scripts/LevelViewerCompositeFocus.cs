@@ -924,6 +924,13 @@ public static class LevelViewerCompositeFocus
 			return true;
 		}
 
+		//A puddle's mesh is a square its mask cuts the puddle out of: greyed solid, the whole square showed
+		if (path.Contains("water_surface"))
+		{
+			opacity = 0.35f;
+			return true;
+		}
+
 		if (path.Contains("transparent") || path.Contains("wireframe_transparent"))
 		{
 			opacity = TryGetShaderColorAlpha(shaderMaterial, DiffuseTintParam, 1f);
@@ -941,6 +948,9 @@ public static class LevelViewerCompositeFocus
 			return fallback;
 
 		Variant value = material.GetShaderParameter(parameterName);
+		//The model materials' tints are Vector4s (AlienSceneMaterials.Raw), the previews' colours Colors
+		if (value.VariantType == Variant.Type.Vector4)
+			return value.AsVector4().W;
 		if (value.VariantType != Variant.Type.Color)
 			return fallback;
 

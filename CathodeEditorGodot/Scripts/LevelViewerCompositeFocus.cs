@@ -16,7 +16,8 @@ public static class LevelViewerCompositeFocus
 	private static readonly StringName OpacityParam = new StringName("opacity");
 	private static readonly StringName AlbedoColorParam = new StringName("albedo_color");
 	private static readonly StringName DiffuseTintParam = new StringName("diffuse_tint");
-	private static readonly Color DimBaseGrey = new(0.09f, 0.09f, 0.10f, 1f);
+	//sRGB, shaded on its own (model_reference_dimmed): 0.09 went to near-black once the level's exposure and Filmic came in
+	private static readonly Color DimBaseGrey = new(0.21f, 0.21f, 0.22f, 1f);
 	private const int TransparentRenderPriority = 1;
 	private static Shader _dimmedShader;
 	private static Shader _dimmedShaderDoubleSided;

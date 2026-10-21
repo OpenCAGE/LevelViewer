@@ -71,6 +71,13 @@ vec3 model_reference_level_albedo(vec3 albedo) {
 	return model_reference_cap_peak(albedo);
 }
 
+// The level outside the composite being edited, dimmed (LevelViewerCompositeFocus): its grey shaded by the preview light alone,
+// not levelled as the level's own surfaces are - their exposure, shade floor and Filmic took the old dark grey to near-black,
+// where it had read as dark grey shapes. Lit faces show about 45/255, faces turned away about 25.
+vec3 model_reference_dimmed(vec3 grey, float ndl) {
+	return grey * (0.4 + 0.6 * ndl);
+}
+
 vec3 model_reference_apply_preview_shading(vec3 albedo, float ndl) {
 	albedo = model_reference_level_albedo(albedo);
 	float shade = viewer_shade_floor + (1.0 - viewer_shade_floor) * ndl;

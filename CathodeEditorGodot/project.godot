@@ -32,8 +32,8 @@ project/assembly_name="CathodeEditorGodot"
 
 [rendering]
 
-driver/depth_prepass/enable=false
 textures/vram_compression/import_etc2_astc=true
+driver/depth_prepass/enable=false
 
 [shader_globals]
 

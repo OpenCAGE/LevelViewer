@@ -6,10 +6,13 @@ using System.Collections.Generic;
 public static class EntityNodeUtil
 {
     public const string PointedMetaKey = "pointed";
+    //The key as the engine wants it, made once. A const string here is a temporary StringName per call
+    //whose native handle the binding gives the engine with nothing keeping it alive - see LevelViewerPick.
+    private static readonly StringName PointedMetaKeyName = new StringName(PointedMetaKey);
 
     public static bool IsPointed(Node3D node)
     {
-        return node != null && node.HasMeta(PointedMetaKey) && (bool)node.GetMeta(PointedMetaKey);
+        return node != null && node.HasMeta(PointedMetaKeyName) && (bool)node.GetMeta(PointedMetaKeyName);
     }
 
     public static void SetPointed(Node3D node, bool pointed)
@@ -18,9 +21,9 @@ public static class EntityNodeUtil
             return;
 
         if (pointed)
-            node.SetMeta(PointedMetaKey, true);
-        else if (node.HasMeta(PointedMetaKey))
-            node.RemoveMeta(PointedMetaKey);
+            node.SetMeta(PointedMetaKeyName, true);
+        else if (node.HasMeta(PointedMetaKeyName))
+            node.RemoveMeta(PointedMetaKeyName);
     }
 
     public static EntityOverride GetEntityOverride(Node node)

@@ -28,6 +28,11 @@ public static class LevelViewerEmbeddedFocus
 
 		ProjectSettings.SetSetting("application/run/low_processor_mode", false);
 		LevelViewerRenderIdleThrottle.ConfigureEmbeddedMode(true);
+		//Nothing ever switched this on, so every ViewerLog line - populate plans, restores, the unhandled
+		//exception handlers, "[Viewer] Closing: ..." - was dropped. Hosted by OpenCAGE they are the only
+		//account of what the viewer was doing when it died (see LevelViewerPanel's output tail).
+		ViewerLog.Enabled = true;
+		LevelViewerSentMessages.Initialise();
 	}
 
 	/// <summary>
@@ -44,6 +49,26 @@ public static class LevelViewerEmbeddedFocus
 
 		if (GetCapture() == hwnd)
 			ReleaseCapture();
+
+		IntPtr host = GetParent(hwnd);
+		if (host == IntPtr.Zero || GetFocus() != hwnd)
+			return;
+
+		SetFocus(host);
+	}
+
+	/// <summary>
+	/// Keyboard focus only, back to the host - and not while this window holds the mouse: a drag in progress (a Shift-drag
+	/// clone's copies arrive while it is still held) keeps both.
+	/// </summary>
+	public static void ReleaseFocusToHostUnlessDragging()
+	{
+		if (!IsEmbedded)
+			return;
+
+		IntPtr hwnd = GetMainWindowHandle();
+		if (hwnd == IntPtr.Zero || GetCapture() == hwnd)
+			return;
 
 		IntPtr host = GetParent(hwnd);
 		if (host == IntPtr.Zero || GetFocus() != hwnd)

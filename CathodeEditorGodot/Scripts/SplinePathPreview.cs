@@ -38,6 +38,78 @@ public partial class SplinePathPreview : FunctionEntityPreview
         public Node3D Arrow;
     }
 
+    /* The spline editor's Edit in Viewport: the points it is working on are drawn in place of the entity's own, in every
+       placement of it, as they would be once saved. Nothing is written to the entity, so clearing this puts the saved
+       spline back. Godot space, local to the entity like the stored points. */
+    private static FunctionEntity _editEntity;
+    private static readonly List<Vector3> _editPoints = new List<Vector3>();
+    private static bool _editLoop;
+    private static readonly HashSet<SplinePathPreview> _live = new HashSet<SplinePathPreview>();
+
+    public static void SetEditOverride(FunctionEntity entity, IReadOnlyList<Vector3> points, bool loop)
+    {
+        FunctionEntity previous = _editEntity;
+        _editEntity = entity;
+        _editPoints.Clear();
+        if (points != null)
+            _editPoints.AddRange(points);
+        _editLoop = loop;
+        if (previous != null && previous != entity)
+            RefreshPreviewsOf(previous);
+        RefreshPreviewsOf(entity);
+    }
+
+    public static void ClearEditOverride()
+    {
+        FunctionEntity previous = _editEntity;
+        _editEntity = null;
+        _editPoints.Clear();
+        RefreshPreviewsOf(previous);
+    }
+
+    /// <summary>
+    /// What follows a refresh here in every placement (AlienScene sets it): the rebuilt segment lines registered for picking and
+    /// the grey-out put back over them and the recoloured markers - as a spline parameter edit does. Without it, Edit in
+    /// Viewport left the spline bright in every greyed-out placement until something else re-greyed that owner.
+    /// </summary>
+    internal static System.Action<SplinePathPreview> AfterEditRefresh;
+    //Once the placements are done: the selection's highlight put back on the rebuilt lines of the spline being edited
+    internal static System.Action AfterEditRefreshAll;
+
+    //The spline being edited shows whatever the filters say, or there would be nothing to edit - and what is drawn is picked
+    //and greyed out like the rest (the pickable sync asks this too)
+    protected override bool IsDrawnNow() => Entity == _editEntity || base.IsDrawnNow();
+
+    private static void RefreshPreviewsOf(FunctionEntity entity)
+    {
+        if (entity == null)
+            return;
+        bool any = false;
+        foreach (SplinePathPreview preview in _live)
+        {
+            if (preview.Entity == entity && GodotObject.IsInstanceValid(preview))
+            {
+                preview.Refresh();
+                AfterEditRefresh?.Invoke(preview);
+                any = true;
+            }
+        }
+        if (any)
+            AfterEditRefreshAll?.Invoke();
+    }
+
+    public override void _EnterTree()
+    {
+        base._EnterTree();
+        _live.Add(this);
+    }
+
+    public override void _ExitTree()
+    {
+        _live.Remove(this);
+        base._ExitTree();
+    }
+
     protected override Node3D GetVisibilityRoot() => _root;
 
     public override void CleanupPreviewVisuals()
@@ -61,7 +133,7 @@ public partial class SplinePathPreview : FunctionEntityPreview
         if (Entity == null)
             return;
 
-        bool visible = PreviewVisualUtility.IsPreviewVisible(Entity, OwnerCompositeId);
+        bool visible = IsDrawnNow();
         if (!visible)
         {
             if (_root != null)
@@ -106,6 +178,12 @@ public partial class SplinePathPreview : FunctionEntityPreview
     private void ReadSplinePoints(List<Vector3> destination)
     {
         destination.Clear();
+        if (Entity == _editEntity)
+        {
+            destination.AddRange(_editPoints);
+            return;
+        }
+
         Parameter pointsParam = Entity.GetParameter(PointsParameter);
         if (pointsParam?.content == null || pointsParam.content.dataType != DataType.SPLINE)
             return;
@@ -126,6 +204,9 @@ public partial class SplinePathPreview : FunctionEntityPreview
 
     private bool IsLoopClosed()
     {
+        if (Entity == _editEntity)
+            return _editLoop;
+
         Parameter loopParam = Entity.GetParameter(LoopParameter);
         return loopParam?.content is cBool loopValue && loopValue.value;
     }

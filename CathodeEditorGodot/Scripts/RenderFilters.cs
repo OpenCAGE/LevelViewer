@@ -7,6 +7,61 @@ public static class RenderFilters
 {
     private static readonly object _lock = new object();
     private static Dictionary<uint, bool> _enabledByFunctionType = new Dictionary<uint, bool>();
+    private static Dictionary<string, bool> _enabledSceneFilters = new Dictionary<string, bool>();
+    private static bool _capturingPreviews;
+
+    /// <summary>
+    /// While set, every filter reads as a composite preview wants it, whatever the viewport has switched on: the models
+    /// shown and nothing else - no volumes, icons or markers, no collision or occlusion meshes - which is what the game
+    /// draws. Set for the length of a preview batch (AlienScene.CapturePreviewsAsync), which refreshes the filters after.
+    /// </summary>
+    public static bool CapturingPreviews
+    {
+        get { lock (_lock) return _capturingPreviews; }
+        set { lock (_lock) _capturingPreviews = value; }
+    }
+
+    /// <summary>Apply the scene geometry filters (occlusion / collision). True when any changed.</summary>
+    public static bool ApplySceneFiltersFromPacket(Dictionary<string, bool> filters)
+    {
+        if (filters == null)
+            return false;
+
+        lock (_lock)
+        {
+            bool changed = false;
+            foreach (KeyValuePair<string, bool> entry in filters)
+            {
+                if (_enabledSceneFilters.TryGetValue(entry.Key, out bool existing) && existing == entry.Value)
+                    continue;
+
+                changed = true;
+                break;
+            }
+
+            if (!changed)
+                return false;
+
+            _enabledSceneFilters = new Dictionary<string, bool>(filters);
+            return true;
+        }
+    }
+
+    /// <summary>
+    /// Whether this type is drawn. Before the first settings packet lands, a filter falls back to
+    /// its default, so the level's models are not hidden for the moment it takes to arrive.
+    /// </summary>
+    public static bool IsSceneFilterEnabled(SceneFilterKind kind)
+    {
+        lock (_lock)
+        {
+            if (_capturingPreviews)
+                return false;
+            if (_enabledSceneFilters.TryGetValue(kind.ToString(), out bool enabled))
+                return enabled;
+            return false;
+        }
+    }
 
     public static bool ApplyFromPacket(Dictionary<uint, bool> filters, out HashSet<uint> changedFunctionTypes)
     {
@@ -39,9 +94,11 @@ public static class RenderFilters
     {
         lock (_lock)
         {
+            if (_capturingPreviews)
+                return functionType == (uint)FunctionType.ModelReference;
             if (_enabledByFunctionType.TryGetValue(functionType, out bool enabled))
                 return enabled;
-            return false;
+            return RenderFilterDefinitions.IsEnabledByDefault(functionType);
         }
     }
 

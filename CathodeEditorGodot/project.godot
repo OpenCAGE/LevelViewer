@@ -16,14 +16,14 @@ compatibility/default_parent_skeleton_in_mesh_instance_3d=true
 
 config/name="OpenCAGE Level Viewer"
 run/main_scene="res://scenes/main.tscn"
-config/features=PackedStringArray("4.6", "C#")
+config/features=PackedStringArray("4.7", "C#")
+run/flush_stdout_on_print=true
 run/low_processor_mode=true
 boot_splash/show_image=false
 config/icon="res://icon.svg"
 
 [debug]
 
-file_logging/enable_file_logging=false
 file_logging/enable_file_logging.pc=false
 
 [dotnet]
@@ -32,4 +32,108 @@ project/assembly_name="CathodeEditorGodot"
 
 [rendering]
 
+driver/depth_prepass/enable=false
 textures/vram_compression/import_etc2_astc=true
+
+[shader_globals]
+
+viewer_peak_cap={
+"type": "float",
+"value": 0.9
+}
+viewer_highlight_compress={
+"type": "float",
+"value": 0.0
+}
+viewer_exposure={
+"type": "float",
+"value": 0.62
+}
+viewer_shade_floor={
+"type": "float",
+"value": 0.8
+}
+viewer_dirt={
+"type": "float",
+"value": 1.0
+}
+viewer_vertex_ao={
+"type": "float",
+"value": 1.0
+}
+viewer_sheen={
+"type": "float",
+"value": 0.6
+}
+viewer_tint_linear={
+"type": "float",
+"value": 1.0
+}
+viewer_saturation={
+"type": "float",
+"value": 1.0
+}
+viewer_env_reflection={
+"type": "float",
+"value": 1.5
+}
+viewer_env_room={
+"type": "float",
+"value": 1.0
+}
+viewer_plastic_reflect={
+"type": "float",
+"value": 0.1
+}
+viewer_fresnel_rise={
+"type": "float",
+"value": 0.0
+}
+viewer_toe_lift={
+"type": "float",
+"value": 0.0
+}
+viewer_emissive={
+"type": "float",
+"value": 1.0
+}
+viewer_glass_sheen={
+"type": "float",
+"value": 0.09
+}
+viewer_fog={
+"type": "float",
+"value": 0.0
+}
+viewer_water={
+"type": "float",
+"value": 1.0
+}
+viewer_reflection={
+"type": "sampler2D",
+"value": ""
+}
+viewer_reflection_plane={
+"type": "vec4",
+"value": Vector4(0, 1, 0, -100000)
+}
+viewer_reflection_active={
+"type": "float",
+"value": 0.0
+}
+viewer_planets={
+"type": "float",
+"value": 1.0
+}
+viewer_fog_setting={
+"type": "vec4",
+"value": Vector4(0, 0, 0, 0)
+}
+viewer_fog_near={
+"type": "vec3",
+"value": Vector3(0, 0, 0)
+}
+viewer_fog_far={
+"type": "vec3",
+"value": Vector3(0, 0, 0)
+}

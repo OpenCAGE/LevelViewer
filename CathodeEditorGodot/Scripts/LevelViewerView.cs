@@ -7,7 +7,9 @@ using System;
 /// </summary>
 public static class LevelViewerView
 {
-	public const string ContentGroup = "level_viewer_content";
+	//A StringName, not a string: only ever handed to AddToGroup, and a string there is a temporary the
+	//binding passes to the engine with nothing keeping it alive (see LevelViewerPick).
+	public static readonly StringName ContentGroup = new StringName("level_viewer_content");
 
 	public static bool TryComputeGlobalAabb(Node3D root, out Aabb bounds)
 	{
@@ -40,8 +42,10 @@ public static class LevelViewerView
 				hasBounds = true;
 			}
 
-			foreach (Node child in node.GetChildren())
-				pending.Push(child);
+			//By index: GetChildren() is a native array per node, and this walks whole levels when framing
+			int childCount = node.GetChildCount();
+			for (int i = 0; i < childCount; i++)
+				pending.Push(node.GetChild(i));
 		}
 	}
 
@@ -178,6 +182,36 @@ public static class LevelViewerView
 			return;
 
 		ApplyCameraToBounds(camera, bounds, distanceScale, minDistance, maxDistance);
+	}
+
+	/// <summary>
+	/// Back the camera off along <paramref name="viewDirection"/> until all of <paramref name="bounds"/> is in view (the
+	/// sphere around it, inside the narrower of the two fields of view), looking at its centre. No distance limit: this is
+	/// for framing a whole level. <paramref name="verticalFovDegrees"/> is the camera's vertical field of view.
+	/// </summary>
+	public static void FrameRuntimeCameraToFit(Camera3D camera, Aabb bounds, Vector3 viewDirection, float verticalFovDegrees)
+	{
+		if (camera == null || !GodotObject.IsInstanceValid(camera))
+			return;
+
+		Vector3 center = bounds.GetCenter();
+		float radius = Mathf.Max(bounds.Size.Length() * 0.5f, 0.5f);
+
+		float verticalHalfFov = Mathf.DegToRad(Mathf.Clamp(verticalFovDegrees, 1f, 179f)) * 0.5f;
+		Vector2 viewportSize = camera.GetViewport()?.GetVisibleRect().Size ?? Vector2.Zero;
+		float aspect = viewportSize.Y > 0f ? viewportSize.X / viewportSize.Y : 1f;
+		float horizontalHalfFov = Mathf.Atan(Mathf.Tan(verticalHalfFov) * aspect);
+		float distance = radius / Mathf.Sin(Mathf.Min(verticalHalfFov, horizontalHalfFov));
+
+		if (viewDirection.LengthSquared() < 0.0001f)
+			viewDirection = -new Vector3(0.85f, 0.55f, 0.85f);
+		camera.GlobalPosition = center - viewDirection.Normalized() * distance;
+		camera.LookAt(center, Vector3.Up);
+		camera.Near = 0.05f;
+		camera.Far = Mathf.Max(distance * 50f, 50000f);
+
+		if (camera is LevelViewerCamera viewerCamera)
+			viewerCamera.SyncAnglesFromTransform();
 	}
 
 	public static bool TryComputeLocalSubtreeAabb(Node3D root, out Aabb localBounds)

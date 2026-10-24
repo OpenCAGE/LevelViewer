@@ -7,6 +7,9 @@ using Godot;
 public partial class EnvironmentMapPreview : FunctionEntityPreview
 {
     private const float SphereRadius = 0.4f;
+    //A NodePath literal is a temporary whose native handle the binding gives the engine with nothing
+    //keeping it alive (see LevelViewerPick); made once.
+    private static readonly NodePath SpherePath = new NodePath("Sphere");
 
     private Node3D _root;
 
@@ -33,7 +36,7 @@ public partial class EnvironmentMapPreview : FunctionEntityPreview
         EnsureVisual();
         SyncVisibility(true, _root);
 
-        MeshInstance3D sphere = _root.GetNodeOrNull<MeshInstance3D>("Sphere");
+        MeshInstance3D sphere = _root.GetNodeOrNull<MeshInstance3D>(SpherePath);
         if (sphere != null)
             PreviewVisualUtility.ApplyFunctionPreviewColor(sphere, Entity);
     }
@@ -46,11 +49,11 @@ public partial class EnvironmentMapPreview : FunctionEntityPreview
         _root = new Node3D { Name = "EnvironmentMapPreview" };
         AddChild(_root);
 
-        SphereMesh sphereMesh = new SphereMesh
+        PrimitiveMesh sphereMesh = (PrimitiveMesh)PreviewVisualUtility.GetSharedMesh("envmap:sphere:" + SphereRadius, () => new SphereMesh
         {
             Radius = SphereRadius,
             Height = SphereRadius * 2f,
-        };
+        });
         PreviewVisualUtility.CreatePrimitivePreview("Sphere", _root, sphereMesh, Colors.White);
     }
 }

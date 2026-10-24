@@ -26,7 +26,9 @@ public static class LevelViewerProxyHighlight
 			return;
 		}
 
-		if (!PreviewVisibilitySettings.HighlightProxies || !PreviewVisibilitySettings.IsSteppedDownFromLevelRoot())
+		//Show Zones has the level's colour: the overlay stands down while it is on, as the alias one does
+		if (!PreviewVisibilitySettings.HighlightProxies || !PreviewVisibilitySettings.IsSteppedDownFromLevelRoot()
+			|| PreviewVisibilitySettings.ShowZones)
 		{
 			_state.MarkRebuildFailed();
 			return;
@@ -35,6 +37,8 @@ public static class LevelViewerProxyHighlight
 		HashSet<ulong> tintedMeshIds = new HashSet<ulong>();
 		scene.ForEachProxyInActiveComposite((ownerComposite, proxy) =>
 		{
+			//Run after every entity batch: on a big level, seconds with no sent message answered otherwise
+			LevelViewerSentMessages.PumpIfDue();
 			if (!scene.TryGetEntitySceneNodes(ownerComposite.shortGUID, proxy.shortGUID, out List<Node3D> proxyNodes))
 				return;
 

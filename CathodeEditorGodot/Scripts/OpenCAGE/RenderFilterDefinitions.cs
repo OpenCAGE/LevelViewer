@@ -17,6 +17,42 @@ namespace OpenCAGE
         SoundNetworkNode,
         SoundObject,
         CameraResource,
+        Sphere,
+        Pyramid,
+        UiIcon,
+        //Not a stand-in shape: the model itself, drawn from the entity's renderable resource
+        ModelReference,
+    }
+
+    /// <summary>
+    /// Scene geometry categories that aren't tied to a FunctionType. These are normally not drawn at
+    /// all, and are rendered in a flat filter colour when switched on.
+    /// </summary>
+    public enum SceneFilterKind
+    {
+        OcclusionMeshes,
+        CollisionMeshes,
+    }
+
+    public readonly struct SceneFilterDefinition
+    {
+        public readonly SceneFilterKind Kind;
+        public readonly string Label;
+        public readonly float R;
+        public readonly float G;
+        public readonly float B;
+
+        public SceneFilterDefinition(SceneFilterKind kind, string label, float r, float g, float b)
+        {
+            Kind = kind;
+            Label = label;
+            R = r;
+            G = g;
+            B = b;
+        }
+
+        /// <summary>Settings key, and the name this filter travels under in the packet.</summary>
+        public string Key => Kind.ToString();
     }
 
     /// <summary>
@@ -34,14 +70,18 @@ namespace OpenCAGE
             public readonly float R;
             public readonly float G;
             public readonly float B;
+            /// <summary>Whether this filter is on for someone who has never touched it.</summary>
+            public readonly bool DefaultEnabled;
 
-            public Definition(FunctionType functionType, RenderPreviewKind previewKind, float r, float g, float b)
+            public Definition(FunctionType functionType, RenderPreviewKind previewKind, float r, float g, float b,
+                bool defaultEnabled = false)
             {
                 FunctionType = functionType;
                 PreviewKind = previewKind;
                 R = r;
                 G = g;
                 B = b;
+                DefaultEnabled = defaultEnabled;
             }
 
             public uint FunctionTypeUInt => (uint)FunctionType;
@@ -65,6 +105,11 @@ namespace OpenCAGE
 
         public static readonly Definition[] All = new Definition[]
         {
+            /* The level's own geometry. Unlike everything below it isn't a stand-in shape - the model
+               named by the entity's resource is what gets drawn - so its filter starts on, and turning
+               it off hides the models rather than an icon standing for them. */
+            new Definition(FunctionType.ModelReference, RenderPreviewKind.ModelReference, 0.8f, 0.8f, 0.85f, defaultEnabled: true),
+
             // Box volumes
             new Definition(FunctionType.Box, RenderPreviewKind.Box, 0.85f, 0.85f, 0.85f),
             new Definition(FunctionType.CameraCollisionBox, RenderPreviewKind.Box, 0.6f, 0.75f, 0.9f),
@@ -87,6 +132,14 @@ namespace OpenCAGE
             new Definition(FunctionType.SurfaceEffectBox, RenderPreviewKind.Box, 0.5f, 0.9f, 0.4f),
             new Definition(FunctionType.UiSelectionBox, RenderPreviewKind.Box, 0.95f, 0.9f, 0.5f),
 
+            // Sphere volumes (all expose a "radius" float)
+            new Definition(FunctionType.FogSphere, RenderPreviewKind.Sphere, 0.6f, 0.6f, 0.6f),
+            new Definition(FunctionType.ImpactSphere, RenderPreviewKind.Sphere, 0.95f, 0.3f, 0.25f),
+            new Definition(FunctionType.Sphere, RenderPreviewKind.Sphere, 1f, 0.9f, 0.3f),
+            new Definition(FunctionType.SurfaceEffectSphere, RenderPreviewKind.Sphere, 0.95f, 0.95f, 0.95f),
+            new Definition(FunctionType.TriggerCameraVolume, RenderPreviewKind.Sphere, 0.3f, 0.6f, 1f),
+            new Definition(FunctionType.UiSelectionSphere, RenderPreviewKind.Sphere, 1f, 1f, 1f),
+
             // Other previews
             new Definition(FunctionType.Sound, RenderPreviewKind.Sound, 0.2f, 0.45f, 1f),
             new Definition(FunctionType.PositionMarker, RenderPreviewKind.PositionMarker, 1f, 0.55f, 0.1f),
@@ -101,6 +154,12 @@ namespace OpenCAGE
             new Definition(FunctionType.EnvironmentMap, RenderPreviewKind.EnvironmentMap, 0.45f, 0.8f, 0.9f),
             new Definition(FunctionType.SoundNetworkNode, RenderPreviewKind.SoundNetworkNode, 0.7f, 0.3f, 0.95f),
             new Definition(FunctionType.SoundObject, RenderPreviewKind.SoundObject, 0.25f, 0.75f, 0.45f),
+            new Definition(FunctionType.ChokePoint, RenderPreviewKind.PositionMarker, 0.9f, 0.2f, 0.2f),
+            new Definition(FunctionType.ProximityTrigger, RenderPreviewKind.PositionMarker, 0.65f, 0.3f, 0.95f),
+            new Definition(FunctionType.EFFECT_EntityGenerator, RenderPreviewKind.Pyramid, 0.3f, 0.55f, 1f),
+            new Definition(FunctionType.EFFECT_ImpactGenerator, RenderPreviewKind.Pyramid, 0.95f, 0.3f, 0.25f),
+            new Definition(FunctionType.Trigger_AudioOccluded, RenderPreviewKind.Pyramid, 1f, 0.5f, 0.8f),
+            new Definition(FunctionType.UI_Icon, RenderPreviewKind.UiIcon, 0.85f, 0.85f, 0.9f),
 
             // Pathfinding / nav / camera
             new Definition(FunctionType.PathfindingAlienBackstageNode, RenderPreviewKind.PositionMarker, 0.2f, 0.45f, 1f),
@@ -111,6 +170,27 @@ namespace OpenCAGE
             new Definition(FunctionType.PathfindingWaitNode, RenderPreviewKind.PositionMarker, 0.55f, 0.35f, 0.15f),
         };
 
+        public static readonly SceneFilterDefinition[] SceneFilters = new SceneFilterDefinition[]
+        {
+            new SceneFilterDefinition(SceneFilterKind.OcclusionMeshes, "Occlusion Meshes", 0.9f, 0.12f, 0.12f),
+            new SceneFilterDefinition(SceneFilterKind.CollisionMeshes, "Collision Meshes", 0.15f, 0.85f, 0.95f),
+        };
+
+        public static bool TryGetSceneFilter(SceneFilterKind kind, out SceneFilterDefinition definition)
+        {
+            for (int i = 0; i < SceneFilters.Length; i++)
+            {
+                if (SceneFilters[i].Kind != kind)
+                    continue;
+
+                definition = SceneFilters[i];
+                return true;
+            }
+
+            definition = default(SceneFilterDefinition);
+            return false;
+        }
+
         private static readonly HashSet<FunctionType> SupportedTypes = BuildSupportedTypes();
         private static readonly Dictionary<FunctionType, Definition> DefinitionsByType = BuildDefinitionsByType();
         private static readonly Dictionary<FunctionType, RenderFilterColor> ColorsByType = BuildColors();
@@ -118,6 +198,17 @@ namespace OpenCAGE
         public static bool IsSupported(FunctionType functionType)
         {
             return SupportedTypes.Contains(functionType);
+        }
+
+        /// <summary>Whether a filter nobody has set yet is on. Only the model references' is.</summary>
+        public static bool IsEnabledByDefault(FunctionType functionType)
+        {
+            return DefinitionsByType.TryGetValue(functionType, out Definition definition) && definition.DefaultEnabled;
+        }
+
+        public static bool IsEnabledByDefault(uint functionType)
+        {
+            return IsEnabledByDefault((FunctionType)functionType);
         }
 
         public static bool TryGetDefinition(FunctionType functionType, out Definition definition)
@@ -133,11 +224,12 @@ namespace OpenCAGE
         }
 
         /// <summary>
-        /// Box volumes use the semi-transparent preview shader; all other mesh gizmos are fully opaque.
+        /// Box/sphere volumes use the semi-transparent preview shader; all other mesh gizmos are fully opaque.
         /// </summary>
         public static bool UsesTransparentPreview(RenderPreviewKind previewKind)
         {
-            return previewKind == RenderPreviewKind.Box;
+            return previewKind == RenderPreviewKind.Box
+                || previewKind == RenderPreviewKind.Sphere;
         }
 
         public static bool UsesTransparentPreview(FunctionType functionType)

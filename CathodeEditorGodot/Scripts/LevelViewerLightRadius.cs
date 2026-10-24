@@ -15,7 +15,7 @@ public static class LevelViewerLightRadius
 {
 	private const float MinDistance = 0.05f;
 	private const float LineWidth = 0.01f;
-	private static readonly Vector3 LightForward = Vector3.Back;
+	private static readonly Vector3 LightForward = Vector3.Forward;
 	// Strip lights extend sideways (perpendicular to the light's forward direction).
 	private static readonly Vector3 StripAxis = Vector3.Right;
 	private static readonly Color WhiteColor = new Color(1f, 1f, 1f, 1f);
@@ -27,6 +27,12 @@ public static class LevelViewerLightRadius
 	// Alias overrides that apply to the attached light instance, ordered outermost-first
 	// (the first override that supplies a parameter wins, then the entity's own parameter).
 	private static IReadOnlyList<Entity> _overrideEntities;
+
+	/// <summary>Whether this is the range visual itself (the node everything it draws hangs off).</summary>
+	public static bool IsVisualRoot(Node node)
+	{
+		return _visualRoot != null && ReferenceEquals(node, _visualRoot);
+	}
 
 	public static bool ShouldShow(FunctionEntity entity, uint ownerCompositeId)
 	{

@@ -10,10 +10,12 @@ uniform vec4 vertex_colour_tint : source_color = vec4(1.0);
 uniform vec2 diffuse_uv_mult = vec2(1.0);
 
 void fragment() {
+	model_reference_clip_to_reflection(VERTEX, INV_VIEW_MATRIX, CAMERA_VISIBLE_LAYERS);
 	vec4 color = diffuse_tint;
 	if (use_diffuse_map) {
 		color *= texture(diffuse_map, UV * diffuse_uv_mult);
 	}
-	color = model_reference_apply_vertex_colour_tint(color, vertex_colour_tint);
+	vec4 vertex_tint = model_reference_vertex_tint(vertex_colour_tint, COLOR);
+	color = model_reference_apply_vertex_colour_tint(color, vertex_tint);
 	ALBEDO = vec3(1.0) - color.rgb;
 }

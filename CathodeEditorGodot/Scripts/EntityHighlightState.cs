@@ -13,10 +13,13 @@ internal sealed class EntityHighlightState
 	private readonly LevelViewerHighlightOverlay.HighlightOverlayMode _mode;
 	private readonly Dictionary<MeshInstance3D, Material> _savedOverlays = new();
 	private readonly List<MeshInstance3D> _highlightMeshes = new();
+	//Membership for the list above: List.Contains per mesh made a big level's rebuild quadratic (seconds, after every populate)
+	private readonly HashSet<MeshInstance3D> _highlightMeshSet = new();
 	private readonly List<MeshInstance3D> _meshCollectBuffer = new();
 
 	private uint _cachedActiveCompositeId;
 	private uint[] _cachedInstancePath = Array.Empty<uint>();
+	private bool _cachedShowZones;
 	private bool _cacheValid;
 
 	public EntityHighlightState(LevelViewerHighlightOverlay.HighlightOverlayMode mode)
@@ -32,6 +35,13 @@ internal sealed class EntityHighlightState
 		if (_cachedActiveCompositeId != activeCompositeId)
 			return true;
 
+		/* Show Zones is part of the key: the overlay is not drawn while it has the level (the
+		   per-mode Rebuild gates on it), so its going on or off is a rebuild either way. Without
+		   this a toggle with nothing else changed would read as up to date and keep whatever was
+		   drawn before it. */
+		if (_cachedShowZones != PreviewVisibilitySettings.ShowZones)
+			return true;
+
 		return !PreviewVisibilitySettings.InstancePathsEqual(
 			_cachedInstancePath,
 			PreviewVisibilitySettings.ActiveInstanceEntityPath);
@@ -44,6 +54,7 @@ internal sealed class EntityHighlightState
 	{
 		_cachedActiveCompositeId = activeCompositeId;
 		_cachedInstancePath = (uint[])(PreviewVisibilitySettings.ActiveInstanceEntityPath ?? Array.Empty<uint>()).Clone();
+		_cachedShowZones = PreviewVisibilitySettings.ShowZones;
 		_cacheValid = true;
 	}
 
@@ -54,6 +65,7 @@ internal sealed class EntityHighlightState
 	{
 		LevelViewerHighlightOverlay.RestoreOverlays(_savedOverlays);
 		_highlightMeshes.Clear();
+		_highlightMeshSet.Clear();
 		_cacheValid = false;
 	}
 
@@ -81,6 +93,7 @@ internal sealed class EntityHighlightState
 	{
 		for (int i = 0; i < _highlightMeshes.Count; i++)
 		{
+			LevelViewerSentMessages.PumpIfDue();
 			MeshInstance3D mesh = _highlightMeshes[i];
 			if (mesh == null || !GodotObject.IsInstanceValid(mesh))
 				continue;
@@ -114,7 +127,7 @@ internal sealed class EntityHighlightState
 				continue;
 
 			tintedMeshIds.Add(meshId);
-			if (!_highlightMeshes.Contains(mesh))
+			if (_highlightMeshSet.Add(mesh))
 				_highlightMeshes.Add(mesh);
 
 			if (_savedOverlays.ContainsKey(mesh) || IsMeshUnderSelection(mesh))
@@ -122,6 +135,8 @@ internal sealed class EntityHighlightState
 
 			ApplyMeshHighlight(mesh);
 		}
+		//Scratch only: kept filled, it held the last highlighted meshes after they were freed
+		_meshCollectBuffer.Clear();
 	}
 
 	private void ReleaseMeshForSelection(MeshInstance3D mesh)
@@ -135,19 +150,8 @@ internal sealed class EntityHighlightState
 		_savedOverlays.Remove(mesh);
 	}
 
-	private static bool IsMeshUnderSelection(MeshInstance3D mesh)
-	{
-		Node current = mesh;
-		while (current != null)
-		{
-			if (LevelViewerSelection.IsUnderSelection(current))
-				return true;
-
-			current = current.GetParent();
-		}
-
-		return false;
-	}
+	//IsUnderSelection walks the ancestors itself; walking them here too asked it depth-squared times per mesh
+	private static bool IsMeshUnderSelection(MeshInstance3D mesh) => LevelViewerSelection.IsUnderSelection(mesh);
 
 	private void ApplyMeshHighlight(MeshInstance3D meshInstance)
 	{

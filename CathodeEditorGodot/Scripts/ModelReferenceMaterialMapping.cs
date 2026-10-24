@@ -15,6 +15,9 @@ public static class ModelReferenceMaterialMapping
 {
 	public const string MappingParameterName = "mapping";
 	public const string InstanceMappingMetaKey = "instance_material_mapping";
+	//The key as the engine wants it, made once. A const string here is a temporary StringName per call
+	//whose native handle the binding gives the engine with nothing keeping it alive - see LevelViewerPick.
+	private static readonly StringName InstanceMappingMetaKeyName = new StringName(InstanceMappingMetaKey);
 	/// <summary>Original ModelReference material write index before instance mapping is applied.</summary>
 	public const string SourceMaterialWriteIndexMetaKey = "source_material_write_index";
 	/// <summary>MODELS write index for the spawned submesh.</summary>
@@ -63,6 +66,80 @@ public static class ModelReferenceMaterialMapping
 		AliasesByTargetEntityId.Clear();
 		_aliasMappingIndexBuilt = false;
 		EnsureAliasMappingIndex(commands);
+	}
+
+	/* The script copy changed under the index between populates: an entity added (an undo brings a deleted one back as a
+	   new object) or deleted. The index kept the deleted object until the next populate - holding it and its parameters,
+	   and handing it out for its id in place of the one the script now has. Ids are not unique - a composite variant
+	   shares its original's - so an add only fills an id nothing answers for (a removal hands the id on to another live
+	   entity that has it), and the entity the index already gives for an id stays the one it gives. */
+	public static void NoteEntityAdded(Composite composite, Entity entity)
+	{
+		if (entity == null || composite == null)
+			return;
+		ForgetAliasIndexIfItMaps(entity);
+
+		uint entityId = entity.shortGUID.AsUInt32;
+		if (EntityById.TryAdd(entityId, entity))
+			OwningCompositeByEntityId[entityId] = composite;
+	}
+
+	/// <summary>Before <paramref name="entity"/> leaves <paramref name="from"/>.</summary>
+	public static void NoteEntityRemoved(Commands commands, Composite from, Entity entity)
+	{
+		if (entity == null)
+			return;
+		ForgetAliasIndexIfItMaps(entity);
+
+		uint entityId = entity.shortGUID.AsUInt32;
+		//FindOwningComposite caches an owner per id on its own
+		if (OwningCompositeByEntityId.TryGetValue(entityId, out Composite owner) && owner == from)
+			OwningCompositeByEntityId.Remove(entityId);
+		if (!EntityById.TryGetValue(entityId, out Entity indexed) || indexed != entity)
+			return;
+
+		EntityById.Remove(entityId);
+		OwningCompositeByEntityId.Remove(entityId);
+		//Another composite with the id (a variant, or the original of one) answers for it now - the last, as the index is built
+		if (commands?.Entries == null)
+			return;
+		for (int i = commands.Entries.Count - 1; i >= 0; i--)
+		{
+			Composite other = commands.Entries[i];
+			if (other == null || other == from)
+				continue;
+			Entity survivor = other.GetEntityByID(entity.shortGUID);
+			if (survivor == null)
+				continue;
+			EntityById[entityId] = survivor;
+			OwningCompositeByEntityId[entityId] = other;
+			return;
+		}
+	}
+
+	/// <summary>Before <paramref name="composite"/> leaves the script (a variant or a refactor undone): its entities, as removed.</summary>
+	public static void NoteCompositeRemoved(Commands commands, Composite composite)
+	{
+		if (composite == null)
+			return;
+
+		foreach (Entity entity in composite.GetEntities())
+			NoteEntityRemoved(commands, composite, entity);
+	}
+
+	/* The alias index holds each alias object with the composite it sits in, and a resolve takes only a source whose composite
+	   is one of the chain it resolves for. An alias with a mapping that came or went - an undo brings one back as a new object,
+	   often in a composite that is new itself - left it answering with the old alias, or with nothing, until the next populate:
+	   a placement spawned afterwards was re-skinned by a deleted alias, or not by a restored one. It is built again from the
+	   script when it is next used, as a populate builds it. */
+	private static void ForgetAliasIndexIfItMaps(Entity entity)
+	{
+		if (entity is not AliasEntity || TryGetMappingParameter(entity) == null)
+			return;
+
+		AliasesByTargetEntityId.Clear();
+		ResolvedMappingCache.Clear();
+		_aliasMappingIndexBuilt = false;
 	}
 
 	public static Entity TryGetEntityById(uint entityId)
@@ -177,11 +254,11 @@ public static class ModelReferenceMaterialMapping
 		Node current = modelRefNode;
 		while (current != null && current != stopAtRoot)
 		{
+			uint ownerCompositeId;
 			if (current is Node3D node3D
-				&& node3D.HasMeta(AlienScene.OwnerCompositeMetaKey))
+				&& AlienScene.TryGetOwnerCompositeId(node3D, out ownerCompositeId))
 			{
-				Composite composite = commands.GetComposite(
-					new ShortGuid(node3D.GetMeta(AlienScene.OwnerCompositeMetaKey).AsUInt32()));
+				Composite composite = commands.GetComposite(new ShortGuid(ownerCompositeId));
 				if (composite != null && (composites.Count == 0 || composites[composites.Count - 1] != composite))
 					composites.Add(composite);
 			}
@@ -232,12 +309,12 @@ public static class ModelReferenceMaterialMapping
 	{
 		if (level?.MaterialMappings?.Entries == null
 			|| scopeInstanceNode == null
-			|| !scopeInstanceNode.HasMeta(InstanceMappingMetaKey))
+			|| !scopeInstanceNode.HasMeta(InstanceMappingMetaKeyName))
 		{
 			return null;
 		}
 
-		uint mappingId = scopeInstanceNode.GetMeta(InstanceMappingMetaKey).AsUInt32();
+		uint mappingId = scopeInstanceNode.GetMeta(InstanceMappingMetaKeyName).AsUInt32();
 		if (mappingId == 0)
 			return null;
 
@@ -599,6 +676,20 @@ public static class ModelReferenceMaterialMapping
 				return entry;
 		}
 
+		string strippedMaterialName = NormalizeMaterialNameForLookup(StripAuthoringSlot(materialName));
+		if (strippedMaterialName != normalizedMaterialName)
+		{
+			for (int i = 0; i < mapping.Mappings.Count; i++)
+			{
+				MaterialMappings.MaterialMapping.Mapping entry = mapping.Mappings[i];
+				if (entry == null || string.IsNullOrEmpty(entry.from))
+					continue;
+
+				if (NormalizeMaterialNameForLookup(entry.from) == strippedMaterialName)
+					return entry;
+			}
+		}
+
 		return null;
 	}
 
@@ -624,6 +715,20 @@ public static class ModelReferenceMaterialMapping
 				return entry;
 		}
 
+		string strippedTargetName = NormalizeMaterialNameForLookup(StripAuthoringSlot(targetMaterialName));
+		if (strippedTargetName != normalizedTargetName)
+		{
+			for (int i = 0; i < mapping.Mappings.Count; i++)
+			{
+				MaterialMappings.MaterialMapping.Mapping entry = mapping.Mappings[i];
+				if (entry == null || string.IsNullOrEmpty(entry.to))
+					continue;
+
+				if (NormalizeMaterialNameForLookup(entry.to) == strippedTargetName)
+					return entry;
+			}
+		}
+
 		return null;
 	}
 
@@ -633,10 +738,52 @@ public static class ModelReferenceMaterialMapping
 			return string.Empty;
 
 		string normalized = StripTrailingVariantSuffix(materialName).ToUpperInvariant();
-		if (!normalized.Contains("->"))
+		//Not trimmed. HAB_Airport ships a 'material' reading
+		//"screenBlueTextScroll -> screen_anim_non_14" and retail's own mover keeps InactiveScreen,
+		//so retail does not tidy the spaces either - the name simply matches nothing. Trimming it
+		//resolves a material retail leaves alone, which is the one structural screen difference
+		//HAB_Airport had left after the slot rule went in.
+		if (normalized.IndexOf("->", StringComparison.Ordinal) < 0)
 			normalized += "->" + normalized;
 
 		return normalized;
+	}
+
+	/// <summary>
+	/// Drops a leading 3ds Max authoring slot, so "MULTIMATERIAL-&gt;X-&gt;Y" becomes "X-&gt;Y".
+	/// Mapping entries are always keyed on the two-part form, so a material still carrying its
+	/// authoring slot can never match one. Measured on HAB_Airport: 658 of 681 MUN_Plastic_Gloss
+	/// movers resolved their mapping and then missed this lookup, keeping Tan where the mapping
+	/// says White. Fixing it took the six-level defect count from 1,164 to 293. Two-part names
+	/// come back unchanged.
+	/// </summary>
+	private static string StripAuthoringSlot(string materialName)
+	{
+		if (string.IsNullOrEmpty(materialName))
+			return materialName;
+
+		int last = materialName.LastIndexOf("->", StringComparison.Ordinal);
+		if (last <= 0)
+			return materialName;
+
+		int previous = materialName.LastIndexOf("->", last - 1, StringComparison.Ordinal);
+		if (previous < 0)
+			return materialName;
+
+		return materialName.Substring(previous + 2);
+	}
+
+	/// <summary>The slot half of a "&lt;slot&gt;-&gt;&lt;assignment&gt;" material name, or null if it has no slot.</summary>
+	public static string SlotOf(string materialName)
+	{
+		if (string.IsNullOrEmpty(materialName))
+			return null;
+
+		int arrow = materialName.IndexOf("->", StringComparison.Ordinal);
+		if (arrow < 0)
+			return null;
+
+		return materialName.Substring(0, arrow).Trim();
 	}
 
 	/// <summary>
@@ -683,7 +830,7 @@ public static class ModelReferenceMaterialMapping
 			return;
 		}
 
-		pointedNode.SetMeta(InstanceMappingMetaKey, mapping.shortGUID.AsUInt32);
+		pointedNode.SetMeta(InstanceMappingMetaKeyName, mapping.shortGUID.AsUInt32);
 	}
 
 	public static void ClearAliasInstanceMappingMeta(Node3D pointedNode)
@@ -691,8 +838,8 @@ public static class ModelReferenceMaterialMapping
 		if (pointedNode == null || !GodotObject.IsInstanceValid(pointedNode))
 			return;
 
-		if (pointedNode.HasMeta(InstanceMappingMetaKey))
-			pointedNode.RemoveMeta(InstanceMappingMetaKey);
+		if (pointedNode.HasMeta(InstanceMappingMetaKeyName))
+			pointedNode.RemoveMeta(InstanceMappingMetaKeyName);
 	}
 
 	private static Composite FindOwningComposite(Entity entity, Commands commands)

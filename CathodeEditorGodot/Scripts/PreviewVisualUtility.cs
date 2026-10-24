@@ -11,6 +11,74 @@ public static class PreviewVisualUtility
     private static ShaderMaterial _sharedOverlayLineMaterial;
     private static ArrayMesh _billboardQuadMesh;
 
+    /* One material per colour, shared by every preview mesh that uses it.
+     *
+     * These used to be Duplicate(true)'d per mesh on every Refresh - a new ShaderMaterial AND a new
+     * Shader each time, released only when the .NET wrapper was eventually garbage collected. A
+     * render-filter toggle on a big level therefore minted thousands of shaders and materials, the
+     * RenderingServer's RID pool (262,144 per resource type) ran out after enough refreshes
+     * ("ERROR: Element limit reached" in _allocate_rid), and the next use of the invalid RID took the
+     * process down with an access violation - the viewer just vanishing, with nothing logged, after
+     * a filter toggle, a selection or a long session (issue #628). The preview palette is a handful
+     * of colours, so these caches stay tiny and the shader is compiled once. */
+    private static readonly Dictionary<Color, ShaderMaterial> _opaqueByColour = new Dictionary<Color, ShaderMaterial>();
+    private static readonly Dictionary<Color, ShaderMaterial> _transparentByColour = new Dictionary<Color, ShaderMaterial>();
+    private static readonly Dictionary<Color, ShaderMaterial> _overlayLineByColour = new Dictionary<Color, ShaderMaterial>();
+    private static readonly Dictionary<(Texture2D icon, Color tint), ShaderMaterial> _iconBillboardByIcon = new Dictionary<(Texture2D icon, Color tint), ShaderMaterial>();
+
+    //Shader parameter names as StringNames, made once. A literal is a temporary whose native handle the
+    //binding gives the engine with nothing keeping it alive across the icall (see LevelViewerPick).
+    private static readonly StringName AlbedoColorParam = new StringName("albedo_color");
+    private static readonly StringName AlbedoTextureParam = new StringName("albedo_texture");
+    //"." resolves to the node itself; the path is made once for the same reason.
+    private static readonly NodePath SelfPath = new NodePath(".");
+
+    /* One mesh per shape, shared by every preview that draws it. Each position marker used to build its
+     * own torus ArrayMesh and three CylinderMeshes, every box, sphere, pyramid and character its own
+     * primitive: thousands of identical vertex buffers on a big level, each a RenderingServer mesh with
+     * its own GPU buffers. Shapes whose size varies per instance (axis stubs, line segments, the box and
+     * sphere volumes) draw a unit mesh scaled on the node, which the pick code already handles through
+     * the node's global transform. */
+    private static readonly Dictionary<string, Mesh> _sharedMeshes = new Dictionary<string, Mesh>();
+    private static CylinderMesh _unitCylinderMesh;
+
+    public static Mesh GetSharedMesh(string key, System.Func<Mesh> create)
+    {
+        if (_sharedMeshes.TryGetValue(key, out Mesh mesh) && GodotObject.IsInstanceValid(mesh))
+            return mesh;
+
+        mesh = create();
+        _sharedMeshes[key] = mesh;
+        return mesh;
+    }
+
+    /// <summary>Radius 1, height 1, Y-aligned: scale the node by (width, length, width).</summary>
+    private static CylinderMesh UnitCylinderMesh
+    {
+        get
+        {
+            if (_unitCylinderMesh == null || !GodotObject.IsInstanceValid(_unitCylinderMesh))
+                _unitCylinderMesh = new CylinderMesh { TopRadius = 1f, BottomRadius = 1f, Height = 1f };
+            return _unitCylinderMesh;
+        }
+    }
+
+    private static ShaderMaterial GetColourMaterial(Dictionary<Color, ShaderMaterial> cache, Color color, ShaderMaterial shared)
+    {
+        if (cache.TryGetValue(color, out ShaderMaterial material) && GodotObject.IsInstanceValid(material))
+            return material;
+
+        //Share the shader; only the colour differs
+        material = new ShaderMaterial
+        {
+            Shader = shared.Shader,
+            RenderPriority = shared.RenderPriority,
+        };
+        material.SetShaderParameter(AlbedoColorParam, color);
+        cache[color] = material;
+        return material;
+    }
+
     /// <summary>World-space width/height of icon billboard quads (see preview_icon_billboard.gdshader).</summary>
     public const float IconBillboardWorldSize = 0.25f;
 
@@ -134,6 +202,21 @@ public static class PreviewVisualUtility
         material.RenderPriority = OpaqueRenderPriority;
     }
 
+    /// <summary>
+    /// Whether this is one of the see-through materials box and sphere volumes are drawn in, and how see-through it is.
+    /// </summary>
+    public static bool TryGetTransparentPreviewAlpha(Material material, out float alpha)
+    {
+        alpha = 1f;
+        if (material is not ShaderMaterial shaderMaterial || shaderMaterial.Shader == null
+            || !ReferenceEquals(shaderMaterial.Shader, SharedTransparentMaterial.Shader))
+            return false;
+
+        Variant colour = shaderMaterial.GetShaderParameter(AlbedoColorParam);
+        alpha = colour.VariantType == Variant.Type.Color ? colour.AsColor().A : 0.24f;
+        return true;
+    }
+
     public static bool IsIconBillboardMaterial(Material material)
     {
         if (material is not ShaderMaterial shaderMaterial || shaderMaterial.Shader == null)
@@ -210,8 +293,10 @@ public static class PreviewVisualUtility
 
         FunctionType functionType = entity.function.AsFunctionType;
 
+        /* Model references answer to their own filter, but not to hide-nested: they are the level's
+           geometry rather than script entities standing about in it. */
         if (functionType == FunctionType.ModelReference)
-            return true;
+            return RenderFilters.IsEnabled(functionType);
 
         if (RenderFilterDefinitions.IsSupported(functionType) && !RenderFilters.IsEnabled(functionType))
             return false;
@@ -279,8 +364,10 @@ public static class PreviewVisualUtility
             if (current is MeshInstance3D meshInstance)
                 meshes.Add(meshInstance);
 
-            foreach (Node child in current.GetChildren())
-                pending.Push(child);
+            //By index: GetChildren() is a native array per node visited
+            int childCount = current.GetChildCount();
+            for (int i = 0; i < childCount; i++)
+                pending.Push(current.GetChild(i));
         }
     }
 
@@ -303,11 +390,13 @@ public static class PreviewVisualUtility
             if (current is MeshInstance3D meshInstance)
                 meshes.Add(meshInstance);
 
-            foreach (Node child in current.GetChildren())
+            int childCount = current.GetChildCount();
+            for (int i = 0; i < childCount; i++)
             {
+                Node child = current.GetChild(i);
                 if (child is Node3D child3D
                     && child3D != root
-                    && child3D.HasMeta(AlienScene.OwnerCompositeMetaKey))
+                    && AlienScene.HasOwnerComposite(child3D))
                 {
                     continue;
                 }
@@ -321,7 +410,7 @@ public static class PreviewVisualUtility
     {
         MeshInstance3D meshInstance = node as MeshInstance3D;
         if (meshInstance == null)
-            meshInstance = node.GetNodeOrNull<MeshInstance3D>(".");
+            meshInstance = node.GetNodeOrNull<MeshInstance3D>(SelfPath);
 
         if (meshInstance != null)
         {
@@ -356,9 +445,7 @@ public static class PreviewVisualUtility
         if (meshInstance == null)
             return;
 
-        ShaderMaterial material = (ShaderMaterial)SharedTransparentMaterial.Duplicate(true);
-        material.SetShaderParameter("albedo_color", color);
-        meshInstance.MaterialOverride = material;
+        meshInstance.MaterialOverride = GetColourMaterial(_transparentByColour, color, SharedTransparentMaterial);
     }
 
     public static void ApplyOpaqueColor(MeshInstance3D meshInstance, Color color)
@@ -366,10 +453,8 @@ public static class PreviewVisualUtility
         if (meshInstance == null)
             return;
 
-        ShaderMaterial material = (ShaderMaterial)SharedOpaqueMaterial.Duplicate(true);
         color.A = 1f;
-        material.SetShaderParameter("albedo_color", color);
-        meshInstance.MaterialOverride = material;
+        meshInstance.MaterialOverride = GetColourMaterial(_opaqueByColour, color, SharedOpaqueMaterial);
     }
 
     public static Node3D CreateMeshPreview(string name, Node3D parent, Mesh mesh, Color color, bool opaque = true)
@@ -425,13 +510,8 @@ public static class PreviewVisualUtility
     private static void CreateAxisStub(string name, Node3D parent, Vector3 direction, float length, float width, Color color)
     {
         Vector3 axis = direction.Normalized();
-        CylinderMesh cylinder = new CylinderMesh
-        {
-            TopRadius = width,
-            BottomRadius = width,
-            Height = length,
-        };
-        Node3D axisObject = CreatePrimitivePreview(name, parent, cylinder, color);
+        Node3D axisObject = CreatePrimitivePreview(name, parent, UnitCylinderMesh, color);
+        axisObject.Scale = new Vector3(width, length, width);
         axisObject.Rotation = GetAxisStubEuler(axis);
         axisObject.Position = axis * (length * 0.5f);
     }
@@ -460,23 +540,13 @@ public static class PreviewVisualUtility
         if (length < 0.001f)
             return null;
 
-        CylinderMesh cylinder = new CylinderMesh
-        {
-            TopRadius = width,
-            BottomRadius = width,
-            Height = length,
-        };
-
-        Node3D line = CreatePrimitivePreview(name, parent, cylinder, color);
+        Node3D line = CreatePrimitivePreview(name, parent, UnitCylinderMesh, color);
+        line.Scale = new Vector3(width, length, width);
         line.Position = localStart + delta * 0.5f;
         line.Rotation = GetLookEuler(delta, new Vector3(Mathf.Pi / 2f, 0f, 0f));
         MeshInstance3D meshInstance = line as MeshInstance3D;
         if (meshInstance != null)
-        {
-            ShaderMaterial material = (ShaderMaterial)SharedOverlayLineMaterial.Duplicate(true);
-            material.SetShaderParameter("albedo_color", color);
-            meshInstance.MaterialOverride = material;
-        }
+            meshInstance.MaterialOverride = GetColourMaterial(_overlayLineByColour, color, SharedOverlayLineMaterial);
         return line;
     }
 
@@ -511,6 +581,12 @@ public static class PreviewVisualUtility
     }
 
     public static ArrayMesh CreateTorusMesh(float outerRadius, float tubeRadius, int segments = 24, int tubeSegments = 12)
+    {
+        string key = "torus:" + outerRadius.ToString("R") + ":" + tubeRadius.ToString("R") + ":" + segments + ":" + tubeSegments;
+        return (ArrayMesh)GetSharedMesh(key, () => BuildTorusMesh(outerRadius, tubeRadius, segments, tubeSegments));
+    }
+
+    private static ArrayMesh BuildTorusMesh(float outerRadius, float tubeRadius, int segments, int tubeSegments)
     {
         ArrayMesh mesh = new ArrayMesh();
         int vertexCount = segments * tubeSegments;
@@ -555,12 +631,12 @@ public static class PreviewVisualUtility
             }
         }
 
-        var arrays = new Godot.Collections.Array();
+        using var arrays = new Godot.Collections.Array(); //alive across the native call - see CollisionMeshOverlay.BuildMesh
         arrays.Resize((int)Mesh.ArrayType.Max);
         arrays[(int)Mesh.ArrayType.Vertex] = vertices;
         arrays[(int)Mesh.ArrayType.TexUV] = uvs;
         arrays[(int)Mesh.ArrayType.Index] = triangles;
-        mesh.AddSurfaceFromArrays(Mesh.PrimitiveType.Triangles, arrays);
+        LevelViewerMeshUtil.AddSurface(mesh, Mesh.PrimitiveType.Triangles, arrays);
         return mesh;
     }
 
@@ -598,9 +674,18 @@ public static class PreviewVisualUtility
         };
         root.AddChild(meshInstance);
 
-        ShaderMaterial material = (ShaderMaterial)SharedIconBillboardMaterial.Duplicate(true);
-        material.SetShaderParameter("albedo_texture", icon);
-        material.SetShaderParameter("albedo_color", tint);
+        (Texture2D icon, Color tint) key = (icon, tint);
+        if (!_iconBillboardByIcon.TryGetValue(key, out ShaderMaterial material) || !GodotObject.IsInstanceValid(material))
+        {
+            material = new ShaderMaterial
+            {
+                Shader = SharedIconBillboardMaterial.Shader,
+                RenderPriority = SharedIconBillboardMaterial.RenderPriority,
+            };
+            material.SetShaderParameter(AlbedoTextureParam, icon);
+            material.SetShaderParameter(AlbedoColorParam, tint);
+            _iconBillboardByIcon[key] = material;
+        }
         meshInstance.MaterialOverride = material;
 
         return root;
@@ -628,12 +713,12 @@ public static class PreviewVisualUtility
         };
         int[] triangles = { 0, 2, 1, 2, 3, 1 };
 
-        var arrays = new Godot.Collections.Array();
+        using var arrays = new Godot.Collections.Array(); //alive across the native call - see CollisionMeshOverlay.BuildMesh
         arrays.Resize((int)Mesh.ArrayType.Max);
         arrays[(int)Mesh.ArrayType.Vertex] = vertices;
         arrays[(int)Mesh.ArrayType.TexUV] = uvs;
         arrays[(int)Mesh.ArrayType.Index] = triangles;
-        _billboardQuadMesh.AddSurfaceFromArrays(Mesh.PrimitiveType.Triangles, arrays);
+        LevelViewerMeshUtil.AddSurface(_billboardQuadMesh, Mesh.PrimitiveType.Triangles, arrays);
         return _billboardQuadMesh;
     }
 
@@ -642,7 +727,24 @@ public static class PreviewVisualUtility
         if (node == null || !GodotObject.IsInstanceValid(node))
             return;
 
+        /* Out of the pick and grey-out bookkeeping first. A preview's Refresh rebuilds its geometry - every preview, on every
+           settings packet - and the old meshes stayed registered with their owner until the end of the frame: the reapply
+           that follows the refresh greyed them along with the new ones, and the grey-out held the saved material of each
+           freed mesh until the next change of scope (960 a time on BSP_Torrens). */
+        ForgetPreviewSubtree(node);
         node.QueueFree();
+    }
+
+    private static void ForgetPreviewSubtree(Node node)
+    {
+        if (node is Node3D node3D)
+        {
+            LevelViewerPick.ForgetNode(node3D);
+            LevelViewerCompositeFocus.ForgetNode(node3D);
+        }
+        int count = node.GetChildCount();
+        for (int i = 0; i < count; i++)
+            ForgetPreviewSubtree(node.GetChild(i));
     }
 
     public static void CleanupAllFunctionEntityPreviews(Node searchRoot = null)

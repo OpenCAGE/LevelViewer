@@ -12,21 +12,48 @@ using System.Linq;
 
 public partial class AlienScene : Node3D
 {
-	public const string OwnerCompositeMetaKey = "owner_composite";
 
 	public Action OnLoaded;
-	/// <summary>Fires when the selected entity changes. Argument is the new selected node (null when deselected).</summary>
-	public Action<Node3D> OnSelectionChanged;
+	/// <summary>Fires when the selected entity changes. Arguments are the new selected node (null when deselected)
+	/// and where the selection came from.</summary>
+	public Action<Node3D, SelectionOrigin> OnSelectionChanged;
+
+	/// <summary>
+	/// Where a selection was made. The camera treats them differently: a viewport pick already has the
+	/// thing on screen, so "focus on selected" must not move the view; a selection arriving from
+	/// OpenCAGE is the case that setting exists for. A selection put back on a scene built again under
+	/// it (a rebuild, the view put back after previews) is not a new one, so it leaves the view alone too.
+	/// </summary>
+	public enum SelectionOrigin
+	{
+		Remote,
+		ViewportPick,
+		Restore,
+	}
 
 	private string _levelName = "";
 	public string LevelName => _levelName;
 
 	private Node3D _parentNode = null;
+	private CollisionMeshOverlay _collisionOverlay = null;
+	private StateInfoOverlay _stateInfoOverlay = null;
+	private int _pendingNavMeshState = -1;
+	private int _pendingCoverState = -1;
 	public Node3D ParentNode => _parentNode;
 	public IReadOnlyDictionary<Node3D, Entity> NodeEntities => _nodeEntities;
 
 	private Composite _loadedComposite = null;
 	private Node3D _selectedEntity;
+
+	/* The whole selection, the primary (_selectedEntity) first: entities ctrl-clicked together in the
+	   viewport, or multi-selected in OpenCAGE's entity list. One entry for an ordinary selection.
+	   _selectedEntityIds runs in step with it, so the gizmo can name the entity behind each node. */
+	private readonly List<Node3D> _selectedEntities = new List<Node3D>();
+	private readonly List<uint> _selectedEntityIds = new List<uint>();
+
+	/* Drawn as the selection but not part of it (a selected TriggerSequence's members): the selection
+	   itself first, then them. Empty unless something actually brought members along. */
+	private readonly List<Node3D> _markedWithSelection = new List<Node3D>();
 	public uint CompositeID => _loadedComposite == null ? 0 : _loadedComposite.shortGUID.AsUInt32;
 	public string CompositeIDString => _loadedComposite == null || _loadedComposite.shortGUID == ShortGuid.Invalid ? "" : _loadedComposite.shortGUID.ToByteString();
 	public int ModelReferenceMeshCount => _modelReferenceMeshes.Count;
@@ -38,8 +65,82 @@ public partial class AlienScene : Node3D
 	private Dictionary<Materials.Material, ShaderMaterial> _materials = new Dictionary<Materials.Material, ShaderMaterial>();
 	private Dictionary<Materials.Material, ShaderMaterial> _wireframeMaterials = new Dictionary<Materials.Material, ShaderMaterial>();
 	private Dictionary<ShaderMaterial, bool> _materialSupport = new Dictionary<ShaderMaterial, bool>();
-	private readonly Dictionary<ulong, ShaderMaterial> _modelReferenceOverrideMaterials = new Dictionary<ulong, ShaderMaterial>();
+	/* What an override material is cached under: the entities themselves rather than their ids, which a composite variant
+	   keeps - its ModelReference may carry other colours than the original's, and the two shared one entry, replacing it
+	   back and forth. Entity has no equality of its own, so this is reference identity. */
+	private readonly record struct ModelReferenceOverrideKey(int MaterialWriteIndex, Entity ParameterEntity, Entity FallbackEntity, bool Wireframe);
+	private readonly Dictionary<ModelReferenceOverrideKey, ShaderMaterial> _modelReferenceOverrideMaterials = new Dictionary<ModelReferenceOverrideKey, ShaderMaterial>();
+	//Which material each override entry was built from, for retiring them when it changes (the key is a hash)
+	private readonly Dictionary<ModelReferenceOverrideKey, Materials.Material> _modelReferenceOverrideMaterialSources = new Dictionary<ModelReferenceOverrideKey, Materials.Material>();
+	//And the colour values it was built with: an entry is reused only for the same values, and replaced for new ones
+	private readonly Dictionary<ModelReferenceOverrideKey, ModelReferenceMaterialOverrides.EnvironmentColourScalars> _modelReferenceOverrideMaterialScalars = new Dictionary<ModelReferenceOverrideKey, ModelReferenceMaterialOverrides.EnvironmentColourScalars>();
 	private Dictionary<MeshInstance3D, Materials.Material> _modelReferenceMeshes = new Dictionary<MeshInstance3D, Materials.Material>();
+	/* What the level's movers give an instance of their own (WithMoverLook): its room's cube and its glow. Each mover's, by
+	   its entity handle; the entities any of them is an instance of; what each render target resolved to; the copies of a
+	   material made for one; and what each material takes at all. All per populate. */
+	//An instance's own EMISSIVE_TINT, as the game sets it on the material it draws (see InstanceEmissiveTint)
+	private readonly record struct MoverEmissive(Vector4 Tint);
+	private readonly record struct MoverLook(Textures.TEX4 Cube, MoverEmissive? Emissive);
+	private Dictionary<(uint, uint), Textures.TEX4> _moverEnvironmentMaps;
+	private Dictionary<(uint, uint), MoverEmissive> _moverEmissives;
+	private HashSet<uint> _moverLookEntities;
+	private readonly Dictionary<Node3D, MoverLook> _moverLookByTarget = new Dictionary<Node3D, MoverLook>();
+	private readonly Dictionary<(ShaderMaterial, Textures.TEX4, MoverEmissive?), ShaderMaterial> _roomCubeMaterials = new Dictionary<(ShaderMaterial, Textures.TEX4, MoverEmissive?), ShaderMaterial>(MoverLookKeyComparer.Instance);
+	private readonly Dictionary<ShaderMaterial, (bool Reflects, bool Emissive)> _materialMoverUse = new Dictionary<ShaderMaterial, (bool Reflects, bool Emissive)>();
+	//Room cubes that would not convert: not tried again for the next mesh in the room
+	private readonly HashSet<Textures.TEX4> _roomCubesUnavailable = new HashSet<Textures.TEX4>(ReferenceEqualityComparer.Instance);
+	/* The cubes by reference, here and in every TEX4-keyed table: TEX4 hashes the first bytes of its content, which a populate
+	   lets go of once converted - by its own hash the same cube was another before and after, and the copy made for an
+	   instance in it wasn't found again for the next (a new copy per incremental spawn), nor a cube already known not to convert */
+	private sealed class MoverLookKeyComparer : IEqualityComparer<(ShaderMaterial, Textures.TEX4, MoverEmissive?)>
+	{
+		public static readonly MoverLookKeyComparer Instance = new MoverLookKeyComparer();
+
+		public bool Equals((ShaderMaterial, Textures.TEX4, MoverEmissive?) x, (ShaderMaterial, Textures.TEX4, MoverEmissive?) y) =>
+			ReferenceEquals(x.Item1, y.Item1) && ReferenceEquals(x.Item2, y.Item2) && Nullable.Equals(x.Item3, y.Item3);
+
+		public int GetHashCode((ShaderMaterial, Textures.TEX4, MoverEmissive?) key) =>
+			HashCode.Combine(System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(key.Item1),
+				System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(key.Item2), key.Item3);
+	}
+	private long _roomCubeTicks;
+	private int _roomCubeMeshes;
+	private int _roomCubeMisses;
+	private int _moverEmissiveMeshes;
+
+	/// <summary>What a spawned mesh was built from, for remapping it later.</summary>
+	private readonly struct MeshBinding
+	{
+		public MeshBinding(int sourceMaterialWriteIndex, uint modelReferenceEntityId, uint overrideParameterEntityId)
+		{
+			SourceMaterialWriteIndex = sourceMaterialWriteIndex;
+			ModelReferenceEntityId = modelReferenceEntityId;
+			OverrideParameterEntityId = overrideParameterEntityId;
+		}
+
+		public int SourceMaterialWriteIndex { get; }
+		public uint ModelReferenceEntityId { get; }
+		public uint OverrideParameterEntityId { get; }
+	}
+
+	//These three were written as Godot metadata on every spawned mesh. Each SetMeta allocates a
+	//metadata store on the node, and a level root spawns tens of thousands of meshes, so they live
+	//beside _modelReferenceMeshes instead and are cleared with it.
+	private readonly Dictionary<MeshInstance3D, MeshBinding> _meshBindings = new Dictionary<MeshInstance3D, MeshBinding>();
+	/// <summary>A scene-filter mesh and the pick owner it was spawned under.</summary>
+	private readonly struct SceneFilterMesh
+	{
+		public SceneFilterMesh(SceneFilterKind kind, Node3D owner)
+		{
+			Kind = kind;
+			Owner = owner;
+		}
+
+		public SceneFilterKind Kind { get; }
+		public Node3D Owner { get; }
+	}
+
+	private Dictionary<MeshInstance3D, SceneFilterMesh> _sceneFilterMeshes = new Dictionary<MeshInstance3D, SceneFilterMesh>();
 	// Shared Godot mesh cache: one ArrayMesh per models write index (shared by all instances).
 	private readonly Dictionary<int, MeshHolder> _modelMeshesByWriteIndex = new Dictionary<int, MeshHolder>();
 	private readonly Dictionary<Models.CS2.Component.LOD.Submesh, int> _submeshWriteIndexByReference =
@@ -51,9 +152,32 @@ public partial class AlienScene : Node3D
 
 	/// <summary>Subtracted from Cathode world space so geometry sits near the origin (reduces float jitter / cull pops).</summary>
 	private Vector3 _contentOrigin = Vector3.Zero;
+	//The origin a rebuild of the scene on screen puts the content back at, rather than centring it afresh (ExecutePopulateComposite)
+	private Vector3? _contentOriginToKeep;
 
 	private Dictionary<ShortGuid, List<Node3D>> _compositeNodes = new Dictionary<ShortGuid, List<Node3D>>();
 	private Dictionary<Node3D, Entity> _nodeEntities = new Dictionary<Node3D, Entity>();
+	//Which composite each entity node came from. This used to be Godot node metadata, but a
+	//metadata store is allocated per node and a level root spawns hundreds of thousands of them -
+	//it cost more to write than creating the nodes did. Kept in step with _nodeEntities.
+	private static readonly Dictionary<Node3D, uint> _nodeOwnerComposites = new Dictionary<Node3D, uint>();
+	//An entity node is named after its entity id, and the same entity is spawned once per instance
+	//of the composite holding it - so a level root asks for a few tens of thousands of distinct
+	//names hundreds of thousands of times. Both halves of that are worth caching: the decimal
+	//string, and the StringName Godot interns it into.
+	private readonly Dictionary<uint, StringName> _nodeNames = new Dictionary<uint, StringName>();
+
+	private StringName GetEntityNodeName(uint entityId)
+	{
+		StringName name;
+		if (!_nodeNames.TryGetValue(entityId, out name))
+		{
+			name = new StringName(entityId.ToString());
+			_nodeNames[entityId] = name;
+		}
+
+		return name;
+	}
 	private readonly Dictionary<ulong, List<Node3D>> _entityNodesByKey = new Dictionary<ulong, List<Node3D>>();
 
 	private FunctionEntityPreview[] _cachedFunctionEntityPreviews = Array.Empty<FunctionEntityPreview>();
@@ -80,7 +204,8 @@ public partial class AlienScene : Node3D
 	public class TexOrCube
 	{
 		public Texture2D Texture = null;
-		public Texture2D Cubemap = null;
+		//A cube texture's six faces, for the environment reflection (model_reference_surface.gdshaderinc); Texture is its first face
+		public Cubemap Cubemap = null;
 	}
 
 	private LevelViewerLoadingScreen _loadingScreen;
@@ -106,6 +231,7 @@ public partial class AlienScene : Node3D
 	private readonly List<BulkMeshSpawnJob> _bulkMeshSpawnJobs = new List<BulkMeshSpawnJob>();
 	private Dictionary<ulong, List<Tuple<int, int>>> _modelRefRenderablesByEntityId;
 	private Dictionary<Node3D, Entity> _aliasParameterEntityByRenderTarget;
+	private Dictionary<Node3D, int> _aliasParameterDepthByRenderTarget;
 	private bool _bulkMeshSpawning;
 	private bool _deferBulkPickRegistration;
 	private readonly List<(MeshInstance3D Mesh, Node3D Owner)> _bulkPickableMeshes = new List<(MeshInstance3D, Node3D)>();
@@ -115,6 +241,7 @@ public partial class AlienScene : Node3D
 	private string _queuedLevelName = "";
 	private string _queuedLevelPath = "";
 	private ShortGuid _queuedCompositeGuid = ShortGuid.Invalid;
+	private ShortGuid _forcedRepopulate = ShortGuid.Invalid;
 	private Composite _queuedComposite;
 	private int _contentGeneration;
 
@@ -123,22 +250,78 @@ public partial class AlienScene : Node3D
 	public override void _Ready()
 	{
 		RegisterDefaultParameterVisualHandlers();
+		SplinePathPreview.AfterEditRefresh = OnSplinePreviewEditRefreshed;
+		SplinePathPreview.AfterEditRefreshAll = LevelViewerSelection.ReapplyAfterSplineEditRefresh;
 		Callable.From(EnsureLoadingScreen).CallDeferred();
+		//The water's mirror: idle until some water with a plane to mirror is on screen. Beside the scene, not in it - a level's
+		//reset frees what the scene holds
+		Callable.From(() => (GetTree().CurrentScene ?? GetParent())?.AddChild(new LevelViewerPlanarReflection())).CallDeferred();
+	}
+
+	/* Edit in Viewport draws the working points in every placement of the spline: the follow-up a spline parameter edit gets
+	   (RefreshSplinePathPreviews), per placement - not for a placement removed this frame (its node is untracked already, and
+	   freed at the end of it) */
+	private void OnSplinePreviewEditRefreshed(SplinePathPreview preview)
+	{
+		if (preview.GetParent() is not Node3D owner || !GodotObject.IsInstanceValid(owner) || !HasOwnerComposite(owner))
+			return;
+		preview.SyncPickablesWithVisibility();
+		ReapplyCompositeFocusTo(owner);
+		//The redrawn points come back in the spline's own colours, in every placement
+		if (PreviewVisibilitySettings.ShowZones)
+			RefreshZoneOverlayDeferred();
 	}
 
 	public override void _Process(double delta)
 	{
 		AdvanceLoadPipeline();
 		AdvanceLargeSceneRenderPolicyBatch();
+		AdvanceResourceSync();
+
+		if (_zoneRebuildPending)
+		{
+			_zoneRebuildPending = false;
+			try
+			{
+				RefreshZoneOverlay();
+			}
+			catch (System.Exception ex)
+			{
+				ViewerLog.PrintErr("[Zones] Zone overlay refresh failed: " + ex);
+			}
+		}
+
 		UpdateLoadPipelineProcessing();
 	}
 
 	private void UpdateLoadPipelineProcessing()
 	{
 		bool needsProcess = _loadStep != LoadPipelineStep.None
-			|| _largeScenePolicyRunning;
+			|| _largeScenePolicyRunning
+			|| IsResourceSyncBusy
+			|| _zoneRebuildPending;
 		if (IsProcessing() != needsProcess)
 			SetProcess(needsProcess);
+	}
+
+	private bool _zoneRebuildPending;
+
+	/// <summary>
+	/// Bring the zone colouring up to date on the next frame rather than now.
+	/// </summary>
+	/// <remarks>
+	/// Two reasons to wait. A burst of changes - pasting fifty entities, a resource sync respawning
+	/// thousands of model references - becomes one rebuild instead of one each. And a respawn frees
+	/// the old meshes with QueueFree, which does not take effect until the frame ends, so next frame
+	/// is when the scene actually reads the way the rebuild wants it to.
+	/// </remarks>
+	public void RefreshZoneOverlayDeferred()
+	{
+		if (_zoneRebuildPending)
+			return;
+
+		_zoneRebuildPending = true;
+		UpdateLoadPipelineProcessing();
 	}
 
 	public void RegisterParameterVisualHandler(DataType dataType, ParameterVisualHandler handler)
@@ -152,6 +335,7 @@ public partial class AlienScene : Node3D
 		RegisterParameterVisualHandler(DataType.VECTOR, ApplyVectorVisual);
 		RegisterParameterVisualHandler(DataType.SPLINE, ApplySplineVisual);
 		RegisterParameterVisualHandler(DataType.BOOL, ApplyBoolVisual);
+		RegisterParameterVisualHandler(DataType.FLOAT, ApplyFloatVisual);
 	}
 
 	public override void _ExitTree()
@@ -159,6 +343,11 @@ public partial class AlienScene : Node3D
 		_contentGeneration++;
 		_loadStep = LoadPipelineStep.None;
 		CancelLargeSceneRenderPolicy();
+		if (SplinePathPreview.AfterEditRefresh == OnSplinePreviewEditRefreshed)
+		{
+			SplinePathPreview.AfterEditRefresh = null;
+			SplinePathPreview.AfterEditRefreshAll = null;
+		}
 
 		ClearSelectedEntity();
 		LevelViewerSelection.Clear();
@@ -244,6 +433,25 @@ public partial class AlienScene : Node3D
 		return entity != null && GodotObject.IsInstanceValid(entity);
 	}
 
+	/// <summary>The whole selection, primary first, with the entity id each node stands for.</summary>
+	public int GetSelectedEntities(List<Node3D> nodes, List<uint> entityIds)
+	{
+		nodes?.Clear();
+		entityIds?.Clear();
+
+		for (int i = 0; i < _selectedEntities.Count; i++)
+		{
+			Node3D node = _selectedEntities[i];
+			if (node == null || !GodotObject.IsInstanceValid(node))
+				continue;
+
+			nodes?.Add(node);
+			entityIds?.Add(i < _selectedEntityIds.Count ? _selectedEntityIds[i] : 0);
+		}
+
+		return nodes?.Count ?? entityIds?.Count ?? 0;
+	}
+
 	public bool SupportsTransformGizmo(Node3D selectedNode)
 	{
 		if (selectedNode == null || !GodotObject.IsInstanceValid(selectedNode) || _parentNode == null)
@@ -257,9 +465,7 @@ public partial class AlienScene : Node3D
 		if (commands != null && LevelViewerPick.IsCompositeInstanceEntity(entity, commands))
 			return PreviewVisualUtility.HasValidWorldAnchor(entityNode);
 
-		uint ownerCompositeId = entityNode.HasMeta(OwnerCompositeMetaKey)
-			? entityNode.GetMeta(OwnerCompositeMetaKey).AsUInt32()
-			: 0;
+		uint ownerCompositeId = GetOwnerCompositeId(entityNode);
 
 		FunctionEntity functionForGizmo = ResolveFunctionEntityForTransformGizmo(entity, entityNode, ownerCompositeId);
 		if (functionForGizmo == null)
@@ -291,6 +497,16 @@ public partial class AlienScene : Node3D
 		return true;
 	}
 
+	/// <summary>Whether <see cref="TryHideSelectedEntity"/> has something to hide: a selection in the composite on screen that isn't hidden already.</summary>
+	public bool CanHideSelectedEntity()
+	{
+		if (!_content.Loaded || !TryGetSelectedEntity(out Node3D selected))
+			return false;
+
+		return LevelViewerCompositeFocus.IsNodeInScope(selected, _parentNode, _content.Level.Commands)
+			&& !LevelViewerEntityHide.IsHidden(selected);
+	}
+
 	public void ClearCompositeScopedHides()
 	{
 		if (!LevelViewerEntityHide.HasAny)
@@ -316,11 +532,16 @@ public partial class AlienScene : Node3D
 	private void ClearSelectedEntity()
 	{
 		_selectedEntity = null;
+		_selectedEntities.Clear();
+		_selectedEntityIds.Clear();
+		_markedWithSelection.Clear();
 		LevelViewerSelection.Clear();
+		ReapplyCompositeFocusLeftBySelection();
 		LevelViewerLightRadius.Clear();
 		RefreshAliasHighlights(forceRebuild: false);
 		RefreshProxyHighlights(forceRebuild: false);
-		OnSelectionChanged?.Invoke(null);
+		LevelViewerZoneHighlight.SyncWithSelection();
+		OnSelectionChanged?.Invoke(null, SelectionOrigin.Remote);
 	}
 
 	private void RefreshSelectedLightRadiusVisual()
@@ -340,9 +561,7 @@ public partial class AlienScene : Node3D
 			return;
 		}
 
-		uint ownerCompositeId = entityNode.HasMeta(OwnerCompositeMetaKey)
-			? entityNode.GetMeta(OwnerCompositeMetaKey).AsUInt32()
-			: 0;
+		uint ownerCompositeId = GetOwnerCompositeId(entityNode);
 
 		List<Entity> overrideEntities = BuildLightOverrideChain(entityNode);
 		LevelViewerLightRadius.Apply(entityNode, function, ownerCompositeId, overrideEntities);
@@ -367,14 +586,14 @@ public partial class AlienScene : Node3D
 			if (alias.parameters == null || alias.parameters.Count == 0)
 				continue;
 
-			if (!entry.Key.HasMeta(OwnerCompositeMetaKey))
+			uint aliasOwnerCompositeId;
+			if (!TryGetOwnerCompositeId(entry.Key, out aliasOwnerCompositeId))
 				continue;
 
 			Node3D pointedNode = aliasOverride.PointedEntity;
 			if (pointedNode == null || !GodotObject.IsInstanceValid(pointedNode))
 			{
-				Composite ownerComposite = _content.Level.Commands.GetComposite(
-					new ShortGuid(entry.Key.GetMeta(OwnerCompositeMetaKey).AsUInt32()));
+				Composite ownerComposite = _content.Level.Commands.GetComposite(new ShortGuid(aliasOwnerCompositeId));
 				if (ownerComposite == null
 					|| !TryResolveAliasPointedSceneNode(aliasOverride, alias, ownerComposite, out pointedNode))
 				{
@@ -462,25 +681,52 @@ public partial class AlienScene : Node3D
 		_contentGeneration++;
 		PreviewVisibilitySettings.LevelRootCompositeId = 0;
 		_isBulkPopulating = false;
+		FunctionEntityPreview.DeferVisualRefresh = false;
 		_loadStep = LoadPipelineStep.None;
 		LevelViewerRenderIdleThrottle.SetLoadActive(false);
 
+		_sceneTeardown = true;
 		PreviewVisualUtility.CleanupAllFunctionEntityPreviews(this);
 		ClearSelectedEntity();
 		LevelViewerSelection.Clear();
+		//Before the scene goes, so their overlays come off meshes that still exist. Their rebuild key (composite, path, zones)
+		//would otherwise match the next level's first populate, which then kept the old meshes and tinted nothing
+		LevelViewerAliasHighlight.Clear();
+		LevelViewerProxyHighlight.Clear();
 		LevelViewerPick.ClearRegistry();
 		LevelViewerCompositeFocus.Clear();
 		LevelViewerEntityHide.ClearAll();
+		//A different level's zones say nothing about this one, so the table goes with the nodes
+		LevelViewerZoneHighlight.Reset();
+		//Its stars likewise: the plain sky until the next level brings its own
+		LevelViewerGalaxy.SetGalaxy(this, null);
+		LevelViewerFog.SetFog(this, null);
 
+		/* Freed here, answering sent messages as it goes, as a populate frees the scene it replaces. Queued, the whole
+		   level was deleted in one go at the end of the frame (SceneTree's delete queue, nothing answered): 15 s when
+		   TECH_Hub made way for SCI_Hub. */
 		if (_parentNode != null && GodotObject.IsInstanceValid(_parentNode))
-			_parentNode.QueueFree();
+			FreeSceneAnsweringMessages(_parentNode);
 
 		_parentNode = null;
 
+		//Every entity id ever spawned had one, so across levels the table only grew (the nodes hold their own copies)
+		foreach (StringName name in _nodeNames.Values)
+			name.Dispose();
+		_nodeNames.Clear();
+
 		ClearPopulateMaterialCaches();
 		_modelReferenceMeshes.Clear();
+		_meshBindings.Clear();
+		_sceneFilterMeshes.Clear();
+		_sceneTeardown = false;
+		_collisionOverlay = null;
+		_stateInfoOverlay = null;
 		CancelLargeSceneRenderPolicy();
 		ModelReferenceRenderSettings.ResetForLevelLoad();
+		//Its tables are keyed by the old level's entities and composites: cleared now, not at the next populate, so the old
+		//script isn't held through the next level's load (or for good, if that load fails)
+		ModelReferenceMaterialMapping.ClearMappingCaches();
 
 		foreach (KeyValuePair<int, TexOrCube> kvp in _texturesLevelByIndex)
 		{
@@ -499,6 +745,8 @@ public partial class AlienScene : Node3D
 				kvp.Value.Cubemap.Dispose();
 		}
 		_texturesGlobalByIndex.Clear();
+		_texturesByPath.Clear();
+		_volumeTextures.Clear();
 
 		AlienSceneTextures.ClearTransparencyCache();
 
@@ -506,18 +754,35 @@ public partial class AlienScene : Node3D
 			kvp.Value.MainMesh?.Dispose();
 		_modelMeshesByWriteIndex.Clear();
 		_submeshWriteIndexByReference.Clear();
+		//Both point into the old level's model table (and through its submeshes, its materials and textures), which they
+		//kept alive through the next level's load: the next build/restore fills them again
+		_submeshOwners.Clear();
+		_modelWriteIndicesNotInFileTable = null;
+		_modelWriteIndicesNotInFilePath = null;
+		_modelWriteIndicesNotInFile.Clear();
 
 		_compositeNodes.Clear();
 		_nodeEntities.Clear();
+		_nodeOwnerComposites.Clear();
 		_bulkPopulatePreviews.Clear();
 		_bulkModelReferencePreviews.Clear();
 		_bulkMeshSpawnJobs.Clear();
 		_bulkPickableMeshes.Clear();
+		//The freed previews (and through them the old level's entities), and the alias index over freed nodes: both were
+		//only replaced by the next populate
+		_cachedFunctionEntityPreviews = Array.Empty<FunctionEntityPreview>();
+		InvalidateFunctionEntityPreviewCache();
 		_modelRefRenderablesByEntityId = null;
+		_aliasParameterEntityByRenderTarget = null;
+		_aliasParameterDepthByRenderTarget = null;
 		ClearEntityNodeCache();
 
 		_contentOrigin = Vector3.Zero;
 		_loadedComposite = null;
+		_entitiesAtLevelLoad = null;
+		_effectsShownByOwnFlag.Clear();
+		_reflectiveByOwnFlag.Clear();
+		ResetResourceSyncState();
 		_content.Reset();
 	}
 
@@ -529,17 +794,80 @@ public partial class AlienScene : Node3D
 
 		_queuedLevelName = level;
 		_queuedLevelPath = pathToAI;
+		DropDeferredRootSwitch(); //the load builds its own scene; a switch asked for before it is out of date
 
-		if (_loadStep != LoadPipelineStep.None)
+		//A level load already on its way reads the names just set
+		if (_loadStep == LoadPipelineStep.WaitUiBeforeLevelLoad || _loadStep == LoadPipelineStep.LoadLevel)
 			return;
+
+		/* A composite populate is on its way: the load used to be dropped here, so reloading the level to throw away
+		   unsaved changes while the viewer was still switching composites left the edited scene on screen for good
+		   (OpenCAGE's closing LEVEL_LOADED only forces a reload when the viewer was never asked). Run it after. */
+		if (_loadStep != LoadPipelineStep.None)
+		{
+			_levelLoadAfterPopulate = true;
+			return;
+		}
 
 		BeginWaitUiBeforeLevelLoad("Loading level " + level + "...");
 	}
 
-	/// <summary>Shows the loading overlay, waits for UI redraw, then builds the composite scene.</summary>
-	public void QueuePopulateComposite(ShortGuid guid)
+	private bool _levelLoadAfterPopulate;
+	//The composite the next level load builds instead of the level's root: the scene OpenCAGE's editor is in, which a viewer
+	//that has just connected is told on its LEVEL_LOADED (Packet.level_scene_root). Invalid builds the root.
+	private ShortGuid _levelLoadSceneRoot = ShortGuid.Invalid;
+	public void SetSceneRootForLevelLoad(ShortGuid composite) => _levelLoadSceneRoot = composite;
+	//A switch replaced a pending forced rebuild of the composite on screen; switching straight back must still rebuild it
+	private bool _pendingRebuildDisplaced;
+	//The overlay is saying a level failed to load: nothing that finishes afterwards takes it down (the preview batch did)
+	private bool _levelLoadFailedShown;
+
+	/// <summary>A level load asked for while a composite populate was on its way: start it now that the populate is over.</summary>
+	private bool RunLevelLoadDeferredByPopulate()
 	{
+		if (!_levelLoadAfterPopulate)
+			return false;
+		_levelLoadAfterPopulate = false;
+		string level = _queuedLevelName, path = _queuedLevelPath;
+		Callable.From(() => QueueLoadLevel(level, path)).CallDeferred();
+		return true;
+	}
+
+	/// <summary>Shows the loading overlay, waits for UI redraw, then builds the composite scene.</summary>
+	public void QueuePopulateComposite(ShortGuid guid) => QueuePopulateComposite(guid, false);
+
+	/// <param name="force">Populate even when this is the composite already on screen. OpenCAGE asks
+	/// for that after it has sent the contents of a composite it opened while still empty - one it
+	/// had just imported - since the entities that arrived one at a time since then do not put a
+	/// nested instance's own contents on screen the way a populate does.</param>
+	/// <summary>Build the composite on screen again from the script as it stands now.</summary>
+	public void RebuildLoadedComposite()
+	{
+		if (_loadedComposite == null || _loadedComposite.shortGUID == ShortGuid.Invalid)
+			return;
+		//On screen is a preview the batch is about to replace; what replaces it is built from the script, edits and all
+		if (PreviewBatchHasScene)
+			return;
+		QueuePopulateComposite(_loadedComposite.shortGUID, true, supersedesDeferredSwitch: false);
+	}
+
+	public void QueuePopulateComposite(ShortGuid guid, bool force) => QueuePopulateComposite(guid, force, supersedesDeferredSwitch: force);
+
+	private void QueuePopulateComposite(ShortGuid guid, bool force, bool supersedesDeferredSwitch)
+	{
+		if (!force && TryDeferRootSwitchDuringPreviews(guid))
+			return;
+		//A forced populate OpenCAGE asks for is newer than a switch deferred by the batch, and takes the scene from it. A rebuild
+		//of the scene on screen, or a forced request replayed after its populate, is not newer than the switch
+		if (supersedesDeferredSwitch)
+			DropDeferredRootSwitch();
 		_queuedCompositeGuid = guid;
+		/* A forced request that lands while a populate is on its way (the wait-UI frames before it
+		   runs) would otherwise be dropped - the pending populate goes ahead with whatever the script
+		   held when it was asked for, which is exactly the state the request was sent to replace. So
+		   it is remembered, and CompletePopulate re-issues it once the pending one is done. */
+		if (force)
+			_forcedRepopulate = guid;
 
 		if (_loadStep == LoadPipelineStep.WaitUiBeforeLevelLoad || _loadStep == LoadPipelineStep.LoadLevel)
 			return;
@@ -549,15 +877,47 @@ public partial class AlienScene : Node3D
 
 		Composite comp = _content.Level.Commands.GetComposite(guid);
 		if (comp == null)
-			return;
-		if (_loadedComposite != null && _loadedComposite.shortGUID == guid)
 		{
+			_forcedRepopulate = ShortGuid.Invalid;
+			return;
+		}
+		/* Two switches inside the couple of frames a populate waits before it runs (quick clicks in the browser, or a
+		   backlog handled in one tick after a busy spell): the first used to win, and the viewer went on showing a
+		   composite OpenCAGE had already left until the next switch. The latest now wins - or, when the latest is
+		   the composite already on screen, the pending switch is called off. */
+		bool pending = _loadStep == LoadPipelineStep.WaitUiBeforeCompositePopulate;
+		if (!force && _loadedComposite != null && _loadedComposite.shortGUID == guid)
+		{
+			if (pending && _queuedComposite != null && _queuedComposite.shortGUID != guid)
+			{
+				//Back where it started - unless what the switch displaced was a rebuild of this one, which is still owed
+				if (_pendingRebuildDisplaced)
+				{
+					_pendingRebuildDisplaced = false;
+					_queuedComposite = _loadedComposite;
+					return; //that populate reports itself
+				}
+				_queuedComposite = null;
+			}
 			ViewerPopulateBridge.NotifySkipped();
+			return;
+		}
+		if (pending)
+		{
+			//A pending populate of the composite on screen can only be a forced rebuild
+			if (_queuedComposite != null && _loadedComposite != null && _queuedComposite == _loadedComposite && comp != _loadedComposite)
+				_pendingRebuildDisplaced = true;
+			//A rebuild asked for the composite being switched away from would otherwise run after this populate, and take
+			//the viewer back there
+			if (_forcedRepopulate != guid)
+				_forcedRepopulate = ShortGuid.Invalid;
+			_queuedComposite = comp;
 			return;
 		}
 		if (_loadStep != LoadPipelineStep.None)
 			return;
 
+		_forcedRepopulate = ShortGuid.Invalid; //this is that populate
 		string compositeLabel = string.IsNullOrWhiteSpace(comp.name) ? "composite" : comp.name;
 		BeginWaitUiBeforeCompositePopulate("Loading " + compositeLabel + "...", comp);
 	}
@@ -617,10 +977,73 @@ public partial class AlienScene : Node3D
 		}
 
 		ViewerLog.Print("Loading level " + _queuedLevelName + "...");
+		ReleaseFocusForLongWork();
+		_levelLoadAfterPopulate = false; //this is that load
+		_levelLoadFailedShown = false;
+		_pendingRebuildDisplaced = false; //the level's populate replaces whatever was on screen
+
+		/* Nothing here used to catch: a level that failed to read (a file missing or locked by a save, a table that
+		   would not parse) left the pipeline on LoadLevel for good - every later load and populate returned early, the
+		   loading overlay stayed up and OpenCAGE's "populating" marquee waited forever. Now it ends the step, says so,
+		   and the next LEVEL_LOADED can try again. */
+		try
+		{
+			ExecuteLoadLevelCore();
+		}
+		catch (Exception e)
+		{
+			FailLevelLoad(e);
+		}
+	}
+
+	/* Nothing half-loaded is kept: a resource snapshot held for this level would otherwise keep IsResourceSyncBusy - and
+	   with it every packet behind it - waiting for content that never arrives. The level name is forgotten so the next
+	   LEVEL_LOADED for it reads it again. OpenCAGE gets a FINISHED so its load progress closes. */
+	private void FailLevelLoad(Exception e)
+	{
+		string failed = _queuedLevelName;
+		ViewerLog.PrintErr("[Viewer] Loading level " + failed + " failed: " + e);
+		_contentGeneration++;
+		_content.Reset();
+		_sceneTeardown = false;
+		//A load that got as far as indexing its submeshes left them pointing into the model table it just dropped
+		_submeshWriteIndexByReference.Clear();
+		_submeshOwners.Clear();
+		_loadedComposite = null;
+		_queuedComposite = null;
+		_queuedCompositeGuid = ShortGuid.Invalid;
+		_queuedLevelName = "";
+		_queuedLevelPath = "";
+		//Rebuilds asked for in the level that did not load would otherwise run after the next one's populate
+		_forcedRepopulate = ShortGuid.Invalid;
+		_pendingRebuildDisplaced = false;
+		ResetResourceSyncState();
+		_loadStep = LoadPipelineStep.None;
+		ViewerPopulateBridge.NotifySkipped();
+		_levelLoadFailedShown = true;
+		ShowLoading("Could not load " + failed + " - see the log.");
+		UpdateLoadPipelineProcessing();
+	}
+
+	private void ExecuteLoadLevelCore()
+	{
 		ResetLevel();
 
 		_levelName = _queuedLevelName;
 		_content.Load(_queuedLevelPath, _queuedLevelName);
+
+		/* Level.Load copies the global texture set into the level's own table (ImportFromGlobal) and points
+		   the materials at the copies, but a texture only gets a write index when its table is read from disk
+		   or saved - so those few hundred, every weapon and pickup texture among them, had none. The texture
+		   cache here is keyed by write index: each was converted, not kept, and its bytes released, so the
+		   material that asked for it next got nothing and drew flat (issue #705). Indexing them in Entries
+		   order is what a save would give them, and what OpenCAGE does before it sends a resource sync. */
+		_content.Level?.Textures?.RebuildWriteList();
+
+		//The sky: the level's galaxy, as the game draws it, or the plain sky for a level without one
+		LevelViewerGalaxy.SetGalaxy(this, _content.Level?.GalaxyItems);
+		//And its fog, the one its script switches on as it starts
+		LevelViewerFog.SetFog(this, _content.Level?.Commands);
 
 		LevelViewerShaderBytecode.ClearAsync(_content.Level?.Shaders?.Entries);
 		BuildSubmeshWriteIndexCache();
@@ -629,9 +1052,15 @@ public partial class AlienScene : Node3D
 		{
 			PreviewVisibilitySettings.LevelRootCompositeId = _content.Level.Commands.EntryPoints[0].shortGUID.AsUInt32;
 			Composite levelRoot = _content.Level.Commands.EntryPoints[0];
-			if (_queuedCompositeGuid == ShortGuid.Invalid)
-				_queuedCompositeGuid = levelRoot.shortGUID;
+			CollectEffectsAtLevelLoad();
+			//Also when the composite asked for belongs to another level (a load that waited behind a populate). A viewer that
+			//has just connected builds the scene OpenCAGE's editor is in, when it was told one and the level has it.
+			if (_queuedCompositeGuid == ShortGuid.Invalid || _content.Level.Commands.GetComposite(_queuedCompositeGuid) == null)
+				_queuedCompositeGuid = _levelLoadSceneRoot != ShortGuid.Invalid && _content.Level.Commands.GetComposite(_levelLoadSceneRoot) != null
+					? _levelLoadSceneRoot
+					: levelRoot.shortGUID;
 		}
+		_levelLoadSceneRoot = ShortGuid.Invalid;
 
 		if (_queuedCompositeGuid != ShortGuid.Invalid && _content.Loaded)
 		{
@@ -649,28 +1078,115 @@ public partial class AlienScene : Node3D
 		UpdateLoadPipelineProcessing();
 	}
 
+	/* This window is parented into OpenCAGE's, so the two UI threads share keyboard focus: while it sits here any focus
+	   change OpenCAGE makes (clicking the inspector, minimising, switching away) waits for this thread to take the focus
+	   messages - and a load or populate keeps it for seconds, a minute on the big levels, freezing OpenCAGE for as long.
+	   Handing focus back first (as the render-idle hand-off does) leaves OpenCAGE nothing to wait for; a click on the
+	   viewport takes it again afterwards. */
+	private static void ReleaseFocusForLongWork()
+	{
+		try
+		{
+			LevelViewerEmbeddedFocus.ReleaseFocusAndCaptureToHost();
+		}
+		catch (Exception e)
+		{
+			ViewerLog.PrintErr("[Focus] Could not hand focus back before a populate: " + e.Message);
+		}
+	}
+
 	private void ExecutePopulateComposite()
 	{
 		if (_loadStep != LoadPipelineStep.PopulateComposite || _queuedComposite == null)
 		{
+			//Called off while it waited (see QueuePopulateComposite): take the overlay it put up down again
 			_loadStep = LoadPipelineStep.None;
+			_pendingRebuildDisplaced = false;
+			Callable.From(HideLoading).CallDeferred();
+			UpdateLoadPipelineProcessing();
+			/* A forced rebuild asked for while it waited was of the composite it was switching to, which has just been
+			   switched away from: left set, it fired after the next populate and took the viewer back there. */
+			_forcedRepopulate = ShortGuid.Invalid;
+			RunLevelLoadDeferredByPopulate();
 			return;
 		}
 
 		Composite comp = _queuedComposite;
 		_queuedComposite = null;
 		_queuedCompositeGuid = ShortGuid.Invalid;
+		_pendingRebuildDisplaced = false; //whatever it was owed, this populate replaces the scene
 
 		ViewerPopulateBridge.NotifyStarted(GetPopulateDisplayLabel(comp));
+		ReleaseFocusForLongWork();
+
+		/* The composite on screen built again - a scene batch's end, an add too big to spawn one entity at a time, a
+		   COMPOSITE_RELOADED of it, a rebuild owed to it: the user is looking at that scene, so the view stays exactly
+		   where it is, as when a preview batch puts it back. The content goes back to the origin it had and the camera
+		   is neither moved nor framed - framing put it on the composite's first entity, stepped down or not - and what
+		   was hidden in the viewport stays hidden. Speed and the rest are the camera's own and outlive any populate.
+		   Only another composite, the first after a level load (which forgets the one on screen), or one whose own
+		   framing has yet to happen, is framed afresh. */
+		LevelViewerCamera keepViewOf = null;
+		List<NodePath> keptHides = null;
+		if (BatchPreviewOnScreen)
+		{
+			//A preview batch's lean preview is on screen, not the user's scene (see TryKeepViewTakenByBatch)
+			if (TryKeepViewTakenByBatch(comp, out Vector3 viewOrigin, out List<NodePath> viewHides))
+			{
+				_contentOriginToKeep = viewOrigin;
+				keptHides = viewHides;
+				keepViewOf = GetViewport()?.GetCamera3D() as LevelViewerCamera;
+				if (keepViewOf != null)
+					keepViewOf.SkipNextCompositeFraming = true;
+			}
+		}
+		else if (IsRebuildOfSceneOnScreen(comp, out LevelViewerCamera camera))
+		{
+			_contentOriginToKeep = _contentOrigin;
+			keptHides = LevelViewerEntityHide.CapturePaths(_parentNode);
+			keepViewOf = camera;
+			if (keepViewOf != null)
+				keepViewOf.SkipNextCompositeFraming = true;
+		}
 
 		_isBulkPopulating = true;
 		_deferMeshTreeActivation = true;
 		FunctionEntityPreview.DeferVisualRefresh = true;
-		PopulateCompositeInternal(comp);
+		try
+		{
+			PopulateCompositeInternal(comp);
+		}
+		catch (Exception e)
+		{
+			//Logged and carried on to CompletePopulate, which takes the flags above off again: left on,
+			//everything spawned afterwards would skip its preview refresh and never show
+			ViewerLog.PrintErr("[Viewer] Populating " + GetPopulateDisplayLabel(comp) + " failed: " + e);
+		}
+		_contentOriginToKeep = null;
 
 		_loadStep = LoadPipelineStep.None;
 		UpdateLoadPipelineProcessing();
 		CompletePopulate();
+		//Taken by the camera as the populate finished - unless that threw first, and the next populate is another composite
+		if (keepViewOf != null && GodotObject.IsInstanceValid(keepViewOf))
+			keepViewOf.SkipNextCompositeFraming = false;
+		RestoreHidesAfterRebuild(keptHides);
+
+		//A level load that arrived while this populate was on its way: it rebuilds everything, forced populate included
+		if (RunLevelLoadDeferredByPopulate())
+		{
+			_forcedRepopulate = ShortGuid.Invalid;
+			return;
+		}
+
+		//A forced populate that arrived while this one was on its way: now that this one is done and
+		//reported, build the composite again from what the script holds now (see QueuePopulateComposite)
+		if (_forcedRepopulate != ShortGuid.Invalid)
+		{
+			ShortGuid again = _forcedRepopulate;
+			_forcedRepopulate = ShortGuid.Invalid;
+			Callable.From(() => QueuePopulateComposite(again, true, supersedesDeferredSwitch: false)).CallDeferred();
+		}
 	}
 
 	private void CompletePopulate()
@@ -679,15 +1195,99 @@ public partial class AlienScene : Node3D
 		FunctionEntityPreview.DeferVisualRefresh = false;
 		_deferMeshTreeActivation = false;
 		_isBulkPopulating = false;
+		//Normally off again as the old scene's tables are cleared; a populate that threw before then must not leave it on
+		_sceneTeardown = false;
 
-		// Filters are often applied from OpenCAGE before the entity tree exists; refresh now that spawn finished.
-		RefreshRenderFilters(null);
-		RefreshCompositeFocus();
+		/* Whatever these throw, OpenCAGE still hears the populate finished: without it the populating marquee, and every
+		   focus hand-over held back while the viewer is busy, waited for good. */
+		try
+		{
+			// Filters are often applied from OpenCAGE before the entity tree exists; refresh now that spawn finished.
+			RefreshRenderFilters(null);
+			//Same for the scene geometry categories: a filter left on from the last session arrives
+			//before the meshes exist, so it has to be reapplied once they do.
+			RefreshSceneGeometryFilters();
+			RefreshCompositeFocus();
+			//The zone table is normally here well before the nodes its roots name are
+			RefreshZoneOverlay();
 
-		OnLoaded?.Invoke();
-		ViewerPopulateBridge.NotifyFinished();
-		Callable.From(HideLoading).CallDeferred();
-		UpdateLoadPipelineProcessing();
+			OnLoaded?.Invoke();
+		}
+		catch (Exception e)
+		{
+			ViewerLog.PrintErr("[Viewer] Finishing the populate failed: " + e);
+		}
+		finally
+		{
+			ViewerPopulateBridge.NotifyFinished();
+			Callable.From(HideLoading).CallDeferred();
+			UpdateLoadPipelineProcessing();
+		}
+	}
+
+	/* The scene being replaced, freed children first, answering OpenCAGE's sent messages as it goes. QueueFree left it to Godot at
+	   the end of the frame, in one go: a million nodes on TECH_Hub, 7 s after the populate had reported finished in which the
+	   viewer answered nothing - and OpenCAGE froze on any focus or activation change (a panel floated or slid out, the window
+	   brought forward). The new scene was not drawn until that free was over either way; it is now done first, under the
+	   loading screen, and the memory is back before the new scene takes its own. Each node's children are taken in one call:
+	   asking for the last child after every removal made Godot rebuild the parent's child cache each time. */
+	private static void FreeSceneAnsweringMessages(Node root)
+	{
+		System.Diagnostics.Stopwatch timer = System.Diagnostics.Stopwatch.StartNew();
+		int freed = 0;
+		Stack<(Node Node, bool Expanded)> stack = new Stack<(Node, bool)>();
+		stack.Push((root, false));
+		while (stack.Count > 0)
+		{
+			LevelViewerSentMessages.PumpIfDue();
+			(Node node, bool expanded) = stack.Pop();
+			if (node == null || !GodotObject.IsInstanceValid(node))
+				continue;
+
+			if (!expanded)
+			{
+				stack.Push((node, true));
+				Godot.Collections.Array<Node> children = node.GetChildren();
+				foreach (Node child in children)
+					stack.Push((child, false));
+				//Released now rather than left to the finalizer: one native array per node, a million on TECH_Hub
+				((Godot.Collections.Array)children)?.Dispose();
+				continue;
+			}
+
+			//Its children are gone; anything left (an internal child) goes with it
+			node.Free();
+			freed++;
+		}
+		if (timer.ElapsedMilliseconds > 500)
+			ViewerLog.Print("Freed the previous scene (" + freed + " nodes) in " + (timer.ElapsedMilliseconds / 1000.0).ToString("0.0") + " s");
+	}
+
+	/* Whether populating comp builds again the scene the user has on screen (by id: an import that replaced the composite
+	   has the same one back under a new object). Not while its own framing is still to come: that scene was never shown. */
+	private bool IsRebuildOfSceneOnScreen(Composite comp, out LevelViewerCamera camera)
+	{
+		camera = GetViewport()?.GetCamera3D() as LevelViewerCamera;
+		if (comp == null || _loadedComposite == null || _loadedComposite.shortGUID != comp.shortGUID)
+			return false;
+		if (_parentNode == null || !GodotObject.IsInstanceValid(_parentNode))
+			return false;
+		return camera == null || !camera.IsContentFramingPending;
+	}
+
+	/* What was hidden in the viewport (H) on the scene just built again, hidden again on the new one (null: not a rebuild
+	   that keeps the view) */
+	private void RestoreHidesAfterRebuild(List<NodePath> hides)
+	{
+		if (hides == null || !LevelViewerEntityHide.HasAny)
+			return;
+
+		if (LevelViewerEntityHide.Restore(_parentNode, hides) == 0)
+			return;
+
+		LevelViewerAliasHighlight.InvalidateCache();
+		LevelViewerProxyHighlight.InvalidateCache();
+		RefreshEntityHighlights(forceRebuild: true);
 	}
 
 	private static string GetPopulateDisplayLabel(Composite comp)
@@ -706,7 +1306,9 @@ public partial class AlienScene : Node3D
 		_contentGeneration++;
 		_compositeNodes.Clear();
 		_nodeEntities.Clear();
+		_nodeOwnerComposites.Clear();
 		_aliasParameterEntityByRenderTarget = null;
+		_aliasParameterDepthByRenderTarget = null;
 		_deferredPickOwners.Clear();
 		_bulkPopulatePreviews.Clear();
 		_bulkModelReferencePreviews.Clear();
@@ -714,25 +1316,66 @@ public partial class AlienScene : Node3D
 		_bulkPickableMeshes.Clear();
 		_modelRefRenderablesByEntityId = null;
 		ClearEntityNodeCache();
+		_sceneTeardown = true;
 		PreviewVisualUtility.CleanupAllFunctionEntityPreviews(this);
 		ClearSelectedEntity();
 		LevelViewerSelection.Clear();
+		//The tint is held per mesh, and every mesh it points at is about to be freed
+		LevelViewerZoneHighlight.Clear();
+		//So are the alias/proxy overlays. Rebuilding the composite on screen keeps their rebuild key, so left alone they
+		//kept the old meshes and the new scene got no tint
+		LevelViewerAliasHighlight.Clear();
+		LevelViewerProxyHighlight.Clear();
 		LevelViewerPick.ClearRegistry();
 		LevelViewerCompositeFocus.Clear();
 		CancelLargeSceneRenderPolicy();
 		ModelReferenceRenderSettings.ResetForLevelLoad();
-		ClearPopulateMaterialCaches();
-		ModelReferenceMaterialMapping.PrepareForLevelPopulate(_content.Level.Commands);
+		/* A preview batch keeps both from one composite to the next: the materials are keyed by the level's
+		   own and stay right whatever the root, and the mapping index is over the whole script (the batch
+		   builds it once, before its first populate). */
+		if (!_previewBatchPopulate)
+		{
+			ClearPopulateMaterialCaches();
+			ModelReferenceMaterialMapping.PrepareForLevelPopulate(_content.Level.Commands);
+		}
 
 		if (_parentNode != null && GodotObject.IsInstanceValid(_parentNode))
-			_parentNode.QueueFree();
+		{
+			if (_previewBatchPopulate)
+				_parentNode.QueueFree();
+			else
+				FreeSceneAnsweringMessages(_parentNode);
+		}
+		/* The old scene's meshes go with it. A bulk-spawned mesh has no TreeExited hook to take itself out
+		   (see SpawnRenderable), so until now they sat here as dead wrappers until the next level load, and
+		   every filter pass and mesh count walked them - a preview batch replaces the scene a thousand times. */
+		_modelReferenceMeshes.Clear();
+		_meshBindings.Clear();
+		_sceneTeardown = false;
 
 		_contentOrigin = Vector3.Zero;
 		_parentNode = new Node3D { Name = _levelName };
 		_parentNode.AddToGroup(LevelViewerView.ContentGroup);
 		AddChild(_parentNode);
 
-		ViewerLog.Print("Loading composite " + comp?.name + "...");
+		//Collision overlay lives beside the level content: its triangles are already in world space
+		if (_collisionOverlay != null && GodotObject.IsInstanceValid(_collisionOverlay))
+			_collisionOverlay.QueueFree();
+		_collisionOverlay = new CollisionMeshOverlay { Name = "CollisionMeshes", Visible = false };
+		_parentNode.AddChild(_collisionOverlay);
+		_collisionOverlay.Setup(this);
+
+		if (_stateInfoOverlay != null && GodotObject.IsInstanceValid(_stateInfoOverlay))
+			_stateInfoOverlay.QueueFree();
+		_stateInfoOverlay = new StateInfoOverlay { Name = "StateInfo", Visible = false };
+		_parentNode.AddChild(_stateInfoOverlay);
+		_stateInfoOverlay.Setup(_content);
+		//Never part of a composite's preview, and the nav mesh is not cheap to draw a thousand times
+		if (!_previewBatchPopulate)
+			ApplyStateInfoOverlays(_pendingNavMeshState, _pendingCoverState);
+
+		if (!_previewBatchPopulate)
+			ViewerLog.Print("Loading composite " + comp?.name + "...");
 		_loadedComposite = comp;
 
 		LevelViewerPopulateTree.Plan spawnPlan =
@@ -742,22 +1385,36 @@ public partial class AlienScene : Node3D
 			LevelViewerPopulatePrewarm.BuildModelReferenceCache(spawnPlan.ModelReferences, _content, spawnPlan);
 		_modelRefRenderablesByEntityId = modelRefCache.RenderablesByInstanceKey;
 		LevelViewerPopulatePrewarm.Plan prewarmPlan = modelRefCache.PrewarmPlan;
-		ViewerLog.Print(
-			"Population plan: "
-			+ prewarmPlan.MeshWriteIndices.Count + " meshes, "
-			+ prewarmPlan.Textures.Count + " textures, "
-			+ prewarmPlan.Materials.Count + " materials.");
+		AddSurfaceEffectTextures(spawnPlan, prewarmPlan);
+		if (!_previewBatchPopulate)
+		{
+			ViewerLog.Print(
+				"Population plan: "
+				+ prewarmPlan.MeshWriteIndices.Count + " meshes, "
+				+ prewarmPlan.Textures.Count + " textures, "
+				+ prewarmPlan.Materials.Count + " materials.");
+		}
+
+		//Under a preview batch the union of every composite's plan was restored and converted before the
+		//first populate, so this finds everything cached and reads no pak; kept for the odd entry it did not cover
+		RestoreReleasedSourceData(prewarmPlan);
 
 		LevelViewerPopulatePrewarm.Result prewarmResult = LevelViewerPopulatePrewarm.Execute(prewarmPlan, _content.Level);
 
 		FinalizePrewarmGodotResources(prewarmResult, prewarmPlan);
 
-		ViewerLog.Print("Spawn plan: " + spawnPlan.Commands.Count + " entities.");
+		if (!_previewBatchPopulate)
+			ViewerLog.Print("Spawn plan: " + spawnPlan.Commands.Count + " entities.");
 
-		LevelViewerRenderIdleThrottle.SetLoadActive(true);
+		/* CompletePopulate lets go of this, and a preview batch does not run it: the batch holds the
+		   frame rate up itself for its whole run, so its populates must not take it (a thousand takes
+		   with no release, and the viewer never idles again). */
+		if (!_previewBatchPopulate)
+			LevelViewerRenderIdleThrottle.SetLoadActive(true);
 		RegisterCompositeNode(comp, _parentNode);
 
-		ShowLoading("Spawning " + spawnPlan.Commands.Count + " entities...");
+		if (!_previewBatchPopulate)
+			ShowLoading("Spawning " + spawnPlan.Commands.Count + " entities...");
 		_nodeEntities.EnsureCapacity(spawnPlan.Commands.Count);
 		_parentNode.ProcessMode = Node.ProcessModeEnum.Disabled;
 		try
@@ -784,18 +1441,84 @@ public partial class AlienScene : Node3D
 		// Mesh jobs need alias wiring and instance mapping meta before material remaps resolve.
 		RebuildBulkMeshSpawnJobsFromPreviews();
 
-		ShowLoading("Spawning model-reference meshes...");
+		if (!_previewBatchPopulate)
+			ShowLoading("Spawning model-reference meshes...");
 		FinishBulkPopulateVisuals();
-		ViewerLog.Print("Spawned " + _modelReferenceMeshes.Count + " model-reference meshes.");
-
 		ModelReferenceRenderSettings.FinalizeLevelLoad(_modelReferenceMeshes.Count);
-		ReleaseCathodeBinarySourceData();
+
+		/* A preview batch stops here: it holds the binaries for its whole run and releases them once at
+		   the end, keeps the frame rate up itself, and distance culling would only hide the far end of a
+		   big composite in its preview. The memory line is one per level, not one per composite. */
+		if (_previewBatchPopulate)
+			return;
+
+		ViewerLog.Print("Spawned " + _modelReferenceMeshes.Count + " model-reference meshes.");
+		/* The forced collection is for big dead buffers: the paks a level load or a restore read whole, and the binaries let
+		   go of here. A switch to a composite whose meshes were all built already has neither, and paid two blocking full
+		   collections anyway - 0.5-0.8 s a populate with the viewer answering nothing, on TECH_Hub. */
+		long released = ReleaseCathodeBinarySourceData();
+		if (released >= ForcedCollectMinReleasedBytes || _restoreReadWholePak)
+			CollectReleasedSourceData();
+		_restoreReadWholePak = false;
 		ViewerLog.Print(
 			"Scene resources: "
 			+ _modelReferenceMeshes.Count + " mesh instances, "
 			+ _modelMeshesByWriteIndex.Count + " unique meshes, "
 			+ CachedTextureCount + " cached textures.");
+		LogMemoryBreakdown("after populate");
 		QueueLargeSceneRenderPolicyApply();
+	}
+
+	/// <summary>
+	/// Give the dead pak buffers back. The CathodeLib loaders read whole files into memory (LEVEL_TEXTURES alone
+	/// is 400 MB on a big level, LEVEL_MODELS 200 MB) and those buffers are garbage the moment parsing ends, but
+	/// they sit on the large object heap until a full collection happens to run - measured on SalvageMode2: two
+	/// 412 MB dead arrays still resident 45 s after populate, 0.8 GB of the process's 5.4 GB. A blocking,
+	/// compacting collection here, once, at the point the scene is built, returns them to the OS.
+	/// </summary>
+	private const long ForcedCollectMinReleasedBytes = 64L << 20;
+
+	//Set when a restore read a whole pak to get at a few entries: that buffer is big and dead by the time the populate ends
+	private bool _restoreReadWholePak;
+
+	private static void CollectReleasedSourceData()
+	{
+		System.Runtime.GCSettings.LargeObjectHeapCompactionMode = System.Runtime.GCLargeObjectHeapCompactionMode.CompactOnce;
+		GC.Collect();
+		GC.WaitForPendingFinalizers();
+		GC.Collect();
+	}
+
+	/// <summary>Where the process's memory is: managed heap, engine static allocations, and what the renderer holds.</summary>
+	public static void LogMemoryBreakdown(string when)
+	{
+		try
+		{
+			long managed = GC.GetTotalMemory(false);
+			ulong engineStatic = OS.GetStaticMemoryUsage();
+			ulong texture = RenderingServer.GetRenderingInfo(RenderingServer.RenderingInfo.TextureMemUsed);
+			ulong buffer = RenderingServer.GetRenderingInfo(RenderingServer.RenderingInfo.BufferMemUsed);
+			ulong video = RenderingServer.GetRenderingInfo(RenderingServer.RenderingInfo.VideoMemUsed);
+			double objects = Performance.GetMonitor(Performance.Monitor.ObjectCount);
+			double resources = Performance.GetMonitor(Performance.Monitor.ObjectResourceCount);
+			double nodes = Performance.GetMonitor(Performance.Monitor.ObjectNodeCount);
+			/* Nodes outside the tree and never freed: the usual shape of a leaked node, which "nodes" alone can't tell from the
+			   scene. Not the engine's orphan monitor, which only counts in debug builds (the viewer ships as a release one):
+			   every live node less those in the tree is the same number, in any build. */
+			SceneTree tree = Engine.GetMainLoop() as SceneTree;
+			double orphans = tree != null ? nodes - tree.GetNodeCount() : -1;
+			long privateBytes = System.Diagnostics.Process.GetCurrentProcess().PrivateMemorySize64;
+			string line = "Memory breakdown " + when + ": process private " + (privateBytes >> 20) + " MB; managed heap " + (managed >> 20)
+				+ " MB; engine static " + (engineStatic >> 20) + " MB; renderer textures " + (texture >> 20) + " MB, buffers " + (buffer >> 20)
+				+ " MB, video total " + (video >> 20) + " MB; objects " + (long)objects + " (resources " + (long)resources + ", nodes " + (long)nodes
+				+ ", orphan nodes " + (long)orphans + ").";
+			ViewerLog.Print(line);
+			GD.Print(line); //ViewerLog is off by default in the exported viewer; this one is worth having in the host's relay regardless
+		}
+		catch (Exception e)
+		{
+			ViewerLog.PrintErr("Memory breakdown failed: " + e.Message);
+		}
 	}
 
 	private int CachedTextureCount => _texturesLevelByIndex.Count + _texturesGlobalByIndex.Count;
@@ -813,6 +1536,7 @@ public partial class AlienScene : Node3D
 		{
 			for (int i = 0; i < _bulkMeshSpawnJobs.Count; i++)
 			{
+				LevelViewerSentMessages.PumpIfDue();
 				BulkMeshSpawnJob job = _bulkMeshSpawnJobs[i];
 				if (job.RenderTarget == null || !GodotObject.IsInstanceValid(job.RenderTarget))
 					continue;
@@ -836,6 +1560,39 @@ public partial class AlienScene : Node3D
 		{
 			_bulkMeshSpawning = false;
 			_deferBulkPickRegistration = false;
+			//Spent: kept, one per mesh (76k on SCI_AndroidLab), they held each render target until the next populate
+			_bulkMeshSpawnJobs.Clear();
+		}
+		ViewerLog.Print("Room cubes: " + _roomCubeMeshes + " reflecting meshes given their room's, " + _roomCubeMisses + " without one, " + _moverEmissiveMeshes
+			+ " glowing their own way (" + _roomCubeMaterials.Count + " material copies, " + (_roomCubeTicks * 1000 / System.Diagnostics.Stopwatch.Frequency) + " ms)");
+		_roomCubeMeshes = _roomCubeMisses = _moverEmissiveMeshes = 0;
+		_roomCubeTicks = 0;
+
+		/* The content goes to its focus point now, before the meshes just spawned are in the renderer's culling BVH (they
+		   join it when it next draws). Moved there by the camera's framing a frame later instead, every mesh in the level
+		   was taken out of that BVH and put back one at a time - DynamicBVH::update, 11-16 s with nothing answered after
+		   each SCI_AndroidLab populate (76k meshes). The framing then finds it done. */
+		if (!_previewBatchPopulate)
+		{
+			//Nothing here may stop the meshes being registered and shown below
+			try
+			{
+				//A rebuild of the scene on screen: back where it was, so nothing moves under the camera
+				if (_contentOriginToKeep is Vector3 keptOrigin)
+				{
+					_contentOrigin = keptOrigin;
+					_parentNode.Position = -keptOrigin;
+					LevelViewerPick.InvalidateAllPickBounds();
+				}
+				else
+				{
+					RecenterContentOrigin();
+				}
+			}
+			catch (Exception e)
+			{
+				ViewerLog.PrintErr("Could not centre the content on its focus point: " + e.Message);
+			}
 		}
 
 		RegisterBulkMeshPickables();
@@ -849,6 +1606,7 @@ public partial class AlienScene : Node3D
 	{
 		for (int i = 0; i < _bulkPickableMeshes.Count; i++)
 		{
+			LevelViewerSentMessages.PumpIfDue();
 			(MeshInstance3D mesh, Node3D owner) = _bulkPickableMeshes[i];
 			if (mesh == null || !GodotObject.IsInstanceValid(mesh))
 				continue;
@@ -871,20 +1629,91 @@ public partial class AlienScene : Node3D
 		_deferredPickOwners.Clear();
 	}
 
+	/* The meshes used to join a "model_reference_renderable" group here that nothing ever read. Godot keeps a
+	   group's members in a vector and scans it on every add and every tree exit, so 80k meshes cost O(n^2) twice:
+	   seconds here (TECH_Hub, no messages answered - OpenCAGE froze on any focus change) and more again when the
+	   scene was freed. _modelReferenceMeshes is the list of them.
+	   Bulk spawning leaves the wireframe out (SpawnRenderable), so with Render Wireframe on it is made here, once every
+	   mesh is in: nothing else made it, and every populate of a composite came back without one. Not for a preview
+	   batch's populates - a preview leaves the viewport's wireframe out, and the batch's restore makes it again. */
 	private void ActivateDeferredMeshes()
 	{
-		foreach (MeshInstance3D mesh in _modelReferenceMeshes.Keys)
+		bool makeWireframe = ModelReferenceRenderSettings.WireframeEnabled && !_previewBatchPopulate;
+		System.Diagnostics.Stopwatch wireframeTimer = makeWireframe ? System.Diagnostics.Stopwatch.StartNew() : null;
+		int wireframesMade = 0;
+		foreach (KeyValuePair<MeshInstance3D, Materials.Material> entry in _modelReferenceMeshes)
 		{
+			LevelViewerSentMessages.PumpIfDue();
+			MeshInstance3D mesh = entry.Key;
 			if (mesh == null || !GodotObject.IsInstanceValid(mesh))
 				continue;
 
-			if (!mesh.IsInGroup("model_reference_renderable"))
-				mesh.AddToGroup("model_reference_renderable");
-			mesh.Visible = true;
+			mesh.Visible = ModelReferencesShown;
 			MeshInstance3D overlay = FindWireframeOverlay(mesh);
+			if (overlay == null && makeWireframe)
+			{
+				UpdateWireframeOverlay(mesh, entry.Value);
+				overlay = FindWireframeOverlay(mesh);
+				if (overlay != null)
+					wireframesMade++;
+			}
 			if (overlay != null)
-				overlay.Visible = ModelReferenceRenderSettings.WireframeEnabled;
+				overlay.Visible = ModelReferencesShown && ModelReferenceRenderSettings.WireframeEnabled;
 		}
+
+		if (wireframesMade > 0)
+			ViewerLog.Print("[Viewer] Made " + wireframesMade + " wireframe overlay(s) in " + wireframeTimer.ElapsedMilliseconds + " ms.");
+	}
+
+	/// <summary>
+	/// World-space radius enclosing every model-reference mesh around a focus point. False when
+	/// nothing spawned. Small composites (pickups, single props) report sub-metre radii; the
+	/// default composite framing distance renders those as a few pixels, so the camera uses this
+	/// to move in close instead.
+	/// </summary>
+	public bool TryGetModelReferenceBoundsRadius(Vector3 worldFocusPoint, out float radius)
+	{
+		radius = 0f;
+		bool foundAny = false;
+		foreach (MeshInstance3D mesh in _modelReferenceMeshes.Keys)
+		{
+			if (mesh == null || !GodotObject.IsInstanceValid(mesh) || !mesh.IsInsideTree())
+				continue;
+
+			Aabb bounds = mesh.GlobalTransform * mesh.GetAabb();
+			float reach = worldFocusPoint.DistanceTo(bounds.GetCenter()) + bounds.Size.Length() * 0.5f;
+			if (reach > radius)
+				radius = reach;
+			foundAny = true;
+		}
+
+		return foundAny;
+	}
+
+	/// <summary>
+	/// World-space bounds of every model-reference mesh drawn now: the level's geometry, without preview icons, and
+	/// without what the render filters or H have hidden. What the Z key frames with nothing selected. False when nothing
+	/// is drawn.
+	/// </summary>
+	public bool TryGetVisibleGeometryBounds(out Aabb bounds)
+	{
+		bounds = new Aabb();
+		bool foundAny = false;
+		foreach (MeshInstance3D mesh in _modelReferenceMeshes.Keys)
+		{
+			if (mesh == null || !GodotObject.IsInstanceValid(mesh) || !mesh.IsVisibleInTree())
+				continue;
+
+			Aabb local = mesh.GetAabb();
+			if (local.Size.LengthSquared() <= 0.000001f)
+				continue;
+
+			Aabb global = mesh.GlobalTransform * local;
+			bounds = foundAny ? bounds.Merge(global) : global;
+			foundAny = true;
+		}
+
+		return foundAny;
 	}
 
 	/// <summary>Moves level root so the initial focus point sits near the origin for stable rendering.</summary>
@@ -897,10 +1726,17 @@ public partial class AlienScene : Node3D
 		if (!hasExplicitFocus)
 			return;
 
-		if (_contentOrigin.DistanceSquaredTo(focusPoint) < 0.25f)
+		/* The focus point is where it is on screen, with the content already moved by -_contentOrigin: in the content it is
+		   that plus the origin. Compared as it was (on screen against the origin), a scene already centred read as off by
+		   the whole origin and was moved back, and the next call moved it again - each move every mesh in the level. */
+		Vector3 contentFocusPoint = focusPoint + _contentOrigin;
+		if (_contentOrigin.DistanceSquaredTo(contentFocusPoint) < 0.25f)
 			return;
 
-		_contentOrigin = focusPoint;
+		//Worth a line: once the meshes are drawn, a move is every one of them taken out of the renderer's BVH and put back
+		ViewerLog.Print("Recentred the content by " + _contentOrigin.DistanceTo(contentFocusPoint).ToString("0.0") + " m ("
+			+ _modelReferenceMeshes.Count + " meshes).");
+		_contentOrigin = contentFocusPoint;
 		_parentNode.Position = -_contentOrigin;
 		LevelViewerPick.InvalidateAllPickBounds();
 	}
@@ -1006,6 +1842,47 @@ public partial class AlienScene : Node3D
 		return false;
 	}
 
+	/// <summary>
+	/// Raycast placement for entity creation mode: hit scene geometry (or fall back to a point in
+	/// front of the camera) and convert the world position into the active composite's local space
+	/// (the space of a root entity "position" parameter). Godot coordinates.
+	/// </summary>
+	public bool TryComputeCreatePlacement(Camera3D camera, Vector2 screenPosition, out Vector3 localPosition)
+	{
+		localPosition = Vector3.Zero;
+		if (camera == null || _parentNode == null || !GodotObject.IsInstanceValid(_parentNode))
+			return false;
+
+		Vector3 origin = camera.ProjectRayOrigin(screenPosition);
+		Vector3 direction = camera.ProjectRayNormal(screenPosition);
+		if (direction.LengthSquared() < 0.0001f)
+			return false;
+		direction = direction.Normalized();
+
+		const float fallbackDistance = 5f;
+		float distance = fallbackDistance;
+		LevelViewerPick.PickHit? hit = LevelViewerPick.PickClosest(
+			_parentNode, camera, screenPosition, _parentNode, _content.Level?.Commands);
+		if (hit.HasValue)
+			distance = hit.Value.Distance;
+
+		Vector3 worldPosition = origin + direction * distance;
+
+		Node3D parentNode = ResolveActiveCompositeParentNode();
+		if (parentNode == null || !GodotObject.IsInstanceValid(parentNode) || !parentNode.IsInsideTree())
+			return false;
+
+		localPosition = parentNode.GlobalTransform.AffineInverse() * worldPosition;
+
+		float gridSnap = LevelViewerTransformSnap.GridSize;
+		localPosition = new Vector3(
+			LevelViewerTransformSnap.SnapValue(localPosition.X, gridSnap),
+			LevelViewerTransformSnap.SnapValue(localPosition.Y, gridSnap),
+			LevelViewerTransformSnap.SnapValue(localPosition.Z, gridSnap));
+
+		return true;
+	}
+
 	private Node3D ResolveActiveCompositeParentNode()
 	{
 		if (_parentNode == null || !GodotObject.IsInstanceValid(_parentNode))
@@ -1051,16 +1928,27 @@ public partial class AlienScene : Node3D
 		return true;
 	}
 
+	/* One entry per node. The level's root composite is registered before the populate and again by
+	   the populate itself, both times for the same node, and everything that walks a composite's
+	   instances then did its work twice: an entity added after the load was spawned twice under the
+	   same parent, where Godot renames the colliding second copy to something like "@Node3D@29908" -
+	   and removal, which looks the node up by name, could never find that one again. It stayed in
+	   the viewport, still pickable, after the entity had gone from the level. */
 	private void RegisterCompositeNode(Composite composite, Node3D compositeNode)
 	{
 		if (composite == null || compositeNode == null)
 			return;
 
-		if (_compositeNodes.ContainsKey(composite.shortGUID))
-			_compositeNodes[composite.shortGUID].Add(compositeNode);
-		else
+		if (!_compositeNodes.TryGetValue(composite.shortGUID, out List<Node3D> compositeInstances))
+		{
 			_compositeNodes[composite.shortGUID] = new List<Node3D> { compositeNode };
+			return;
+		}
+
+		if (!compositeInstances.Contains(compositeNode))
+			compositeInstances.Add(compositeNode);
 	}
+
 
 	private void AddCompositeInstance(Composite composite, Node3D compositeNode, Entity parentEntity)
 	{
@@ -1076,10 +1964,18 @@ public partial class AlienScene : Node3D
 
 		if (!_isBulkPopulating)
 		{
-			foreach (Entity entity in composite.aliases)
-				AddEntity(composite, entity, compositeNode);
-			foreach (Entity entity in composite.proxies)
-				AddEntity(composite, entity, compositeNode);
+			_spawningPlacementAliases++;
+			try
+			{
+				foreach (Entity entity in composite.aliases)
+					AddEntity(composite, entity, compositeNode);
+				foreach (Entity entity in composite.proxies)
+					AddEntity(composite, entity, compositeNode);
+			}
+			finally
+			{
+				_spawningPlacementAliases--;
+			}
 		}
 	}
 
@@ -1125,6 +2021,33 @@ public partial class AlienScene : Node3D
 			_functionEntityPreviewsCacheDirty = true;
 	}
 
+
+	/// <summary>
+	/// True for an entity whose scene node would be empty and immovable: no position of its own, so
+	/// it sits exactly where its parent already is, nothing to draw, and no render filter that could
+	/// ever ask it to draw something. Two thirds of a level's entities are pure script logic like
+	/// this, and a node each cost several seconds and a few hundred megabytes on the larger levels.
+	/// Give one a position and it stops being skippable - ApplyEntityParameter spawns it then.
+	/// </summary>
+	private static bool ShouldSkipSceneNode(Entity entity, bool hasTransform)
+	{
+		if (hasTransform)
+			return false;
+
+		//Composite instances are the tree itself, and aliases and proxies stand in for entities
+		//elsewhere, so neither is ever skipped. Variables are not spawned in the first place.
+		if (entity is not FunctionEntity function || !function.function.IsFunctionType)
+			return false;
+
+		FunctionType functionType = function.function.AsFunctionType;
+		if (functionType == FunctionType.ModelReference)
+			return false;
+
+		//Anything a render filter can turn into an icon or a shape keeps its node, whether or not
+		//that filter happens to be on right now.
+		return !RenderFilterDefinitions.IsSupported(functionType);
+	}
+
 	private Node3D SpawnEntityFromPopulateCommand(
 		Composite composite,
 		Entity entity,
@@ -1142,25 +2065,36 @@ public partial class AlienScene : Node3D
 		LevelViewerPopulateTree.Command? planCommand,
 		ref bool addedPreview)
 	{
+		//Every spawn, populate or incremental, goes through here: long runs of them still answer OpenCAGE (see LevelViewerSentMessages)
+		LevelViewerSentMessages.PumpIfDue();
 		if (_isBulkPopulating && !_wiringCompositeLinks
 			&& (entity.variant == EntityVariant.ALIAS || entity.variant == EntityVariant.PROXY))
 		{
 			return null;
 		}
 
+		//Command is a wide struct, so read it out once rather than through planCommand.Value.
+		bool hasPlan = planCommand.HasValue;
+		LevelViewerPopulateTree.Command plan = hasPlan ? planCommand.Value : default;
+
 		Vector3 position;
 		Vector3 rotation;
-		if (planCommand.HasValue && planCommand.Value.HasTransform)
+		bool hasTransform;
+		if (hasPlan && plan.HasTransform)
 		{
-			position = planCommand.Value.Position;
-			rotation = planCommand.Value.RotationDegrees;
+			position = plan.Position;
+			rotation = plan.RotationDegrees;
+			hasTransform = true;
 		}
 		else
 		{
-			GetEntityTransform(entity, out position, out rotation);
+			hasTransform = GetEntityTransform(entity, out position, out rotation);
 		}
 
-		string nodeName = planCommand.HasValue ? planCommand.Value.NodeName : entity.shortGUID.AsUInt32.ToString();
+		if (ShouldSkipSceneNode(entity, hasTransform))
+			return null;
+
+		StringName nodeName = GetEntityNodeName(entity.shortGUID.AsUInt32);
 
 		Node3D entityNode;
 		switch (entity.variant)
@@ -1177,7 +2111,7 @@ public partial class AlienScene : Node3D
 		parentNode.AddChild(entityNode);
 		entityNode.Position = position;
 		entityNode.RotationDegrees = rotation;
-		entityNode.SetMeta(OwnerCompositeMetaKey, composite.shortGUID.AsUInt32);
+		_nodeOwnerComposites[entityNode] = composite.shortGUID.AsUInt32;
 		_nodeEntities.Add(entityNode, entity);
 		TrackEntityNode(composite.shortGUID, entity.shortGUID, entityNode);
 
@@ -1192,16 +2126,15 @@ public partial class AlienScene : Node3D
 				FunctionEntity function = (FunctionEntity)entity;
 				if (!function.function.IsFunctionType)
 				{
+					//One the level leaves out keeps its node but is no instance of its composite: nothing is spawned into it
 					Composite compositeNext = _content.Level.Commands.GetComposite(function.function);
-					if (compositeNext != null)
+					if (compositeNext != null && !IsInstanceDeleted(composite, function, parentNode))
 						RegisterCompositeNode(compositeNext, entityNode);
 				}
 				else
 				{
 					bool geometryOnly = _isBulkPopulating && !_wiringCompositeLinks;
-					uint mappingScopeInstanceEntityId = planCommand.HasValue
-						? planCommand.Value.MappingScopeInstanceEntityId
-						: 0;
+					uint mappingScopeInstanceEntityId = hasPlan ? plan.MappingScopeInstanceEntityId : 0;
 					if (FunctionEntityPreviewSetup.TryAddPreview(
 						this,
 						function,
@@ -1214,7 +2147,13 @@ public partial class AlienScene : Node3D
 						addedPreview = true;
 						if (_isBulkPopulating)
 							TrackBulkPopulatePreview(entityNode, function);
+						else
+							TrackMaterializedFunctionEntityPreview(entityNode);
 					}
+
+					//What a surface effect paints on the level is drawn whatever its filter says (its preview is the filter's box)
+					SurfaceEffectOverlay.TryAdd(this, function, composite, entityNode);
+					WaterSurface.TryAdd(this, function, entityNode);
 
 					if (!_isBulkPopulating)
 						LevelViewerPick.RegisterPickableSubtree(entityNode);
@@ -1275,6 +2214,9 @@ public partial class AlienScene : Node3D
 							LevelViewerProxyHighlight.InvalidateCache();
 						}
 					}
+					//Outside a populate what it points at was drawn before it was here
+					if (!_isBulkPopulating)
+						RedrawAliasTarget(alias, aliasedNode, removed: false);
 				}
 
 				break;
@@ -1302,16 +2244,56 @@ public partial class AlienScene : Node3D
 		}
 	}
 
+	/* An alias spawned outside a populate points at something drawn before it was there, without what it sets on it. A
+	   populate wires every alias before it makes a single mesh (RebuildBulkMeshSpawnJobsFromPreviews), but an add spawns in
+	   tree order: a placement's ModelReferences, all the way down, before the aliases of the composites around them, and an
+	   alias sent on its own after the placement it points into. Undoing a composite delete put Torrens' doors back with every
+	   keypad screen in its own material, not the one KeyPadHacking's aliases give it, and a bunk bed in its own colour, until
+	   a rebuild drew them right. An alias taken away left what it had set behind, the same way. What it points at is drawn
+	   again, as an edit of the alias draws it (RefreshModelReferenceOverridesForParameterChange,
+	   RefreshMaterialMappingForParameterChange). */
+	private void RedrawAliasTarget(AliasEntity alias, Node3D pointedNode, bool removed)
+	{
+		if (alias == null || pointedNode == null || !GodotObject.IsInstanceValid(pointedNode) || pointedNode.IsQueuedForDeletion()
+			|| !_nodeEntities.TryGetValue(pointedNode, out Entity pointedEntity) || pointedEntity is not FunctionEntity pointedFunction)
+			return;
+
+		if (ModelReferenceMaterialMapping.IsModelReferenceEntity(pointedFunction))
+		{
+			//Its material and colour overrides, read through the render-target index - which the alias is in (or out of) by now
+			if (ModelReferenceMaterialOverrides.HasModelReferenceOverrideParameter(alias))
+				RefreshFunctionEntityPreviews(pointedNode);
+			return;
+		}
+
+		/* A mapping on a placement re-skins the ModelReferences directly in it. One spawned along with the placement it points
+		   into needs nothing: those resolved through the alias index as they spawned, and it is in there (see
+		   ModelReferenceMaterialMapping.ForgetAliasIndexIfItMaps) - redrawing them for each such alias would draw them twice. */
+		if ((removed || _spawningPlacementAliases == 0)
+			&& ModelReferenceMaterialMapping.TryGetMappingParameter(alias) != null
+			&& ModelReferenceMaterialMapping.IsCompositeInstanceEntity(pointedFunction, _content.Level.Commands))
+		{
+			if (removed)
+				ModelReferenceMaterialMapping.ClearAliasInstanceMappingMeta(pointedNode);
+			RefreshDirectModelReferencesInCompositeInstance(pointedNode);
+		}
+	}
+
+	//Non-zero while a placement's own aliases and proxies are spawned along with it (AddCompositeInstance)
+	private int _spawningPlacementAliases;
+
 	public void RemoveComposite(ShortGuid composite)
 	{
 		if (_compositeNodes.ContainsKey(composite))
 		{
-			foreach (Node3D compositeInstance in _compositeNodes[composite])
+			//Snapshot: untracking an instance takes it out of this very list
+			foreach (Node3D compositeInstance in _compositeNodes[composite].ToArray())
 			{
 				if (compositeInstance != null && GodotObject.IsInstanceValid(compositeInstance))
 				{
-					compositeInstance.QueueFree();
-					_nodeEntities.Remove(compositeInstance);
+					UntrackFunctionEntityPreviews(compositeInstance);
+					UntrackEntityNodeTree(compositeInstance);
+					FreeReleasingName(compositeInstance);
 				}
 			}
 			_compositeNodes.Remove(composite);
@@ -1319,20 +2301,291 @@ public partial class AlienScene : Node3D
 		}
 	}
 
+	/// <summary>
+	/// Frees a node that is looked up by name (an entity's node, a wireframe overlay), which gives up its name first. A queued
+	/// node stays a child until the end of the frame, and an entity sent again in the same tick - an edit that deletes and
+	/// re-sends it, as every MCP edit and refactor does, or an undo of one - was given an "@id@n" name by Godot. Every lookup
+	/// by name missed it from then on: a selection fell back to the first copy of the entity, in whatever placement that was
+	/// (highlighted outside the focus, while the copy edited stayed plain), and the focus anchor and the hidden-node restore
+	/// found nothing.
+	/// </summary>
+	private static void FreeReleasingName(Node3D node)
+	{
+		//Alive across the native call, as LevelViewerPick explains for StringName temporaries
+		using (StringName freedName = new StringName("freed_" + node.GetInstanceId()))
+			node.Name = freedName;
+		node.QueueFree();
+	}
+
 	public void AddEntity(ShortGuid composite, ShortGuid entity)
 	{
 		if (_compositeNodes.ContainsKey(composite))
 		{
-			foreach (Node3D compositeInstance in _compositeNodes[composite])
+			Composite c = _content.Level.Commands.Entries.FirstOrDefault(o => o.shortGUID == composite);
+			Entity e = c?.GetEntityByID(entity);
+			if (c == null || e == null)
+				return;
+
+			PrewarmForIncrementalSpawn(c, e);
+
+			/* Not under an instance that already has it. Every packet of a batch goes into the script's copy before any of
+			   the batch is spawned, so an instance of this composite spawned earlier in the same batch (an undo putting a
+			   composite instance back, then the entities it gained) was built with this entity in it already - and
+			   spawning it again drew it twice, whole subtree and all. */
+			HashSet<Node> alreadyUnder = null;
+			if (TryGetCachedEntityNodes(composite, entity, out List<Node3D> existing))
 			{
-				if (compositeInstance != null && GodotObject.IsInstanceValid(compositeInstance))
-				{
-					Composite c = _content.Level.Commands.Entries.FirstOrDefault(o => o.shortGUID == composite);
-					Entity e = c?.GetEntityByID(entity);
-					if (c != null && e != null)
-						AddEntity(c, e, compositeInstance);
-				}
+				alreadyUnder = new HashSet<Node>();
+				foreach (Node3D node in existing)
+					if (node != null && GodotObject.IsInstanceValid(node))
+						alreadyUnder.Add(node.GetParent());
 			}
+			foreach (Node3D compositeInstance in _compositeNodes[composite].ToArray())
+			{
+				if (compositeInstance != null && GodotObject.IsInstanceValid(compositeInstance)
+					&& (alreadyUnder == null || !alreadyUnder.Contains(compositeInstance)))
+					AddEntity(c, e, compositeInstance);
+			}
+
+			//A new composite instance may bring a composite the focus scope has never seen; the
+			//pick list is built from that scope, so it is worked out again before the next pick
+			if (e is FunctionEntity function && !function.function.IsFunctionType)
+			{
+				LevelViewerCompositeFocus.InvalidateScopeCache();
+				LevelViewerPick.InvalidateScopedPickables();
+			}
+
+			//Spawned into every placement of the composite: the greyed-out placements get it greyed out too
+			if (TryGetCachedEntityNodes(composite, entity, out List<Node3D> spawned))
+			{
+				foreach (Node3D node in spawned.ToArray())
+					ReapplyCompositeFocusTo(node);
+			}
+		}
+	}
+
+	/// <summary>
+	/// Whether spawning these adds one at a time would put back so much of what is on screen that rebuilding the composite
+	/// is quicker. Measured on HAB_ShoppingCentre: undoing a Create Composite that had taken in the environment instance
+	/// spawned it back entity by entity in 26-33 s, where a populate of the whole level takes 9-12 s (it plans, prewarms and
+	/// spawns in bulk) - and shows OpenCAGE the loading screen and progress while it does.
+	/// </summary>
+	public bool IsIncrementalSpawnTooBig(IEnumerable<(ShortGuid composite, ShortGuid entity)> adds)
+	{
+		if (_loadedComposite == null || _content?.Level?.Commands == null || _loadStep != LoadPipelineStep.None)
+			return false;
+		//Nothing spawned into a preview the batch is about to replace (see RebuildLoadedComposite)
+		if (PreviewBatchHasScene)
+			return true;
+
+		Dictionary<ShortGuid, Composite> composites = new Dictionary<ShortGuid, Composite>();
+		foreach (Composite composite in _content.Level.Commands.Entries)
+			if (composite != null)
+				composites[composite.shortGUID] = composite;
+		Dictionary<Composite, long> memo = new Dictionary<Composite, long>();
+
+		long adding = 0;
+		foreach ((ShortGuid compositeId, ShortGuid entityId) in adds)
+		{
+			if (!_compositeNodes.TryGetValue(compositeId, out List<Node3D> instances) || instances.Count == 0)
+				continue;
+			if (!composites.TryGetValue(compositeId, out Composite owner)
+				|| !(owner.GetEntityByID(entityId) is FunctionEntity function) || function.function.IsFunctionType)
+				continue;
+			composites.TryGetValue(function.function, out Composite instanced);
+			adding += (1 + CountSubtreeFunctions(instanced, composites, memo, 0)) * instances.Count;
+		}
+		if (adding < MinRebuildInsteadOfSpawn)
+			return false;
+		long onScreen = CountSubtreeFunctions(_loadedComposite, composites, memo, 0);
+		return adding * 3 > onScreen;
+	}
+
+	/// <summary>An entity of a composite on screen that instances another composite: spawning it spawns all of that one.</summary>
+	public bool IsCompositeInstanceEntity(ShortGuid composite, ShortGuid entity)
+	{
+		if (!_compositeNodes.ContainsKey(composite) || _content?.Level?.Commands == null)
+			return false;
+		Composite owner = _content.Level.Commands.GetComposite(composite);
+		return owner?.GetEntityByID(entity) is FunctionEntity function && !function.function.IsFunctionType;
+	}
+
+	//Below this many functions the entity-by-entity spawn is quick enough whatever share of the scene it is
+	private const long MinRebuildInsteadOfSpawn = 2000;
+
+	private static long CountSubtreeFunctions(Composite composite, Dictionary<ShortGuid, Composite> composites, Dictionary<Composite, long> memo, int depth)
+	{
+		if (composite == null || depth > 64)
+			return 0;
+		if (memo.TryGetValue(composite, out long count))
+			return count;
+		memo[composite] = 0; //a composite that reaches itself counts once
+		count = composite.functions.Count;
+		foreach (FunctionEntity function in composite.functions)
+			if (!function.function.IsFunctionType && composites.TryGetValue(function.function, out Composite instanced))
+				count += CountSubtreeFunctions(instanced, composites, memo, depth + 1);
+		memo[composite] = count;
+		return count;
+	}
+
+	/// <summary>
+	/// An entity spawned after the level's populate can reference models and textures nothing has
+	/// parsed yet: ReleaseCathodeBinarySourceData frees every submesh and texture binary once a
+	/// populate has built its Godot resources, and only a composite switch restored them. A
+	/// ModelReference added for a model the level carries but never displayed then reached
+	/// GetModel with no data and no cached mesh, and silently drew nothing until OpenCAGE was
+	/// restarted (issue #636). This runs the restore / convert / cache pass a populate runs, for
+	/// just what this entity (or the composite it instances) needs, and only when something is
+	/// missing from the caches - the common case of a model already on screen costs a lookup.
+	/// </summary>
+	private void PrewarmForIncrementalSpawn(Composite composite, Entity entity)
+	{
+		if (_content?.Level == null || composite == null || !(entity is FunctionEntity function))
+			return;
+
+		LevelViewerPopulatePrewarm.Plan plan;
+		if (function.function.IsFunctionType)
+		{
+			if (function.function.AsFunctionType != FunctionType.ModelReference)
+				return;
+			plan = new LevelViewerPopulatePrewarm.Plan();
+			LevelViewerPopulatePrewarm.CollectModelReference(function, _content, plan);
+		}
+		else
+		{
+			//As this instance sets its composite's variables: a light probe with Delete unticked needs its mirror ball's model
+			plan = BuildCompositePrewarmPlan(_content.Level.Commands.GetComposite(function.function), function);
+			if (plan == null)
+				return;
+		}
+
+		PrewarmPlanIfMissing(plan, "entity " + entity.shortGUID.AsUInt32 + " spawned after populate");
+	}
+
+	/// <summary>
+	/// What a composite's contents, all the way down, need converting - as a populate of it would plan
+	/// it, or as <paramref name="instance"/> of it would spawn them. Null when there is no composite.
+	/// </summary>
+	private LevelViewerPopulatePrewarm.Plan BuildCompositePrewarmPlan(Composite composite, FunctionEntity instance = null)
+	{
+		if (_content?.Level == null || composite == null)
+			return null;
+
+		LevelViewerPopulateTree.Plan spawnPlan =
+			LevelViewerPopulateTree.Collect(composite, _content, deferAliasProxy: true, includeVariables: false, rootInstance: instance);
+		LevelViewerPopulatePrewarm.Plan plan = LevelViewerPopulatePrewarm.BuildModelReferenceCache(spawnPlan.ModelReferences, _content, spawnPlan).PrewarmPlan;
+		AddSurfaceEffectTextures(spawnPlan, plan);
+		return plan;
+	}
+
+	/* The textures the populate's surface effects paint with (SurfaceEffectOverlay) and its water ripples and shimmers with
+	   (WaterSurface, WaterCaustics), into its plan with the models': the
+	   source binaries are let go of once the plan is converted, before the entities are, and one asked for after that came
+	   back empty - the airport's frost drew as flat white. */
+	private void AddSurfaceEffectTextures(LevelViewerPopulateTree.Plan spawnPlan, LevelViewerPopulatePrewarm.Plan plan)
+	{
+		if (spawnPlan?.Commands == null || plan == null || _content?.Level == null)
+			return;
+
+		HashSet<string> seen = null;
+		List<string> paths = new List<string>();
+		for (int i = 0; i < spawnPlan.Commands.Count; i++)
+		{
+			if (spawnPlan.Commands[i].Entity is not FunctionEntity function)
+				continue;
+			paths.Clear();
+			if (SurfaceEffectOverlay.IsSurfaceEffect(function))
+				paths.Add((function.GetParameter("TEXTURE_MAP")?.content as cString)?.value);
+			//And the water's ripples and caustics (WaterSurface), the caustics' a volume built while the binaries are held
+			else if (WaterSurface.IsWater(function))
+			{
+				paths.AddRange(WaterSurface.TexturePaths(function));
+				string caustics = (function.GetParameter("CAUSTIC_TEXTURE")?.content as cString)?.value;
+				paths.Add(caustics);
+				if (!string.IsNullOrEmpty(caustics))
+					_pendingVolumePaths.Add(caustics);
+			}
+			foreach (string path in paths)
+				AddEntityTexture(path, plan, ref seen);
+		}
+	}
+
+	private void AddEntityTexture(string path, LevelViewerPopulatePrewarm.Plan plan, ref HashSet<string> seen)
+	{
+		if (string.IsNullOrEmpty(path) || !(seen ??= new HashSet<string>(StringComparer.OrdinalIgnoreCase)).Add(path))
+			return;
+
+		TexturePtr.Source source = TexturePtr.Source.LEVEL;
+		Textures.TEX4 tex = _content.Level.Textures?.GetEnvironmentMapByPath(path);
+		if (tex == null)
+		{
+			source = TexturePtr.Source.GLOBAL;
+			tex = LevelContent.Global?.Textures?.GetEnvironmentMapByPath(path);
+		}
+		if (tex == null)
+			return;
+		plan.Textures.Add(tex);
+		plan.TextureLocations[tex] = source;
+	}
+
+	private bool IsPlanMeshCached(int writeIndex)
+	{
+		return _modelMeshesByWriteIndex.ContainsKey(writeIndex);
+	}
+
+	private bool IsPlanTextureCached(Textures.TEX4 tex4, LevelViewerPopulatePrewarm.Plan plan)
+	{
+		TexturePtr.Source location = plan.TextureLocations.TryGetValue(tex4, out TexturePtr.Source stored)
+			? stored
+			: TexturePtr.Source.LEVEL;
+		int writeIndex = GetTextureWriteIndex(tex4, location);
+		return writeIndex >= 0 && TryGetCachedTexture(location, writeIndex, out _);
+	}
+
+	/// <summary>
+	/// Restore, convert and cache whatever in the plan the caches do not hold yet. The common case of
+	/// everything already on screen costs a lookup; otherwise the restore re-reads a whole pak to get
+	/// at a few entries, which is why a caller with several composites to spawn merges their plans
+	/// first (the composite previews).
+	/// </summary>
+	/// <returns>Whether anything had to be converted.</returns>
+	private bool PrewarmPlanIfMissing(LevelViewerPopulatePrewarm.Plan plan, string what)
+	{
+		if (plan == null || _content?.Level == null)
+			return false;
+
+		bool meshesCached = plan.MeshWriteIndices.All(IsPlanMeshCached);
+		bool texturesCached = plan.Textures.All(tex4 => IsPlanTextureCached(tex4, plan));
+		if (meshesCached && texturesCached)
+			return false;
+
+		RestoreReleasedSourceData(plan);
+		LevelViewerPopulatePrewarm.Result result = LevelViewerPopulatePrewarm.Execute(plan, _content.Level);
+		FinalizePrewarmGodotResources(result, plan);
+		if (_restoreReadWholePak)
+			CollectReleasedSourceData(); //the restore re-read a whole pak to get at a few entries
+		_restoreReadWholePak = false;
+		ViewerLog.Print("Prewarmed " + plan.MeshWriteIndices.Count + " mesh(es) and " + plan.Textures.Count
+			+ " texture(s) for " + what + ".");
+		return true;
+	}
+
+	/// <summary>Spawns an entity under every instance of its composite that is in the scene.</summary>
+	private void SpawnEntityIntoAllCompositeInstances(Composite composite, Entity entity)
+	{
+		List<Node3D> compositeInstances;
+		if (composite == null || entity == null || !_compositeNodes.TryGetValue(composite.shortGUID, out compositeInstances))
+			return;
+
+		PrewarmForIncrementalSpawn(composite, entity);
+
+		// AddEntity can add to _compositeNodes when the entity is itself a composite instance.
+		Node3D[] snapshot = compositeInstances.ToArray();
+		for (int i = 0; i < snapshot.Length; i++)
+		{
+			Node3D compositeInstance = snapshot[i];
+			if (compositeInstance != null && GodotObject.IsInstanceValid(compositeInstance))
+				AddEntity(composite, entity, compositeInstance);
 		}
 	}
 
@@ -1345,9 +2598,70 @@ public partial class AlienScene : Node3D
 		if (entity is FunctionEntity function && !function.function.IsFunctionType)
 		{
 			Composite compositeNext = _content.Level.Commands.GetComposite(function.function);
-			if (compositeNext != null)
+			if (compositeNext != null && !IsInstanceDeleted(composite, function, parentNode))
 				AddCompositeInstance(compositeNext, entityNode, function);
 		}
+	}
+
+	/// <summary>
+	/// Whether the level leaves a composite instance's contents out, as a populate does (LevelViewerPopulateTree.IsDeleted):
+	/// deleted itself, or through a variable of its composite that the composite's own instance - the entity of the node it
+	/// is spawned under - sets.
+	/// </summary>
+	private bool IsInstanceDeleted(Composite composite, FunctionEntity instance, Node3D parentNode)
+	{
+		FunctionEntity owner = parentNode != null && _nodeEntities.TryGetValue(parentNode, out Entity parentEntity) ? parentEntity as FunctionEntity : null;
+		return LevelViewerPopulateTree.IsDeleted(instance, composite, owner);
+	}
+
+	/* A bool edit that may change whether the level leaves a composite instance out (IsInstanceDeleted): the instance's own
+	   deleted, a variable of its composite its deleted is wired to, or the parameter of an instance of that composite that sets
+	   the variable - a light probe's Delete, for its mirror ball. Those instances are sent again as the editor sends an edited
+	   entity (removed, then added, which asks IsInstanceDeleted afresh), after the edit's packet rather than inside it. */
+	private static readonly ShortGuid DeletedParam = ShortGuidUtils.Generate("deleted");
+
+	private void RespawnInstancesDeletedBy(Composite composite, Entity edited, ShortGuid param)
+	{
+		if (composite == null || edited == null || _content?.Level?.Commands == null)
+			return;
+
+		List<(ShortGuid Composite, ShortGuid Instance)> respawn = null;
+		void Add(Composite owner, FunctionEntity instance) => (respawn ??= new List<(ShortGuid, ShortGuid)>()).Add((owner.shortGUID, instance.shortGUID));
+		static bool IsInstance(FunctionEntity function) => function != null && !function.function.IsFunctionType;
+
+		if (param == DeletedParam && edited is FunctionEntity own && IsInstance(own))
+			Add(composite, own);
+		if (edited is VariableEntity variable)
+		{
+			foreach (FunctionEntity function in composite.functions)
+			{
+				if (IsInstance(function) && function.childLinks.Exists(l => l.thisParamID == DeletedParam && l.linkedEntityID == variable.shortGUID))
+					Add(composite, function);
+			}
+		}
+		if (edited is FunctionEntity placement && IsInstance(placement) && _content.Level.Commands.GetComposite(placement.function) is Composite inner)
+		{
+			foreach (FunctionEntity function in inner.functions)
+			{
+				if (IsInstance(function) && function.childLinks.Exists(l => l.thisParamID == DeletedParam && l.linkedParamID == param
+					&& inner.GetEntityByID(l.linkedEntityID) is VariableEntity))
+					Add(inner, function);
+			}
+		}
+		if (respawn == null)
+			return;
+
+		int generation = _contentGeneration;
+		Callable.From(() =>
+		{
+			if (generation != _contentGeneration)
+				return;
+			foreach ((ShortGuid owner, ShortGuid instance) in respawn)
+			{
+				RemoveEntity(owner, instance, refreshHighlights: false, logEach: false);
+				AddEntity(owner, instance);
+			}
+		}).CallDeferred();
 	}
 
 	public bool TryPickSelectionTarget(Camera3D camera, Vector2 screenPosition, out LevelViewerPick.SelectionTarget target)
@@ -1596,8 +2910,78 @@ public partial class AlienScene : Node3D
 
 	public void RefreshEntityHighlights(bool forceRebuild = true)
 	{
-		RefreshProxyHighlights(forceRebuild);
-		RefreshAliasHighlights(forceRebuild);
+		if (_previewOverlaysStoodDown)
+			return;
+
+		try
+		{
+			RefreshProxyHighlights(forceRebuild);
+			RefreshAliasHighlights(forceRebuild);
+		}
+		finally
+		{
+			/* Zones ride the same signal. Everything that raises this has changed which meshes exist -
+			   an entity added or removed, or a resource sync respawning every model reference that showed
+			   an edited material - and a mesh that has just been rebuilt is drawn in its own material
+			   again, not its zone's. The rebuild reconciles, so the meshes that did not change cost
+			   nothing. (Asked for even when the overlays above fail: the new meshes need colouring either way.) */
+			RefreshZoneOverlayDeferred();
+		}
+	}
+
+	/// <summary>Bring the zone colouring up to date, or take it off. Cheap when nothing has changed.</summary>
+	public void RefreshZoneOverlay()
+	{
+		//Half a scene is not worth colouring; CompletePopulate calls this again once it is all there
+		if (_isBulkPopulating)
+			return;
+		//Stood down for a preview batch, and put back by it (either branch here would colour a preview)
+		if (_previewOverlaysStoodDown)
+			return;
+
+		if (!_content.Loaded || !PreviewVisibilitySettings.ShowZones)
+		{
+			/* The grey-out stood down while zones had the level; it can have it back now they are off.
+			   It stood down whether or not anything got coloured (a level with no zones tints nothing),
+			   so the focus itself is asked whether it is still waiting to come back. */
+			bool wasColoured = LevelViewerZoneHighlight.HasAny;
+			LevelViewerZoneHighlight.Clear();
+			if (wasColoured || LevelViewerCompositeFocus.DimmingStoodDown)
+				RefreshCompositeFocus();
+
+			/* The alias and proxy overlays stood down while zones had the level (their Rebuild gates
+			   on ShowZones); this brings them back. Their rebuild keys carry the zones state, so it is
+			   a rebuild the first time through and nothing after that. */
+			RefreshProxyHighlights(forceRebuild: false);
+			RefreshAliasHighlights(forceRebuild: false);
+			LevelViewerSelection.ReapplyIfSelectionActive();
+			return;
+		}
+
+		/* Hand the level over before colouring it: with zones on this is the cheap path through
+		   LevelViewerCompositeFocus.Refresh, which gives every dimmed mesh its own material back so
+		   what gets saved underneath the zone colour is that and not a flat grey. */
+		RefreshCompositeFocus();
+
+		/* The alias and proxy overlays come off before the level is coloured: flat zone colour with
+		   orange or blue laid over it reads as more colour, not as a highlight. The selection keeps
+		   its green - it is drawn on the entity's own materials, which the tint hands back. */
+		RefreshProxyHighlights(forceRebuild: false);
+		RefreshAliasHighlights(forceRebuild: false);
+
+		LevelViewerZoneHighlight.Rebuild(this);
+		LevelViewerSelection.ReapplyIfSelectionActive();
+	}
+
+	/// <summary>
+	/// One of the viewport's own overlays that live inside the level's tree - the collision filter, the navmesh and cover
+	/// sheets, a selected light's range - and are no part of the level itself. Reference tests only: asked of every node.
+	/// </summary>
+	internal bool IsViewportOverlay(Node node)
+	{
+		return (_collisionOverlay != null && ReferenceEquals(node, _collisionOverlay))
+			|| (_stateInfoOverlay != null && ReferenceEquals(node, _stateInfoOverlay))
+			|| LevelViewerLightRadius.IsVisualRoot(node);
 	}
 
 	public void RefreshProxyHighlights(bool forceRebuild = true)
@@ -1620,6 +3004,10 @@ public partial class AlienScene : Node3D
 
 	public void RefreshCompositeFocus()
 	{
+		//Stood down for a preview batch (the grey-out would be in the previews); the batch puts it back
+		if (_previewOverlaysStoodDown)
+			return;
+
 		if (_parentNode == null || !GodotObject.IsInstanceValid(_parentNode) || !_content.Loaded)
 		{
 			LevelViewerCompositeFocus.Clear();
@@ -1635,7 +3023,8 @@ public partial class AlienScene : Node3D
 				_parentNode,
 				_content.Level.Commands,
 				focusAnchor,
-				_nodeEntities);
+				_nodeEntities,
+				_loadedComposite?.shortGUID.AsUInt32 ?? 0);
 			RefreshProxyHighlights(forceRebuild: false);
 			RefreshAliasHighlights(forceRebuild: false);
 		}
@@ -1645,11 +3034,68 @@ public partial class AlienScene : Node3D
 		}
 	}
 
-	public void SelectEntity(List<uint> entityPath, List<uint> compositePath, bool entitySelected)
+	/// <summary>
+	/// The focus pass leaves whatever is selected alone (LevelViewerSelection.IsUnderSelection), and on a step into another
+	/// placement it runs BEFORE the new selection is applied - so what was selected in the placement being left was never
+	/// greyed, and stayed bright once the selection moved off it (with a composite instance holding the whole level
+	/// selected, nothing at all greyed). What a pass passed over is judged now that it is no longer selected.
+	/// </summary>
+	private void ReapplyCompositeFocusLeftBySelection()
+	{
+		//A populate applies the whole focus when it ends; a preview batch has it stood down and puts it back itself
+		if (_isBulkPopulating || _previewOverlaysStoodDown || !_content.Loaded)
+			return;
+
+		try
+		{
+			LevelViewerCompositeFocus.ReapplyToOwnersLeftBySelection(_content.Level.Commands);
+		}
+		catch (System.Exception ex)
+		{
+			ViewerLog.PrintErr("[Viewer] Composite focus reapply failed: " + ex);
+		}
+	}
+
+	/// <summary>
+	/// The grey-out for one entity (and everything spawned under it) after its meshes were rebuilt or recoloured in place.
+	/// RefreshCompositeFocus only acts on a scope change; see <see cref="LevelViewerCompositeFocus.ReapplyToSubtree"/>.
+	/// </summary>
+	internal void ReapplyCompositeFocusTo(Node3D root)
+	{
+		//A populate applies the whole focus when it ends; a preview batch has it stood down and puts it back itself
+		if (_isBulkPopulating || _previewOverlaysStoodDown || root == null || !_content.Loaded)
+			return;
+
+		try
+		{
+			LevelViewerCompositeFocus.ReapplyToSubtree(root, _content.Level.Commands);
+		}
+		catch (System.Exception ex)
+		{
+			ViewerLog.PrintErr("[Viewer] Composite focus reapply failed: " + ex);
+		}
+	}
+
+	public void SelectEntity(List<uint> entityPath, List<uint> compositePath, bool entitySelected, SelectionOrigin origin = SelectionOrigin.Remote)
+	{
+		SelectEntity(entityPath, compositePath, entitySelected, null, origin);
+	}
+
+	/// <summary>
+	/// <paramref name="selectionEntityIds"/> is the whole selection when more than one entity is
+	/// selected: ids in the composite the path ends at, the primary first. They share the path, so
+	/// each resolves as that path with its own id on the end. Null or one id is a plain selection.
+	/// </summary>
+	public void SelectEntity(List<uint> entityPath, List<uint> compositePath, bool entitySelected,
+		List<uint> selectionEntityIds, SelectionOrigin origin = SelectionOrigin.Remote,
+		List<List<uint>> markedWithSelectionPaths = null)
 	{
 		if (!entitySelected || entityPath == null || entityPath.Count == 0)
 		{
-			if (_selectedEntity == null)
+			/* A TriggerSequence (or Zone) is script logic with no node of its own, so _selectedEntity stays null while its
+			   members - or the rest of a multi-selection - are drawn as the selection. Returning on that alone left them
+			   green, and held back from the zone colours and the grey-out, until the level was reloaded. */
+			if (_selectedEntity == null && _selectedEntities.Count == 0 && _markedWithSelection.Count == 0)
 				return;
 
 			ClearSelectedEntity();
@@ -1659,16 +3105,41 @@ public partial class AlienScene : Node3D
 		try
 		{
 			Node3D entityNode = TryResolveSelectionNode(entityPath, compositePath);
-			if (entityNode == _selectedEntity && entityNode != null)
+			List<Node3D> selectionNodes = ResolveSelectionNodes(
+				entityNode, entityPath, compositePath, selectionEntityIds, out List<uint> selectionIds);
+			List<Node3D> markedNodes = ResolveMarkedWithSelectionNodes(selectionNodes, markedWithSelectionPaths);
+
+			if (entityNode == _selectedEntity && entityNode != null && SelectionNodesUnchanged(selectionNodes)
+				&& MarkedNodesUnchanged(markedNodes))
 			{
 				RefreshSelectedLightRadiusVisual();
 				return;
 			}
 
 			_selectedEntity = entityNode;
+			_selectedEntities.Clear();
+			_selectedEntities.AddRange(selectionNodes);
+			_selectedEntityIds.Clear();
+			_selectedEntityIds.AddRange(selectionIds);
+			_markedWithSelection.Clear();
+			_markedWithSelection.AddRange(markedNodes);
+
+			/* Everything drawn as the selection - the selection itself and whatever is marked with it -
+			   gives back the overlay it is carrying, so selection green is what ends up on top. The zone
+			   colour stays: it is the mesh's material, not an overlay, and the selection is drawn over it -
+			   a selection, a deep-selected composite or a sequence's members still show which zone they
+			   are in. (Wireframe Transparent takes the material slot instead; the colour is lent to it -
+			   LevelViewerZoneHighlight.LendToSelection.) */
+			List<Node3D> highlightNodes = markedNodes.Count == 0 ? selectionNodes : markedNodes;
+			for (int i = 0; i < highlightNodes.Count; i++)
+			{
+				LevelViewerProxyHighlight.ReleaseNode(highlightNodes[i]);
+				LevelViewerAliasHighlight.ReleaseNode(highlightNodes[i]);
+			}
 			LevelViewerProxyHighlight.ReleaseNode(entityNode);
 			LevelViewerAliasHighlight.ReleaseNode(entityNode);
-			LevelViewerSelection.Apply(entityNode);
+			LevelViewerSelection.Apply(highlightNodes);
+			ReapplyCompositeFocusLeftBySelection();
 
 			try
 			{
@@ -1695,16 +3166,144 @@ public partial class AlienScene : Node3D
 				ViewerLog.PrintErr("[Viewer] Entity highlight failed: " + ex);
 			}
 
+			LevelViewerZoneHighlight.SyncWithSelection();
 			LevelViewerSelection.ReapplyIfSelectionActive();
 			RefreshSelectedLightRadiusVisual();
 
-			Callable.From(() => OnSelectionChanged?.Invoke(entityNode)).CallDeferred();
+			Callable.From(() => OnSelectionChanged?.Invoke(entityNode, origin)).CallDeferred();
 		}
 		catch (System.Exception ex)
 		{
 			ViewerLog.PrintErr("[Viewer] Selection highlight failed: " + ex);
+			//What the old selection let go of still takes its zone colour back
+			try { LevelViewerZoneHighlight.SyncWithSelection(); } catch { }
 		}
 	}
+
+	/// <summary>
+	/// What the camera should look at for a selected node, if anything.
+	/// </summary>
+	/// <remarks>
+	/// The selected node is not always the thing worth framing. An alias or proxy sits on its own
+	/// reference point, often under a floor, with the geometry it stands for somewhere else - so a
+	/// pointer frames what it points at. An entity with no visual at all has no bounds to fit, so the
+	/// camera goes to where it stands. And a node whose bounds are wider than the camera can back away
+	/// from is not worth fitting either: a composite instance's node holds its whole subtree, so the
+	/// environment instance is the entire level, which is how "focus on selected" turned a click on a
+	/// gate into a view of the whole map (issue 634).
+	/// A prop composite - a door package, a railing - is an instance too and frames fine, so the test
+	/// is size rather than kind: anything wider than <paramref name="maxExtent"/> (0 for no limit,
+	/// which is what the explicit focus key asks for) is framed on its position rather than its bounds,
+	/// reported through <paramref name="framePositionOnly"/>.
+	/// </remarks>
+	public bool TryResolveFocusTarget(Node3D selectedNode, float maxExtent, out Node3D target, out bool framePositionOnly)
+	{
+		target = null;
+		framePositionOnly = false;
+		if (selectedNode == null || !GodotObject.IsInstanceValid(selectedNode))
+			return false;
+
+		Node3D entityNode = LevelViewerPick.ResolveNearestEntityNode(selectedNode, _nodeEntities) ?? selectedNode;
+		Node3D candidate = entityNode;
+		Commands commands = _content?.Level?.Commands;
+
+		if (commands != null && entityNode is EntityOverride pointer && _nodeEntities.TryGetValue(entityNode, out Entity entity))
+		{
+			Node3D pointed = null;
+			switch (entity)
+			{
+				case AliasEntity alias:
+				{
+					uint ownerId = GetOwnerCompositeId(entityNode);
+					Composite owner = ownerId != 0 ? commands.GetComposite(new ShortGuid(ownerId)) : null;
+					TryResolveAliasPointedSceneNode(pointer, alias, owner, out pointed);
+					break;
+				}
+				case ProxyEntity proxy:
+					TryResolveProxyPointedSceneNode(pointer, proxy, out pointed);
+					break;
+			}
+
+			if (pointed != null && GodotObject.IsInstanceValid(pointed))
+				candidate = pointed;
+		}
+
+		/* Whether there is anything to measure decides HOW to frame, not WHETHER to.
+		 *
+		 * Refusing when the bounds cannot be measured is what stopped the camera reacting at all to a
+		 * marker, a trigger volume, or any other entity that draws nothing (issue 660) - a
+		 * VentTraversalMarker has no renderable to bound, but it does have a position, and going to it
+		 * is the whole point of the setting. FrameRuntimeCameraClose already frames a metre box at the
+		 * target when it cannot measure one, so those simply pass through.
+		 *
+		 * Something too big to frame is the same story from the other end. A composite instance's node
+		 * holds its entire subtree, so framing the environment instance fits the whole level - the
+		 * zoom-out in issue 634 - but the answer to that is to go and stand at the thing, not to
+		 * ignore the selection. Those get framed on their position instead. */
+		/* Something that isn't in the world is not somewhere to go. Every entity gets a node, including
+		   composite parameters and script logic that were never placed anywhere, and a node with no
+		   transform sits at the origin - so picking one of those in the flowgraph flew the camera to
+		   0,0,0. Whether an entity is placed is a question about the entity, not about this node, so
+		   the answer is the same for the focus key as it is for a selection arriving from OpenCAGE. */
+		Entity focusEntity;
+		if (!_nodeEntities.TryGetValue(candidate, out focusEntity))
+			_nodeEntities.TryGetValue(entityNode, out focusEntity);
+		if (focusEntity != null && !IsPlacedInWorld(focusEntity, commands))
+			return false;
+
+		if (maxExtent > 0f && LevelViewerView.TryComputeGlobalAabb(candidate, out Aabb bounds))
+		{
+			Vector3 size = bounds.Size;
+			if (Mathf.Max(size.X, Mathf.Max(size.Y, size.Z)) > maxExtent)
+				framePositionOnly = true;
+		}
+
+		target = candidate;
+		return true;
+	}
+
+	/// <summary>
+	/// Whether this entity is something that stands somewhere in the level.
+	/// </summary>
+	/// <remarks>
+	/// A placement of a composite is: its node holds everything inside it, wherever that was put. A
+	/// function is when the viewer draws something for it, which is exactly the list the render filters
+	/// and the Create menu are built from - a marker or a trigger volume draws nothing solid but is
+	/// placed, and going to it is the point (issue 660). Everything else - composite parameters, script
+	/// logic, an alias or proxy whose target could not be resolved to a node - is not somewhere the
+	/// camera can usefully go.
+	/// </remarks>
+	private static bool IsPlacedInWorld(Entity entity, Commands commands)
+	{
+		switch (entity?.variant)
+		{
+			case EntityVariant.FUNCTION:
+				FunctionEntity function = (FunctionEntity)entity;
+				if (!function.function.IsFunctionType)
+					return true;
+				return RenderFilterDefinitions.IsSupported(function.function.AsFunctionType);
+
+			//Resolved to what they point at above; only an unresolvable one arrives here, and refusing
+			//to move for something we simply could not follow would be a guess in the wrong direction
+			case EntityVariant.ALIAS:
+				return true;
+
+			//Likewise - except a dead proxy (its target is not in the level at all, see
+			//CommandsUtils.IsDeadProxy) stands nowhere unless it carries a position of its own: its node
+			//sits at its composite's origin, which for a mission script is the world origin
+			case EntityVariant.PROXY:
+				if (entity is ProxyEntity proxy && commands?.Utils != null && commands.Utils.IsDeadProxy(proxy))
+					return proxy.GetParameter("position") != null;
+				return true;
+
+			default:
+				return false;
+		}
+	}
+
+	//A NodePath literal is a temporary whose native handle the binding gives the engine with nothing
+	//keeping it alive - see LevelViewerPick. Made once.
+	private static readonly NodePath ConnectionCameraPath = new NodePath("Connection/Camera3D");
 
 	private void RequestFrameView(Node3D target, bool focusEditor)
 	{
@@ -1713,11 +3312,110 @@ public partial class AlienScene : Node3D
 
 		RecenterContentOrigin();
 
-		Camera3D camera = GetTree().Root.GetNodeOrNull<Camera3D>("Connection/Camera3D");
+		Camera3D camera = GetTree().Root.GetNodeOrNull<Camera3D>(ConnectionCameraPath);
 		if (focusEditor)
 			LevelViewerView.FrameAll(ParentNode ?? target, camera, focusEditor: true);
 		else
 			LevelViewerView.FrameRuntimeCamera(ParentNode ?? target, camera);
+	}
+
+	/* The primary node plus one per other selected id, in selection order. Ids that resolve to
+	   nothing (an entity with no visual, or one that isn't in the scene) are dropped: they stay
+	   selected in OpenCAGE, there is just nothing here to mark or move. */
+	private List<Node3D> ResolveSelectionNodes(
+		Node3D primaryNode,
+		List<uint> entityPath,
+		List<uint> compositePath,
+		List<uint> selectionEntityIds,
+		out List<uint> resolvedIds)
+	{
+		List<Node3D> nodes = new List<Node3D>();
+		resolvedIds = new List<uint>();
+
+		uint primaryId = entityPath[entityPath.Count - 1];
+		if (primaryNode != null && GodotObject.IsInstanceValid(primaryNode))
+		{
+			nodes.Add(primaryNode);
+			resolvedIds.Add(primaryId);
+		}
+
+		if (selectionEntityIds == null || selectionEntityIds.Count < 2)
+			return nodes;
+
+		List<uint> path = new List<uint>(entityPath);
+		int last = path.Count - 1;
+		//What is in each list already, looked up rather than searched for: a box round thousands of entities searched both per entity
+		HashSet<uint> idsIn = new HashSet<uint>(resolvedIds);
+		HashSet<Node3D> nodesIn = new HashSet<Node3D>(nodes);
+		for (int i = 0; i < selectionEntityIds.Count; i++)
+		{
+			uint entityId = selectionEntityIds[i];
+			if (entityId == 0 || entityId == primaryId || idsIn.Contains(entityId))
+				continue;
+
+			path[last] = entityId;
+			Node3D node = TryResolveSelectionNode(path, compositePath);
+			if (node == null || !GodotObject.IsInstanceValid(node) || nodesIn.Contains(node))
+				continue;
+
+			nodes.Add(node);
+			nodesIn.Add(node);
+			resolvedIds.Add(entityId);
+			idsIn.Add(entityId);
+		}
+
+		return nodes;
+	}
+
+	/// <summary>
+	/// The selection plus whatever is marked along with it - a selected TriggerSequence's members.
+	/// </summary>
+	/// <remarks>
+	/// These are drawn as the selection but are not part of it: the gizmo moves what is in
+	/// <c>_selectedEntities</c> and Delete deletes it, and a sequence's members are neither of those
+	/// things. Selecting a sequence marks what it fires at; it does not put it in your hands.
+	/// </remarks>
+	private List<Node3D> ResolveMarkedWithSelectionNodes(List<Node3D> selectionNodes, List<List<uint>> markedPaths)
+	{
+		if (markedPaths == null || markedPaths.Count == 0)
+			return new List<Node3D>();
+
+		List<Node3D> nodes = new List<Node3D>(selectionNodes);
+		for (int i = 0; i < markedPaths.Count; i++)
+		{
+			Node3D node = TryResolveInstancePathNode(markedPaths[i]);
+			if (node == null || !GodotObject.IsInstanceValid(node) || nodes.Contains(node))
+				continue;
+
+			nodes.Add(node);
+		}
+
+		//Nothing resolved beyond the selection itself, so there is nothing extra to draw
+		return nodes.Count == selectionNodes.Count ? new List<Node3D>() : nodes;
+	}
+
+	private bool MarkedNodesUnchanged(List<Node3D> markedNodes)
+	{
+		if (markedNodes.Count != _markedWithSelection.Count)
+			return false;
+
+		for (int i = 0; i < markedNodes.Count; i++)
+			if (markedNodes[i] != _markedWithSelection[i])
+				return false;
+
+		return true;
+	}
+
+	private bool SelectionNodesUnchanged(List<Node3D> selectionNodes)
+	{
+		if (selectionNodes.Count != _selectedEntities.Count)
+			return false;
+
+		for (int i = 0; i < selectionNodes.Count; i++)
+			if (selectionNodes[i] != _selectedEntities[i])
+				return false;
+
+		return true;
 	}
 
 	private Node3D TryResolveSelectionNode(List<uint> entityPath, List<uint> compositePath)
@@ -1728,7 +3426,14 @@ public partial class AlienScene : Node3D
 			int last = entityPath.Count - 1;
 			int compositeIndex = Mathf.Min(last, compositePath.Count - 1);
 			if (TryGetCachedEntityNodes(new ShortGuid(compositePath[compositeIndex]), new ShortGuid(entityPath[last]), out List<Node3D> nodes))
-				entityNode = nodes[0];
+			{
+				entityNode = FindCachedNodeOnPath(nodes, entityPath);
+				/* Any copy will do only when the placement itself is not in this scene (the editor's root and the scene's
+				   out of step for a moment). A placement that is here but holds no node for the entity (a composite variable,
+				   which only incremental spawns make) has nothing to select - not a copy in another placement. */
+				if (entityNode == null && (last == 0 || GetEntityNode(entityPath.GetRange(0, last), ParentNode) == null))
+					entityNode = nodes[0];
+			}
 		}
 
 		if (entityNode == null)
@@ -1740,6 +3445,34 @@ public partial class AlienScene : Node3D
 		return entityNode;
 	}
 
+	/// <summary>
+	/// Of an entity's copies, the one whose entity chain from the root is the path itself: when the lookup by name misses the
+	/// copy asked for, the fallback takes it rather than the first copy, which can sit in any placement of the composite.
+	/// </summary>
+	private Node3D FindCachedNodeOnPath(List<Node3D> nodes, List<uint> entityPath)
+	{
+		List<uint> chain = new List<uint>();
+		foreach (Node3D node in nodes)
+		{
+			if (node == null || !GodotObject.IsInstanceValid(node) || node.IsQueuedForDeletion())
+				continue;
+			chain.Clear();
+			for (Node current = node; current != null && current != _parentNode; current = current.GetParent())
+			{
+				if (current is Node3D current3D && _nodeEntities.TryGetValue(current3D, out Entity entity))
+					chain.Add(entity.shortGUID.AsUInt32);
+			}
+			if (chain.Count != entityPath.Count)
+				continue;
+			bool same = true;
+			for (int i = 0; i < chain.Count && same; i++)
+				same = chain[chain.Count - 1 - i] == entityPath[i];
+			if (same)
+				return node;
+		}
+		return null;
+	}
+
 	private Node3D ResolveSelectionVisualRoot(Node3D entityNode, Entity entity)
 	{
 		if (entityNode is EntityOverride entityOverride && entityOverride.PointedEntity != null)
@@ -1747,11 +3480,11 @@ public partial class AlienScene : Node3D
 
 		if (entity is AliasEntity alias && entityNode is EntityOverride aliasOverride)
 		{
-			if (!entityNode.HasMeta(OwnerCompositeMetaKey))
+			uint aliasOwnerCompositeId;
+			if (!TryGetOwnerCompositeId(entityNode, out aliasOwnerCompositeId))
 				return entityNode;
 
-			Composite composite = _content?.Level?.Commands?.GetComposite(
-				new ShortGuid(entityNode.GetMeta(OwnerCompositeMetaKey).AsUInt32()));
+			Composite composite = _content?.Level?.Commands?.GetComposite(new ShortGuid(aliasOwnerCompositeId));
 			if (composite != null
 				&& TryResolveAliasPointedSceneNode(aliasOverride, alias, composite, out Node3D pointedNode))
 			{
@@ -1791,12 +3524,40 @@ public partial class AlienScene : Node3D
 		return null;
 	}
 
+	/// <summary>
+	/// The node an instance path names: entity ids stepped through from whatever the scene was
+	/// populated from, which is the level root composite.
+	/// </summary>
+	/// <remarks>
+	/// Deliberately only the direct lookup, with no cached-node fallback behind it. Callers here run
+	/// this thousands of times in a row (every root of every zone), and the fallback walks the whole
+	/// entity node cache; a path that names something outside the populated composite is better
+	/// answered with nothing than with a scan per root.
+	/// </remarks>
+	public Node3D TryResolveInstancePathNode(IReadOnlyList<uint> path)
+	{
+		if (path == null || path.Count == 0 || _parentNode == null || !GodotObject.IsInstanceValid(_parentNode))
+			return null;
+
+		Node current = _parentNode;
+		for (int i = 0; i < path.Count; i++)
+		{
+			current = current?.GetNodeOrNull(path[i].ToString());
+			if (current == null)
+				return null;
+		}
+
+		return current as Node3D;
+	}
+
 	private Node3D GetEntityNode(List<uint> path, Node3D parent)
 	{
 		try
 		{
+			//A path that runs out (its target is not in the scene, or not yet while populating) is common: answered
+			//here rather than by the catch, which cost a thrown exception per lookup - hundreds on every populate
 			Node current = parent;
-			for (int i = 0; i < path.Count; i++)
+			for (int i = 0; i < path.Count && current != null; i++)
 				current = current.GetNodeOrNull(path[i].ToString());
 			return current as Node3D;
 		}
@@ -1930,6 +3691,14 @@ public partial class AlienScene : Node3D
 			return true;
 		}
 
+		//The index is kept current as aliases are wired (OnPointedEntityChanged), so a miss on it is final. The scan
+		//of every scene node only remains for when no index could be built. It used to run on every miss, and a
+		//composite-instance add spawning N ModelReferences (each a miss - nothing points at a node that new) scanned
+		//the whole level N times: one 16k-model section into TECH_HUB's 500k nodes froze the viewer for over three
+		//minutes in the 3 Sep 2026 soak.
+		if (_aliasParameterEntityByRenderTarget != null)
+			return false;
+
 		return ModelReferenceMaterialOverrides.TryFindAliasParameterEntity(
 			_nodeEntities,
 			renderTarget,
@@ -1945,11 +3714,45 @@ public partial class AlienScene : Node3D
 		if (commands == null)
 		{
 			_aliasParameterEntityByRenderTarget = null;
+			_aliasParameterDepthByRenderTarget = null;
 			return;
 		}
 
+		EntityOverride.PointedEntityChanged = OnPointedEntityChanged;
 		_aliasParameterEntityByRenderTarget =
-			ModelReferenceMaterialOverrides.BuildAliasParameterEntityIndex(_nodeEntities, commands);
+			ModelReferenceMaterialOverrides.BuildAliasParameterEntityIndex(
+				_nodeEntities,
+				commands,
+				out _aliasParameterDepthByRenderTarget);
+	}
+
+	/// <summary>Extends the alias index for an alias wired after it was built; a re-pointed alias rebuilds it.</summary>
+	private void OnPointedEntityChanged(EntityOverride aliasOverride, Node3D previous)
+	{
+		if (_aliasParameterEntityByRenderTarget == null)
+			return; //no index yet (or invalidated): the next lookup rebuilds it from the whole scene
+
+		if (!_nodeEntities.TryGetValue(aliasOverride, out Entity entity) || entity is not AliasEntity alias)
+			return;
+
+		if (previous != null)
+		{
+			//The old target's entry may still name this alias; rare enough that a lazy rebuild is fine.
+			_aliasParameterEntityByRenderTarget = null;
+			_aliasParameterDepthByRenderTarget = null;
+			return;
+		}
+
+		Commands commands = _content?.Level?.Commands;
+		if (commands == null)
+			return;
+
+		ModelReferenceMaterialOverrides.IndexAliasParameterEntity(
+			_aliasParameterEntityByRenderTarget,
+			_aliasParameterDepthByRenderTarget,
+			aliasOverride,
+			alias,
+			commands);
 	}
 
 	internal bool TryGetModelRefRenderables(
@@ -2024,7 +3827,6 @@ public partial class AlienScene : Node3D
 	{
 		if (sync == null)
 			return;
-
 		Composite dataComposite = _content.Level.Commands.Entries.FirstOrDefault(o => o.shortGUID == dataCompositeID);
 		if (dataComposite == null)
 			return;
@@ -2039,6 +3841,20 @@ public partial class AlienScene : Node3D
 				+ " visual=" + visualEntityID.AsUInt32 + " fromPointer=" + fromPointer + ")");
 
 		ParameterSync.ApplyToEntity(dataEntity, sync, _content);
+		//A frost volume's size or strength may be fed from this entity rather than set on the volume
+		if (diagDataType == DataType.FLOAT)
+			SurfaceEffectOverlay.RefreshFedBy(this, dataComposite, dataEntity);
+		//And whether the level leaves a composite instance out may be this bool's to say
+		else if (diagDataType == DataType.BOOL)
+			RespawnInstancesDeletedBy(dataComposite, dataEntity, new ShortGuid(sync.name));
+		//The fog, if this is its setting or something feeding it
+		LevelViewerFog.RefreshIfIn(this, dataComposite);
+		//And the planets, whose values come from all over their SpaceVista composite and its placement
+		PlanetLook.RequestRefresh(this);
+
+		//A resource pointed at a model or texture nothing has displayed yet needs the same restore as a new entity.
+		if (diagDataType == DataType.RESOURCE)
+			PrewarmForIncrementalSpawn(dataComposite, dataEntity);
 
 		ShortGuid paramName = new ShortGuid(sync.name);
 		ShortGuid mappingParameterId = ShortGuidUtils.Generate(ModelReferenceMaterialMapping.MappingParameterName);
@@ -2094,7 +3910,6 @@ public partial class AlienScene : Node3D
 				ViewerLog.Print("ApplyEntityParameter RESOURCE complete (limited path)");
 			return;
 		}
-
 		if (!ShouldSyncVisualForOwnerComposite(visualCompositeID))
 			return;
 
@@ -2104,7 +3919,16 @@ public partial class AlienScene : Node3D
 			return;
 
 		if (!TryGetCachedEntityNodes(visualCompositeID, visualEntityID, out List<Node3D> entityNodes))
-			return;
+		{
+			//An entity with nothing to draw and nowhere to be has no scene node (ShouldSkipSceneNode).
+			//Giving it a position makes it placeable, so it gets one now - in every instance of its
+			//composite, the same as it would have had at populate.
+			if (ShouldSkipSceneNode(visualEntity, LevelViewerPopulateTree.TryGetSpawnTransform(visualEntity, out _, out _)))
+				return;
+			SpawnEntityIntoAllCompositeInstances(visualComposite, visualEntity);
+			if (!TryGetCachedEntityNodes(visualCompositeID, visualEntityID, out entityNodes))
+				return;
+		}
 
 		HashSet<Node3D> touchedEntityNodes = null;
 		if (syncDataType == DataType.TRANSFORM && !fromPointer && visualLimitNode == null)
@@ -2182,6 +4006,8 @@ public partial class AlienScene : Node3D
 			return;
 
 		EnsureLazyFunctionEntityPreview(entityNode);
+		SurfaceEffectOverlay.RefreshUnder(entityNode);
+		WaterSurface.RefreshUnder(entityNode);
 
 		BoxPreview[] boxPreviews = EntityNodeUtil.FindPreviews<BoxPreview>(entityNode);
 		for (int i = 0; i < boxPreviews.Length; i++)
@@ -2211,6 +4037,10 @@ public partial class AlienScene : Node3D
 			if (selectedEntityNode == entityNode)
 				RefreshSelectedLightRadiusVisual();
 		}
+
+		/* Every preview above came back in its own material - a ModelReference respawned, a marker recoloured - and this
+		   runs for every placement of the entity, the greyed-out ones included. */
+		ReapplyCompositeFocusTo(entityNode);
 	}
 
 	/// <summary>
@@ -2230,6 +4060,11 @@ public partial class AlienScene : Node3D
 		ModelReferenceMaterialMapping.InvalidateRuntimeMappingCaches(_content.Level.Commands);
 		InvalidateModelRefRenderablesCache();
 		RemapExistingModelReferenceMeshes(changedMappingId);
+
+		/* That writes the remapped material straight onto meshes rather than respawning them, so with
+		   Show Zones on it lands on top of the zone colour. The rebuild takes the colour back and keeps
+		   the new material as what the mesh returns to when zones go off. */
+		RefreshZoneOverlayDeferred();
 	}
 
 	private void RemapExistingModelReferenceMeshes(uint changedMappingId)
@@ -2240,6 +4075,7 @@ public partial class AlienScene : Node3D
 		Level level = _content.Level;
 		Commands commands = level.Commands;
 		ShortGuid changedId = new ShortGuid(changedMappingId);
+		HashSet<Node3D> remappedOwners = new HashSet<Node3D>();
 
 		foreach (KeyValuePair<MeshInstance3D, Materials.Material> entry in _modelReferenceMeshes.ToArray())
 		{
@@ -2247,7 +4083,8 @@ public partial class AlienScene : Node3D
 			if (mesh == null || !GodotObject.IsInstanceValid(mesh))
 				continue;
 
-			if (!mesh.HasMeta(ModelReferenceMaterialMapping.SourceMaterialWriteIndexMetaKey))
+			MeshBinding binding;
+			if (!_meshBindings.TryGetValue(mesh, out binding) || binding.SourceMaterialWriteIndex < 0)
 				continue;
 
 			Node3D owner = mesh.GetParent() as Node3D;
@@ -2263,8 +4100,7 @@ public partial class AlienScene : Node3D
 			if (mapping == null || mapping.ID != changedId)
 				continue;
 
-			int sourceMaterialWriteIndex = mesh.GetMeta(
-				ModelReferenceMaterialMapping.SourceMaterialWriteIndexMetaKey).AsInt32();
+			int sourceMaterialWriteIndex = binding.SourceMaterialWriteIndex;
 			Materials.Material currentMaterial = entry.Value;
 			int currentWriteIndex = level.Materials.GetWriteIndex(currentMaterial);
 			int remappedWriteIndex = ModelReferenceMaterialMapping.RemapMaterialWriteIndex(
@@ -2285,11 +4121,13 @@ public partial class AlienScene : Node3D
 				out Entity overrideParameterEntity,
 				out Entity fallbackParameterEntity);
 			_modelReferenceMeshes[mesh] = remappedMaterial;
-			mesh.MaterialOverride = GetSolidMaterialForModelReference(
+			mesh.MaterialOverride = WithMoverLook(GetSolidMaterialForModelReference(
 				remappedMaterial,
 				modelReferenceEntity,
 				overrideParameterEntity,
-				fallbackParameterEntity);
+				fallbackParameterEntity), mesh.GetParent() as Node3D);
+			PlanetLook.TryApply(this, mesh);
+			RegisterIfWater(mesh);
 			if (ModelReferenceRenderSettings.WireframeEnabled)
 			{
 				UpdateWireframeOverlay(
@@ -2299,7 +4137,12 @@ public partial class AlienScene : Node3D
 					overrideParameterEntity,
 					fallbackParameterEntity);
 			}
+			remappedOwners.Add(owner);
 		}
+
+		//Written straight over the grey on a greyed-out mesh: the remapped material is kept as what it returns to
+		foreach (Node3D owner in remappedOwners)
+			ReapplyCompositeFocusTo(owner);
 	}
 
 	private void ReapplyAllAliasInstanceMappingMeta()
@@ -2309,11 +4152,11 @@ public partial class AlienScene : Node3D
 		{
 			if (entry.Value is not AliasEntity alias || entry.Key is not EntityOverride aliasOverride)
 				continue;
-			if (!entry.Key.HasMeta(OwnerCompositeMetaKey))
+			uint aliasOwnerCompositeId;
+			if (!TryGetOwnerCompositeId(entry.Key, out aliasOwnerCompositeId))
 				continue;
 
-			Composite ownerComposite = commands.GetComposite(
-				new ShortGuid(entry.Key.GetMeta(OwnerCompositeMetaKey).AsUInt32()));
+			Composite ownerComposite = commands.GetComposite(new ShortGuid(aliasOwnerCompositeId));
 			if (ownerComposite == null)
 				continue;
 
@@ -2443,11 +4286,11 @@ public partial class AlienScene : Node3D
 				continue;
 			if (entry.Key is not EntityOverride aliasOverride)
 				continue;
-			if (!entry.Key.HasMeta(OwnerCompositeMetaKey))
+			uint aliasOwnerCompositeId;
+			if (!TryGetOwnerCompositeId(entry.Key, out aliasOwnerCompositeId))
 				continue;
 
-			Composite aliasComposite = commands.GetComposite(
-				new ShortGuid(entry.Key.GetMeta(OwnerCompositeMetaKey).AsUInt32()));
+			Composite aliasComposite = commands.GetComposite(new ShortGuid(aliasOwnerCompositeId));
 			if (aliasComposite != ownerComposite)
 				continue;
 
@@ -2472,8 +4315,10 @@ public partial class AlienScene : Node3D
 			return;
 
 		Commands commands = _content.Level.Commands;
-		foreach (Node child in instanceRoot.GetChildren())
+		int childCount = instanceRoot.GetChildCount();
+		for (int i = 0; i < childCount; i++)
 		{
+			Node child = instanceRoot.GetChild(i);
 			if (child is not Node3D childNode || !GodotObject.IsInstanceValid(childNode))
 				continue;
 
@@ -2518,10 +4363,11 @@ public partial class AlienScene : Node3D
 		if (EntityNodeUtil.FindAllPreviews(entityNode).Length > 0)
 			return false;
 
-		if (!entityNode.HasMeta(OwnerCompositeMetaKey))
+		uint ownerCompositeIdForPreview;
+		if (!TryGetOwnerCompositeId(entityNode, out ownerCompositeIdForPreview))
 			return false;
 
-		ShortGuid ownerComposite = new ShortGuid(entityNode.GetMeta(OwnerCompositeMetaKey).AsUInt32());
+		ShortGuid ownerComposite = new ShortGuid(ownerCompositeIdForPreview);
 		if (!FunctionEntityPreviewSetup.TryAddPreview(
 			this,
 			function,
@@ -2536,6 +4382,11 @@ public partial class AlienScene : Node3D
 		return true;
 	}
 
+	/* The populate registers every preview it makes (TrackBulkPopulatePreview) and the preview cache
+	   rebuilds from that list rather than walking the scene, so a preview made after the populate -
+	   a lazy one for a filter switched on, or an entity created in the viewport - has to join it
+	   too. One that didn't was never reached by RefreshRenderFilters: it stayed on screen with its
+	   filter off, and hide-nested passed it by. */
 	private void TrackMaterializedFunctionEntityPreview(Node3D entityNode)
 	{
 		_functionEntityPreviewsCacheDirty = true;
@@ -2548,6 +4399,27 @@ public partial class AlienScene : Node3D
 
 			_bulkPopulatePreviews.Add(preview);
 		}
+	}
+
+	/* And a node leaving the scene takes its previews (a composite instance's, all the way down)
+	   out of that list, or the next filter change rebuilt the cache over freed objects and threw
+	   on the first of them - leaving the filters stuck for the rest of the session. */
+	private void UntrackFunctionEntityPreviews(Node3D root)
+	{
+		if (root == null || _bulkPopulatePreviews.Count == 0)
+			return;
+
+		FunctionEntityPreview[] gone = EntityNodeUtil.FindAllPreviews(root);
+		if (gone.Length == 0)
+			return;
+
+		HashSet<FunctionEntityPreview> going = new HashSet<FunctionEntityPreview>(gone);
+		_bulkPopulatePreviews.RemoveAll(going.Contains);
+		_bulkModelReferencePreviews.RemoveAll(going.Contains);
+		//Every reader rebuilds a dirty cache (and the by-composite index) first: the old ones only held the removed
+		//previews, and their entities, until then
+		InvalidateFunctionEntityPreviewCache();
+		_cachedFunctionEntityPreviews = Array.Empty<FunctionEntityPreview>();
 	}
 
 	private static bool ShouldMaterializeFunctionPreview(
@@ -2595,6 +4467,8 @@ public partial class AlienScene : Node3D
 
 		foreach (KeyValuePair<Node3D, Entity> entry in _nodeEntities)
 		{
+			//Thousands of previews built at the end of a populate: seconds without a sent message answered otherwise
+			LevelViewerSentMessages.PumpIfDue();
 			Node3D entityNode = entry.Key;
 			if (entityNode == null || !GodotObject.IsInstanceValid(entityNode))
 				continue;
@@ -2602,10 +4476,10 @@ public partial class AlienScene : Node3D
 			if (entry.Value is not FunctionEntity function)
 				continue;
 
-			if (!entityNode.HasMeta(OwnerCompositeMetaKey))
+			uint ownerCompositeId;
+			if (!TryGetOwnerCompositeId(entityNode, out ownerCompositeId))
 				continue;
 
-			uint ownerCompositeId = entityNode.GetMeta(OwnerCompositeMetaKey).AsUInt32();
 			if (!ShouldMaterializeFunctionPreview(function, ownerCompositeId, changedFunctionTypes))
 				continue;
 
@@ -2621,10 +4495,11 @@ public partial class AlienScene : Node3D
 			if (entityNode == null || !GodotObject.IsInstanceValid(entityNode))
 				continue;
 
-			if (!entityNode.HasMeta(OwnerCompositeMetaKey))
+			uint nodeOwnerCompositeId;
+			if (!TryGetOwnerCompositeId(entityNode, out nodeOwnerCompositeId))
 				continue;
 
-			if (entityNode.GetMeta(OwnerCompositeMetaKey).AsUInt32() != ownerCompositeId)
+			if (nodeOwnerCompositeId != ownerCompositeId)
 				continue;
 
 			if (entry.Value is not FunctionEntity function)
@@ -2812,6 +4687,8 @@ public partial class AlienScene : Node3D
 		if (!_functionEntityPreviewsCacheDirty)
 			return;
 
+		//Freed behind the registry's back (a subtree QueueFree'd by something other than RemoveEntity)
+		_bulkPopulatePreviews.RemoveAll(preview => preview == null || !GodotObject.IsInstanceValid(preview));
 		if (_bulkPopulatePreviews.Count > 0)
 			_cachedFunctionEntityPreviews = _bulkPopulatePreviews.ToArray();
 		else if (_parentNode == null)
@@ -2864,9 +4741,54 @@ public partial class AlienScene : Node3D
 		for (int i = 0; i < previews.Count; i++)
 		{
 			FunctionEntityPreview preview = previews[i];
-			if (preview != null)
-				preview.RefreshVisibility();
+			if (preview == null || !GodotObject.IsInstanceValid(preview))
+			{
+				_functionEntityPreviewsCacheDirty = true;
+				continue;
+			}
+			preview.RefreshVisibility();
+			/* Shown again, a preview is drawn again in its own colour (or was only now made, above), and this runs for every
+			   placement of the composite: the ones outside the focus came out bright over their grey, and the focus refresh
+			   that follows does nothing when the scope has not changed since the navigation already applied it. Model
+			   references are not gated by hide-nested and are left as they are. */
+			if (preview is not ModelReferencePreview && preview.GetParent() is Node3D previewOwner)
+				ReapplyCompositeFocusTo(previewOwner);
 		}
+
+		//The same goes for the zone colours: what is shown again or made now is in its own colours, not its zone's
+		if (PreviewVisibilitySettings.ShowZones)
+			RefreshZoneOverlayDeferred();
+	}
+
+	/// <summary>Whether the model references' own render filter is asking for them right now.</summary>
+	public static bool ModelReferencesShown => RenderFilters.IsEnabled(FunctionType.ModelReference);
+
+	/* Turning the model references' filter off hides the level's geometry. The meshes are already
+	   spawned and expensive to rebuild, so this is a visibility switch over them, and the entities
+	   stop being pickable while they can't be seen. */
+	private void ApplyModelReferenceRenderFilter()
+	{
+		bool shown = ModelReferencesShown;
+		HashSet<Node3D> owners = new HashSet<Node3D>();
+
+		foreach (MeshInstance3D mesh in _modelReferenceMeshes.Keys)
+		{
+			if (mesh == null || !GodotObject.IsInstanceValid(mesh))
+				continue;
+
+			mesh.Visible = shown;
+			MeshInstance3D overlay = FindWireframeOverlay(mesh);
+			//A greyed-out mesh keeps its overlay hidden, as UpdateWireframeOverlay does
+			if (overlay != null)
+				overlay.Visible = shown && ModelReferenceRenderSettings.WireframeEnabled
+					&& !LevelViewerCompositeFocus.IsMeshVisuallyDimmed(mesh);
+
+			if (mesh.GetParent() is Node3D owner && GodotObject.IsInstanceValid(owner))
+				owners.Add(owner);
+		}
+
+		foreach (Node3D owner in owners)
+			LevelViewerPick.SetOwnerSuppressed(owner, !shown);
 	}
 
 	public void RefreshRenderFilters(HashSet<uint> changedFunctionTypes = null)
@@ -2877,15 +4799,20 @@ public partial class AlienScene : Node3D
 		MaterializeLazyPreviewsForRenderFilters(changedFunctionTypes);
 		EnsureFunctionEntityPreviewCache();
 
+		if (changedFunctionTypes == null || changedFunctionTypes.Contains((uint)FunctionType.ModelReference))
+			ApplyModelReferenceRenderFilter();
+
 		for (int i = 0; i < _cachedFunctionEntityPreviews.Length; i++)
 		{
+			LevelViewerSentMessages.PumpIfDue();
 			FunctionEntityPreview preview = _cachedFunctionEntityPreviews[i];
-			if (preview == null)
+			if (preview == null || !GodotObject.IsInstanceValid(preview))
 			{
 				_functionEntityPreviewsCacheDirty = true;
 				continue;
 			}
 
+			//Handled above, in one pass over the meshes rather than a respawn each
 			if (preview is ModelReferencePreview)
 				continue;
 
@@ -2898,15 +4825,33 @@ public partial class AlienScene : Node3D
 
 			preview.Refresh();
 			preview.SyncPickablesWithVisibility();
+			//A refresh recolours the preview (PreviewVisualUtility.ApplyColor) over the grey of a greyed-out one
+			if (preview.GetParent() is Node3D previewOwner)
+				ReapplyCompositeFocusTo(previewOwner);
 		}
 
 		RefreshCompositeFocus();
+		//Anything respawned above came back in its own material
+		RefreshZoneOverlayDeferred();
 		RefreshSelectedLightRadiusVisual();
 	}
 
 	private void ApplyVectorVisual(ParameterVisualContext context)
 	{
 		RefreshBoxPreviews(context.EntityNode);
+		//A surface effect's colours and falloff are vectors too, its strengths floats, whether it shows a bool (and water's)
+		SurfaceEffectOverlay.RefreshUnder(context.EntityNode);
+		WaterSurface.RefreshUnder(context.EntityNode);
+	}
+
+	private void ApplyFloatVisual(ParameterVisualContext context)
+	{
+		SurfaceEffectOverlay.RefreshUnder(context.EntityNode);
+		WaterSurface.RefreshUnder(context.EntityNode);
+		if (context.Sync != null && new ShortGuid(context.Sync.name) != ShortGuidUtils.Generate("radius"))
+			return;
+
+		RefreshSpherePreviews(context.EntityNode);
 	}
 
 	private static void RefreshBoxPreviews(Node3D entityNode)
@@ -2919,6 +4864,16 @@ public partial class AlienScene : Node3D
 			boxPreviews[i].RefreshDimensions();
 	}
 
+	private static void RefreshSpherePreviews(Node3D entityNode)
+	{
+		if (entityNode == null)
+			return;
+
+		SpherePreview[] spherePreviews = EntityNodeUtil.FindPreviews<SpherePreview>(entityNode);
+		for (int i = 0; i < spherePreviews.Length; i++)
+			spherePreviews[i].RefreshDimensions();
+	}
+
 	private void ApplySplineVisual(ParameterVisualContext context)
 	{
 		RefreshSplinePathPreviews(context.EntityNode);
@@ -2926,25 +4881,65 @@ public partial class AlienScene : Node3D
 
 	private void ApplyBoolVisual(ParameterVisualContext context)
 	{
+		//Whether the level shows it is now this edit's to say, not its mover's (GetMoverShown)
+		if (context.Sync != null && new ShortGuid(context.Sync.name) == ShortGuidUtils.Generate("show_on_reset") && context.Entity is FunctionEntity edited
+			&& (SurfaceEffectOverlay.IsSurfaceEffect(edited) || WaterSurface.IsWater(edited)))
+			_effectsShownByOwnFlag.Add(edited.shortGUID.AsUInt32);
+		//In the water's mirror or not: the model's own, or every model a composite instance places
+		if (context.Sync != null && new ShortGuid(context.Sync.name) == ShortGuidUtils.Generate("include_in_planar_reflections"))
+			RefreshReflectionLayersUnder(context.Entity);
+		SurfaceEffectOverlay.RefreshUnder(context.EntityNode);
+		WaterSurface.RefreshUnder(context.EntityNode);
 		if (context.Sync != null && new ShortGuid(context.Sync.name) != ShortGuidUtils.Generate("loop"))
 			return;
 
 		RefreshSplinePathPreviews(context.EntityNode);
 	}
 
-	private static void RefreshSplinePathPreviews(Node3D entityNode)
+	private void RefreshSplinePathPreviews(Node3D entityNode)
 	{
 		if (entityNode == null)
 			return;
 
 		SplinePathPreview[] previews = EntityNodeUtil.FindPreviews<SplinePathPreview>(entityNode);
 		for (int i = 0; i < previews.Length; i++)
+		{
 			previews[i].Refresh();
+			//The refresh rebuilds the segment lines (unregistered until now) and recolours the markers over the grey
+			previews[i].SyncPickablesWithVisibility();
+		}
+
+		//Runs for every placement of the entity, the greyed-out ones included (as RefreshFunctionEntityPreviews does)
+		if (previews.Length > 0)
+			ReapplyCompositeFocusTo(entityNode);
 	}
 
 	private static ulong MakeEntityCacheKey(ShortGuid compositeId, ShortGuid entityId)
 	{
 		return ((ulong)compositeId.AsUInt32 << 32) | entityId.AsUInt32;
+	}
+
+	/// <summary>The composite an entity node was spawned from. False for anything else in the scene.</summary>
+	public static bool TryGetOwnerCompositeId(Node node, out uint ownerCompositeId)
+	{
+		if (node is Node3D node3D)
+			return _nodeOwnerComposites.TryGetValue(node3D, out ownerCompositeId);
+
+		ownerCompositeId = 0;
+		return false;
+	}
+
+	/// <summary>Was this node spawned for an entity? The old test was HasMeta on the node.</summary>
+	public static bool HasOwnerComposite(Node node)
+	{
+		uint ownerCompositeId;
+		return TryGetOwnerCompositeId(node, out ownerCompositeId);
+	}
+
+	private static uint GetOwnerCompositeId(Node node)
+	{
+		uint ownerCompositeId;
+		return TryGetOwnerCompositeId(node, out ownerCompositeId) ? ownerCompositeId : 0;
 	}
 
 	private void TrackEntityNode(ShortGuid compositeId, ShortGuid entityId, Node3D entityNode)
@@ -2963,12 +4958,96 @@ public partial class AlienScene : Node3D
 	{
 		ulong key = MakeEntityCacheKey(compositeId, entityId);
 		if (_entityNodesByKey.TryGetValue(key, out List<Node3D> entityNodes))
+		{
 			entityNodes.Remove(entityNode);
+			//A pasted entity's id is new each time: its emptied list would otherwise stay until the next populate
+			if (entityNodes.Count == 0)
+				_entityNodesByKey.Remove(key);
+		}
+	}
+
+	/* A node leaving the scene takes every entity node under it out of the registries with it. A
+	   composite instance is spawned as a subtree - the instanced composite's entities, all the way
+	   down, each tracked by (owner composite, entity) and registered as an instance of its own where
+	   it instances one - and freeing the instance node frees all of them at the end of the frame.
+	   Removal used to untrack the one node it was asked for, so a pasted or duplicated instance that
+	   was then deleted (or undone) left its whole spawned contents listed against the composite it
+	   instanced; stepping into another instance of that composite walked those aliases' nodes for the
+	   highlight, met the freed EntityOverride and threw on GetParent. */
+	private void UntrackEntityNodeTree(Node3D root)
+	{
+		if (root == null || !GodotObject.IsInstanceValid(root))
+			return;
+
+		bool overrideUntracked = false;
+		Stack<Node> pending = new Stack<Node>();
+		pending.Push(root);
+		while (pending.Count > 0)
+		{
+			Node current = pending.Pop();
+			if (current == null || !GodotObject.IsInstanceValid(current))
+				continue;
+
+			//Indexed child access: GetChildren() can hand back a read-only array mid-build
+			int childCount = current.GetChildCount();
+			for (int i = 0; i < childCount; i++)
+				pending.Push(current.GetChild(i));
+
+			if (current is Node3D node)
+			{
+				overrideUntracked |= UntrackSpawnedEntityNode(node);
+				//The pick and mesh tables too: nothing else takes a removed subtree out of them before the next populate
+				//(a populate-spawned mesh has no exit hook of its own)
+				LevelViewerPick.ForgetNode(node);
+				LevelViewerCompositeFocus.ForgetNode(node);
+				if (node is MeshInstance3D mesh)
+				{
+					_modelReferenceMeshes.Remove(mesh);
+					_meshBindings.Remove(mesh);
+					_sceneFilterMeshes.Remove(mesh);
+				}
+			}
+		}
+
+		if (overrideUntracked)
+		{
+			//An alias leaving the scene may be the one the render-target index names
+			_aliasParameterEntityByRenderTarget = null;
+			_aliasParameterDepthByRenderTarget = null;
+		}
+	}
+
+	/// <summary>Takes one spawned node out of every registry that knows it. True when it was an alias or proxy node.</summary>
+	private bool UntrackSpawnedEntityNode(Node3D node)
+	{
+		bool hadOwner = _nodeOwnerComposites.TryGetValue(node, out uint ownerCompositeId);
+		_nodeOwnerComposites.Remove(node);
+		if (!_nodeEntities.TryGetValue(node, out Entity entity))
+			return false;
+
+		_nodeEntities.Remove(node);
+		if (hadOwner)
+			UntrackEntityNode(new ShortGuid(ownerCompositeId), entity.shortGUID, node);
+
+		//A composite instance's node is also the instance the instanced composite's list holds
+		if (entity is FunctionEntity function
+			&& !function.function.IsFunctionType
+			&& _compositeNodes.TryGetValue(function.function, out List<Node3D> instances))
+		{
+			instances.Remove(node);
+			if (instances.Count == 0)
+				_compositeNodes.Remove(function.function);
+		}
+
+		return node is EntityOverride;
 	}
 
 	private void ClearEntityNodeCache()
 	{
 		_entityNodesByKey.Clear();
+		//The nodes an animation preview was holding are going with them - nothing to put back, and
+		//nothing was ever written to the level for it
+		AnimationPreview.Forget();
 	}
 
 	private bool TryGetCachedEntityNodes(ShortGuid compositeId, ShortGuid entityId, out List<Node3D> entityNodes)
@@ -2996,11 +5075,19 @@ public partial class AlienScene : Node3D
 
 		if (context.Sync.removed)
 		{
-			GetEntityTransform(context.Entity, out Vector3 position, out Vector3 rotation);
+			Entity baseEntity = context.Entity;
+			if ((context.FromPointer || entityOverride != null) && _nodeEntities.TryGetValue(target, out Entity targetEntity))
+				baseEntity = targetEntity;
+
+			GetEntityTransform(baseEntity, out Vector3 position, out Vector3 rotation);
 			target.Position = position;
 			target.RotationDegrees = rotation;
 			EntityNodeUtil.SetPointed(target, false);
 			LevelViewerPick.InvalidatePickBounds(target);
+			
+			if (context.FromPointer || entityOverride != null)
+				ReapplyAliasOverridesPointingAt(new HashSet<Node3D> { target });
+			
 			return;
 		}
 
@@ -3049,11 +5136,21 @@ public partial class AlienScene : Node3D
 		}
 	}
 
+	/* Set while a whole scene is torn down (a level reset, a repopulate): every table a refresh has to keep tidy is cleared
+	   wholesale a few lines later, so the per-mesh bookkeeping is skipped then - a mesh at a time, it was hundreds of
+	   thousands of removals per switch on the biggest levels. */
+	private bool _sceneTeardown;
+
 	public void ClearRenderableChildren(Node3D parent)
 	{
 		if (parent == null)
 			return;
 
+		/* Out of the bookkeeping first, as a resource sync does: a populate-spawned mesh has no exit hook to take itself
+		   out of the mesh tables, and the pick tables never hear of a queued free - so every refresh (an override,
+		   mapping or parameter edit; each tick of a slider) left its old meshes in all of them until the next populate. */
+		if (!_sceneTeardown)
+			ForgetRenderableChildren(parent);
 		for (int i = parent.GetChildCount() - 1; i >= 0; i--)
 		{
 			if (parent.GetChild(i) is MeshInstance3D mesh)
@@ -3099,8 +5196,11 @@ public partial class AlienScene : Node3D
 				if (compositeInstance == null || !GodotObject.IsInstanceValid(compositeInstance))
 					continue;
 
-				foreach (Node child in compositeInstance.GetChildren())
+				//By index: GetChildren() is a native array per placement, on every move packet
+				int childCount = compositeInstance.GetChildCount();
+				for (int i = 0; i < childCount; i++)
 				{
+					Node child = compositeInstance.GetChild(i);
 					if (child.Name == entityNodeName && child is Node3D entityNode)
 					{
 						EntityNodeUtil.SetPointed(entityNode, pointedPos);
@@ -3115,25 +5215,69 @@ public partial class AlienScene : Node3D
 		}
 	}
 
-	public void RemoveEntity(ShortGuid composite, ShortGuid entity)
+	/// <param name="refreshHighlights">
+	/// False when the caller is removing several and refreshes the highlights once after the last: the
+	/// forced rebuild costs about 0.4 s on a big composite, the removal itself a few ms, so a run of
+	/// deletions (a box selection deleted, or a box's deep-select aliases let go) paid it per entity.
+	/// </param>
+	/// <param name="logEach">False when the caller logs one line for a run of removals instead.</param>
+	/// <returns>Whether anything was removed.</returns>
+	public bool RemoveEntity(ShortGuid composite, ShortGuid entity, bool refreshHighlights = true, bool logEach = true)
 	{
 		string entityNodeName = entity.AsUInt32.ToString();
 		bool removed = false;
 		int instancesProcessed = 0;
+		List<(AliasEntity Alias, Node3D Target)> redrawWithout = null;
 
 		if (_compositeNodes.TryGetValue(composite, out List<Node3D> compositeInstances))
 		{
+			/* The (composite, entity) map names the entity's node under each instance straight away. Every child of every
+			   instance was walked instead - thousands of them on SCI_AndroidLab's environment, per removal: an undo moving
+			   ~800 entities out of it took 87 s. An instance the map has nothing under is still searched child by child
+			   (a node that never made it into the map, see below). */
+			Dictionary<Node, List<Node>> mappedByInstance = null;
+			if (TryGetCachedEntityNodes(composite, entity, out List<Node3D> mappedNodes))
+			{
+				mappedByInstance = new Dictionary<Node, List<Node>>();
+				foreach (Node3D mapped in mappedNodes)
+				{
+					if (mapped == null || !GodotObject.IsInstanceValid(mapped))
+						continue;
+					Node instance = mapped.GetParent();
+					if (instance == null)
+						continue;
+					if (!mappedByInstance.TryGetValue(instance, out List<Node> underInstance))
+						mappedByInstance[instance] = underInstance = new List<Node>();
+					underInstance.Add(mapped);
+				}
+			}
+
 			// Snapshot: QueueFree / restore-pointed below can mutate the tree and this list.
 			foreach (Node3D compositeInstance in compositeInstances.ToArray())
 			{
+				//One entity of a composite placed 192 times was 1.8 s of this with nothing answered (the adds already pump)
+				LevelViewerSentMessages.PumpIfDue();
 				if (compositeInstance == null || !GodotObject.IsInstanceValid(compositeInstance))
 					continue;
 
-				foreach (Node child in compositeInstance.GetChildren().ToArray())
+				IEnumerable<Node> candidates = mappedByInstance != null && mappedByInstance.TryGetValue(compositeInstance, out List<Node> mappedHere)
+					? mappedHere
+					: compositeInstance.GetChildren().ToArray();
+				foreach (Node child in candidates)
 				{
 					if (child == null || !GodotObject.IsInstanceValid(child))
 						continue;
-					if (child.Name != entityNodeName || child is not Node3D entityNode)
+					if (child is not Node3D entityNode)
+						continue;
+
+					/* Normally the node is named after the entity, but a name is not something to
+					   rely on: Godot renames a child whose name a sibling already has. What the node
+					   stands for is what matters, so the map decides and the name is the fallback
+					   for a node that never made it into the map. */
+					bool isOurs = _nodeEntities.TryGetValue(entityNode, out Entity nodeEntity)
+						? nodeEntity != null && nodeEntity.shortGUID == entity
+						: child.Name == entityNodeName;
+					if (!isOurs)
 						continue;
 
 					// One bad instance must not abort the whole removal (and must not escape to
@@ -3143,6 +5287,12 @@ public partial class AlienScene : Node3D
 					{
 						EntityOverride entityOverride = entityNode as EntityOverride;
 						Node3D pointedNode = entityOverride?.PointedEntity;
+						if (entityOverride != null)
+						{
+							//An alias leaving the scene may be the one the render-target index names
+							_aliasParameterEntityByRenderTarget = null;
+							_aliasParameterDepthByRenderTarget = null;
+						}
 						if (pointedNode != null
 							&& GodotObject.IsInstanceValid(pointedNode)
 							&& _nodeEntities.TryGetValue(pointedNode, out Entity pointedEntity))
@@ -3153,12 +5303,16 @@ public partial class AlienScene : Node3D
 							pointedNode.Position = position;
 							pointedNode.RotationDegrees = rotation;
 							EntityNodeUtil.SetPointed(pointedNode, false);
+							//And without what it set on it, once it is out of the maps (below)
+							if (nodeEntity is AliasEntity removedAlias)
+								(redrawWithout ??= new List<(AliasEntity, Node3D)>()).Add((removedAlias, pointedNode));
 						}
 
+						//By the key the removal names first: a node found by name never made it into the maps the tree walk goes by
 						UntrackEntityNode(composite, entity, entityNode);
-						entityNode.QueueFree();
-						_nodeEntities.Remove(entityNode);
-						_functionEntityPreviewsCacheDirty = true;
+						UntrackEntityNodeTree(entityNode);
+						UntrackFunctionEntityPreviews(entityNode);
+						FreeReleasingName(entityNode);
 						removed = true;
 						instancesProcessed++;
 					}
@@ -3170,12 +5324,24 @@ public partial class AlienScene : Node3D
 			}
 		}
 
-		if (removed)
+		if (redrawWithout != null)
+		{
+			foreach ((AliasEntity removedAlias, Node3D target) in redrawWithout)
+				RedrawAliasTarget(removedAlias, target, removed: true);
+		}
+
+		if (removed && refreshHighlights)
 		{
 			ViewerLog.Print("Removed entity " + entityNodeName + " x" + instancesProcessed + "; rebuilding highlights");
 			RefreshEntityHighlights(forceRebuild: true);
 			ViewerLog.Print("Removed entity " + entityNodeName + " complete");
 		}
+		else if (removed && logEach)
+		{
+			ViewerLog.Print("Removed entity " + entityNodeName + " x" + instancesProcessed);
+		}
+
+		return removed;
 	}
 
 	public void UpdateRenderable(ShortGuid composite, ShortGuid entity, List<Tuple<int, int>> renderables)
@@ -3187,12 +5353,113 @@ public partial class AlienScene : Node3D
 		if (function != null)
 			_content.RemappedResources[function] = renderables;
 
+		//A changed resource can change the entity's collision mapping too
+		if (_collisionOverlay != null && GodotObject.IsInstanceValid(_collisionOverlay))
+			_collisionOverlay.RefreshEntity(entity);
+
 		if (TryGetCachedEntityNodes(composite, entity, out List<Node3D> entityNodes))
 		{
 			for (int i = 0; i < entityNodes.Count; i++)
 				RefreshFunctionEntityPreviews(entityNodes[i]);
 		}
 	}
+
+	/* Geometry the engine never draws (occlusion volumes, collision hulls). Spawned hidden and flipped
+	   by RefreshSceneGeometryFilters, so toggling the filter doesn't need the level repopulating. */
+	private void CreateSceneFilterRenderable(Node3D parent, MeshHolder holder, SceneFilterKind kind, string label)
+	{
+		MeshInstance3D meshInstance = new MeshInstance3D
+		{
+			Mesh = holder.MainMesh,
+			Visible = false,
+			MaterialOverride = AlienSceneMaterials.GetSceneFilterMaterial(kind),
+		};
+		if (!_bulkMeshSpawning)
+		{
+			meshInstance.Name = holder.MainMesh.ResourceName + " (" + label + ")";
+			meshInstance.TreeExited += () => _sceneFilterMeshes.Remove(meshInstance);
+		}
+
+		LevelViewerMeshUtil.ConfigureMeshInstance(meshInstance);
+		//Keeps the subtree walk off it: whether it's pickable follows the filter, not the entity
+		meshInstance.AddToGroup(LevelViewerPick.SceneFilterGroupName);
+		_sceneFilterMeshes[meshInstance] = new SceneFilterMesh(kind, parent);
+		parent.AddChild(meshInstance);
+		ApplySceneFilterMeshState(meshInstance, kind, parent);
+	}
+
+	/* Drawn and clickable together. Registering the mesh as pickable only while its filter is on is
+	   what keeps a switched-off hull from swallowing clicks, or from padding out the pick bounds of
+	   the entity it belongs to, while it isn't being drawn. */
+	private void ApplySceneFilterMeshState(MeshInstance3D meshInstance, SceneFilterKind kind, Node3D owner)
+	{
+		bool enabled = RenderFilters.IsSceneFilterEnabled(kind);
+		meshInstance.Visible = enabled;
+
+		//A bulk populate registers its pickables in one pass at the end, once the tree is built
+		if (_bulkMeshSpawning || owner == null || !GodotObject.IsInstanceValid(owner))
+			return;
+
+		if (enabled)
+			LevelViewerPick.RegisterPickableMesh(meshInstance, owner);
+		else
+			LevelViewerPick.UnregisterPickableMesh(meshInstance, owner);
+	}
+
+	/* Show the requested state's generated nav data. Remembered so a level (re)populate can reapply it -
+	   the files are rebuilt by an instanced save, so this re-reads them rather than caching. */
+	public void ApplyStateInfoOverlays(int navMeshState, int coverState)
+	{
+		_pendingNavMeshState = navMeshState;
+		_pendingCoverState = coverState;
+
+		if (_stateInfoOverlay != null && GodotObject.IsInstanceValid(_stateInfoOverlay))
+			_stateInfoOverlay.Apply(navMeshState, coverState);
+	}
+
+	/* OpenCAGE saved the level, so the generated nav data on disk is not the data we read when we
+	   loaded it - an instanced save regenerates the lot. Read it again and redraw what is showing. */
+	public void ReloadStateResources()
+	{
+		if (_content?.Level == null || !_content.Loaded)
+			return;
+
+		try
+		{
+			_content.Level.ReloadStateResources();
+		}
+		catch (Exception e)
+		{
+			ViewerLog.PrintErr("[StateInfo] Could not re-read the state resources: " + e);
+			return;
+		}
+
+		ViewerLog.Print("[StateInfo] Re-read " + _content.Level.StateResources.Count + " state(s) from disk after a save.");
+
+		if (_stateInfoOverlay != null && GodotObject.IsInstanceValid(_stateInfoOverlay))
+			_stateInfoOverlay.Rebuild(_pendingNavMeshState, _pendingCoverState);
+	}
+
+	/* Flip the scene geometry categories on/off in place */
+	public void RefreshSceneGeometryFilters()
+	{
+		if (_collisionOverlay != null && GodotObject.IsInstanceValid(_collisionOverlay))
+			_collisionOverlay.ApplyFilter();
+
+		foreach (KeyValuePair<MeshInstance3D, SceneFilterMesh> entry in _sceneFilterMeshes.ToArray())
+		{
+			LevelViewerSentMessages.PumpIfDue();
+			MeshInstance3D mesh = entry.Key;
+			if (mesh == null || !GodotObject.IsInstanceValid(mesh))
+			{
+				_sceneFilterMeshes.Remove(entry.Key);
+				continue;
+			}
+
+			ApplySceneFilterMeshState(mesh, entry.Value.Kind, entry.Value.Owner);
+		}
+	}
+
 
 	private void CreateRenderable(
 		Node3D parent,
@@ -3211,61 +5478,44 @@ public partial class AlienScene : Node3D
 		}
 
 		if (!IsMaterialSupported(material))
+		{
+			//Occlusion geometry has no diffuse to shade, so it only appears when its filter asks for it
+			if (AlienSceneMaterials.IsOcclusionShader(material))
+				CreateSceneFilterRenderable(parent, holder, SceneFilterKind.OcclusionMeshes, "occlusion");
 			return;
-
+		}
 		if (!_bulkMeshSpawning)
 			ModelReferenceRenderSettings.NotifyMeshSpawned(_modelReferenceMeshes.Count + 1);
 
 		MeshInstance3D meshInstance = new MeshInstance3D
 		{
 			Mesh = holder.MainMesh,
-			Visible = !_deferMeshTreeActivation,
+			Visible = !_deferMeshTreeActivation && ModelReferencesShown,
 		};
 		if (!_bulkMeshSpawning)
 			meshInstance.Name = holder.MainMesh.ResourceName + " (" + material.Name + ")";
 
-		if (sourceMaterialWriteIndex >= 0)
-		{
-			meshInstance.SetMeta(
-				ModelReferenceMaterialMapping.SourceMaterialWriteIndexMetaKey,
-				sourceMaterialWriteIndex);
-		}
-
-		if (TryResolveSubmeshWriteIndex(submesh, out int modelWriteIndex))
-		{
-			meshInstance.SetMeta(
-				ModelReferenceMaterialMapping.ModelWriteIndexMetaKey,
-				modelWriteIndex);
-		}
-
-		if (modelReferenceEntity != null)
-		{
-			meshInstance.SetMeta(
-				ModelReferenceMaterialOverrides.ModelReferenceEntityMetaKey,
-				modelReferenceEntity.shortGUID.AsUInt32);
-		}
-
 		Entity parameterEntity = overrideParameterEntity ?? modelReferenceEntity;
-		if (parameterEntity != null)
-		{
-			meshInstance.SetMeta(
-				ModelReferenceMaterialOverrides.OverrideParameterEntityMetaKey,
-				parameterEntity.shortGUID.AsUInt32);
-		}
+		//ModelWriteIndexMetaKey used to be written here too; nothing has ever read it back.
+		_meshBindings[meshInstance] = new MeshBinding(
+			sourceMaterialWriteIndex,
+			modelReferenceEntity == null ? 0 : modelReferenceEntity.shortGUID.AsUInt32,
+			parameterEntity == null ? 0 : parameterEntity.shortGUID.AsUInt32);
 
 		Entity fallbackEntity = fallbackParameterEntity ?? modelReferenceEntity;
 		LevelViewerMeshUtil.ConfigureMeshInstance(meshInstance);
 		if (!_bulkMeshSpawning)
-			meshInstance.AddToGroup("model_reference_renderable");
-		if (!_bulkMeshSpawning)
-			meshInstance.TreeExited += () => _modelReferenceMeshes.Remove(meshInstance);
+			meshInstance.TreeExited += () => { _modelReferenceMeshes.Remove(meshInstance); _meshBindings.Remove(meshInstance); };
 		_modelReferenceMeshes[meshInstance] = material;
-		meshInstance.MaterialOverride = GetSolidMaterialForModelReference(
+		meshInstance.MaterialOverride = WithMoverLook(GetSolidMaterialForModelReference(
 			material,
 			modelReferenceEntity,
 			parameterEntity,
-			fallbackEntity);
+			fallbackEntity), parent);
 		parent.AddChild(meshInstance);
+		PlanetLook.TryApply(this, meshInstance);
+		ApplyReflectionLayer(meshInstance, parent);
+		RegisterIfWater(meshInstance);
 		if (!_bulkMeshSpawning && ModelReferenceRenderSettings.WireframeEnabled)
 			UpdateWireframeOverlay(meshInstance, material, modelReferenceEntity, parameterEntity, fallbackEntity);
 		if (_deferBulkPickRegistration)
@@ -3309,6 +5559,8 @@ public partial class AlienScene : Node3D
 		int end = Mathf.Min(_largeScenePolicyIndex + LargeScenePolicyBatchSize, _largeScenePolicyMeshes.Length);
 		for (int i = _largeScenePolicyIndex; i < end; i++)
 		{
+			//A batch was 0.7 s on TECH_Hub
+			LevelViewerSentMessages.PumpIfDue();
 			MeshInstance3D mesh = _largeScenePolicyMeshes[i];
 			if (mesh == null || !GodotObject.IsInstanceValid(mesh))
 				continue;
@@ -3333,9 +5585,35 @@ public partial class AlienScene : Node3D
 		return LevelViewerPopulateTree.TryGetSpawnTransform(entity, out position, out rotation);
 	}
 
+	/// <summary>Which model and LOD a submesh belongs to, for naming the Godot mesh after it.</summary>
+	private readonly struct SubmeshOwner
+	{
+		public SubmeshOwner(Models.CS2 model, Models.CS2.Component.LOD lod) { Model = model; Lod = lod; }
+		public Models.CS2 Model { get; }
+		public Models.CS2.Component.LOD Lod { get; }
+	}
+
+	//Models.FindModel/FindModelLOD walk every submesh of every LOD of every component of every
+	//model, and populating a level asks for both once per unique mesh - 4.3 of the 5.4 seconds it
+	//took to build HAB_Airport's Godot meshes went on working out what to call them. The walk that
+	//builds the write-index cache already visits exactly this, so it records the answer too.
+	private readonly Dictionary<Models.CS2.Component.LOD.Submesh, SubmeshOwner> _submeshOwners =
+		new Dictionary<Models.CS2.Component.LOD.Submesh, SubmeshOwner>();
+
+	/// <summary>"model: lod" for a submesh, matching what Models.FindModel would have reported.</summary>
+	private string GetSubmeshDisplayName(Models.CS2.Component.LOD.Submesh submesh)
+	{
+		SubmeshOwner owner;
+		if (submesh == null || !_submeshOwners.TryGetValue(submesh, out owner))
+			return "?: ?";
+
+		return (owner.Model == null ? "?" : owner.Model.Name) + ": " + (owner.Lod == null ? "?" : owner.Lod.Name);
+	}
+
 	private void BuildSubmeshWriteIndexCache()
 	{
 		_submeshWriteIndexByReference.Clear();
+		_submeshOwners.Clear();
 		Models models = _content?.Level?.Models;
 		if (models?.Entries == null)
 			return;
@@ -3368,6 +5646,7 @@ public partial class AlienScene : Node3D
 						lock (gate)
 						{
 							_submeshWriteIndexByReference[submesh] = writeIndex;
+							_submeshOwners[submesh] = new SubmeshOwner(model, lod);
 						}
 					}
 				}
@@ -3424,9 +5703,7 @@ public partial class AlienScene : Node3D
 			return null;
 		}
 
-		Models.CS2.Component.LOD lod = models.FindModelLOD(sourceSubmesh);
-		Models.CS2 mesh = models.FindModel(sourceSubmesh);
-		string modelName = ((mesh == null) ? "?" : mesh.Name) + ": " + ((lod == null) ? "?" : lod.Name);
+		string modelName = GetSubmeshDisplayName(sourceSubmesh);
 		ArrayMesh arrayMesh = sourceSubmesh.ToArrayMesh();
 		if (arrayMesh == null || arrayMesh.GetSurfaceCount() == 0)
 		{
@@ -3520,18 +5797,19 @@ public partial class AlienScene : Node3D
 			return false;
 		}
 
-		uint parameterEntityId = parameterEntity?.shortGUID.AsUInt32 ?? 0;
-		uint fallbackEntityId = fallbackEntity?.shortGUID.AsUInt32 ?? 0;
 		int materialWriteIndex = _content.Level.Materials.GetWriteIndex(material);
-		ulong cacheKey = MakeModelReferenceOverrideMaterialKey(
-			materialWriteIndex,
-			parameterEntityId,
-			fallbackEntityId,
-			scalars,
-			wireframe);
+		ModelReferenceOverrideKey cacheKey = new ModelReferenceOverrideKey(materialWriteIndex, parameterEntity, fallbackEntity, wireframe);
+		/* One entry per (material, entities, wireframe), holding the values it was made for. The values were part of the
+		   key, so every new one an edit sent (each tick of a colour or opacity drag) added a material and kept the old one
+		   until the next populate. A different value replaces the entry; the old material stays with any mesh not yet
+		   respawned, and goes with it. */
 		if (_modelReferenceOverrideMaterials.TryGetValue(cacheKey, out ShaderMaterial cachedMaterial)
 			&& cachedMaterial != null
-			&& GodotObject.IsInstanceValid(cachedMaterial))
+			&& GodotObject.IsInstanceValid(cachedMaterial)
+			&& _modelReferenceOverrideMaterialScalars.TryGetValue(cacheKey, out ModelReferenceMaterialOverrides.EnvironmentColourScalars cachedScalars)
+			&& cachedScalars.Vertex == scalars.Vertex
+			&& cachedScalars.Diffuse == scalars.Diffuse
+			&& cachedScalars.VertexScale == scalars.VertexScale)
 		{
 			shaderMaterial = cachedMaterial;
 			return true;
@@ -3557,34 +5835,99 @@ public partial class AlienScene : Node3D
 		}
 
 		if (shaderMaterial != null)
+		{
+			if (cachedMaterial != null && cachedMaterial != shaderMaterial)
+				ForgetMoverLookCopies(cachedMaterial);
 			_modelReferenceOverrideMaterials[cacheKey] = shaderMaterial;
+			_modelReferenceOverrideMaterialSources[cacheKey] = material;
+			_modelReferenceOverrideMaterialScalars[cacheKey] = scalars;
+		}
 
 		return shaderMaterial != null;
 	}
 
-	private static ulong MakeModelReferenceOverrideMaterialKey(
-		int materialWriteIndex,
-		uint parameterEntityId,
-		uint fallbackEntityId,
-		ModelReferenceMaterialOverrides.EnvironmentColourScalars scalars,
-		bool wireframe)
+	/* An entity deleted from the script takes its override entries with it. They are keyed by the entity object, and an
+	   undo brings it back as a new one, so they were never matched again: each delete and undo of a coloured
+	   ModelReference (or of an alias carrying its colours) kept the old entity and a material per surface until the next
+	   populate. The materials stay with the meshes still showing them, and go when those are freed. */
+	public void ForgetModelReferenceOverrideMaterials(Entity entity)
 	{
-		ulong hash = (ulong)(uint)materialWriteIndex;
-		hash = unchecked(hash * 397 + parameterEntityId);
-		hash = unchecked(hash * 397 + fallbackEntityId);
-		hash = unchecked(hash * 397 + (wireframe ? 1u : 0u));
-		hash = unchecked(hash * 397 + (uint)scalars.Vertex.GetHashCode());
-		hash = unchecked(hash * 397 + (uint)scalars.Diffuse.GetHashCode());
-		return hash;
+		if (entity == null || _modelReferenceOverrideMaterials.Count == 0)
+			return;
+
+		ForgetModelReferenceOverrideMaterialsWhere(key => key.ParameterEntity == entity || key.FallbackEntity == entity);
+	}
+
+	/// <summary>A whole composite leaving the script (a variant or a refactor undone): the entries of all its entities.</summary>
+	public void ForgetModelReferenceOverrideMaterials(Composite composite)
+	{
+		if (composite == null || _modelReferenceOverrideMaterials.Count == 0)
+			return;
+
+		//Entity has no equality of its own: these are the objects themselves, as in the keys
+		HashSet<Entity> gone = new HashSet<Entity>(composite.GetEntities());
+		ForgetModelReferenceOverrideMaterialsWhere(key =>
+			(key.ParameterEntity != null && gone.Contains(key.ParameterEntity)) || (key.FallbackEntity != null && gone.Contains(key.FallbackEntity)));
+	}
+
+	private void ForgetModelReferenceOverrideMaterialsWhere(Func<ModelReferenceOverrideKey, bool> match)
+	{
+		List<ModelReferenceOverrideKey> stale = null;
+		foreach (ModelReferenceOverrideKey key in _modelReferenceOverrideMaterials.Keys)
+		{
+			if (match(key))
+				(stale ??= new List<ModelReferenceOverrideKey>()).Add(key);
+		}
+		if (stale == null)
+			return;
+
+		foreach (ModelReferenceOverrideKey key in stale)
+		{
+			if (_modelReferenceOverrideMaterials.TryGetValue(key, out ShaderMaterial gone))
+				ForgetMoverLookCopies(gone);
+			_modelReferenceOverrideMaterials.Remove(key);
+			_modelReferenceOverrideMaterialSources.Remove(key);
+			_modelReferenceOverrideMaterialScalars.Remove(key);
+		}
+	}
+
+	/* The room cube and glow copies made from an override material that has been replaced or forgotten (WithMoverLook): keyed
+	   by it, they kept it and themselves until the next populate - two materials for every tick of a colour drag on a light
+	   fitting. Like it, they stay with any mesh still showing them, and go with it. */
+	private void ForgetMoverLookCopies(ShaderMaterial source)
+	{
+		if (source == null)
+			return;
+		_materialMoverUse.Remove(source);
+		if (_roomCubeMaterials.Count == 0)
+			return;
+
+		List<(ShaderMaterial, Textures.TEX4, MoverEmissive?)> stale = null;
+		foreach (KeyValuePair<(ShaderMaterial, Textures.TEX4, MoverEmissive?), ShaderMaterial> entry in _roomCubeMaterials)
+		{
+			if (entry.Key.Item1 == source)
+				(stale ??= new List<(ShaderMaterial, Textures.TEX4, MoverEmissive?)>()).Add(entry.Key);
+		}
+		if (stale == null)
+			return;
+		foreach ((ShaderMaterial, Textures.TEX4, MoverEmissive?) key in stale)
+		{
+			if (_roomCubeMaterials.Remove(key, out ShaderMaterial copy) && copy != null)
+				_materialMoverUse.Remove(copy);
+		}
 	}
 
 	private Entity ResolveModelReferenceEntityFromMesh(MeshInstance3D meshInstance)
 	{
-		if (meshInstance == null || !meshInstance.HasMeta(ModelReferenceMaterialOverrides.ModelReferenceEntityMetaKey))
+		MeshBinding binding;
+		if (meshInstance == null
+			|| !_meshBindings.TryGetValue(meshInstance, out binding)
+			|| binding.ModelReferenceEntityId == 0)
+		{
 			return null;
+		}
 
-		uint entityId = meshInstance.GetMeta(ModelReferenceMaterialOverrides.ModelReferenceEntityMetaKey).AsUInt32();
-		return ModelReferenceMaterialMapping.TryGetEntityById(entityId);
+		return ModelReferenceMaterialMapping.TryGetEntityById(binding.ModelReferenceEntityId);
 	}
 
 	private void ResolveMaterialOverrideEntitiesFromMesh(
@@ -3596,11 +5939,15 @@ public partial class AlienScene : Node3D
 		modelReferenceEntity = ResolveModelReferenceEntityFromMesh(meshInstance);
 		fallbackParameterEntity = modelReferenceEntity;
 		overrideParameterEntity = modelReferenceEntity;
-		if (meshInstance == null || !meshInstance.HasMeta(ModelReferenceMaterialOverrides.OverrideParameterEntityMetaKey))
+		MeshBinding overrideBinding;
+		if (meshInstance == null
+			|| !_meshBindings.TryGetValue(meshInstance, out overrideBinding)
+			|| overrideBinding.OverrideParameterEntityId == 0)
+		{
 			return;
+		}
 
-		uint overrideEntityId = meshInstance.GetMeta(ModelReferenceMaterialOverrides.OverrideParameterEntityMetaKey).AsUInt32();
-		Entity resolvedOverride = ModelReferenceMaterialMapping.TryGetEntityById(overrideEntityId);
+		Entity resolvedOverride = ModelReferenceMaterialMapping.TryGetEntityById(overrideBinding.OverrideParameterEntityId);
 		if (resolvedOverride != null)
 			overrideParameterEntity = resolvedOverride;
 	}
@@ -3650,13 +5997,392 @@ public partial class AlienScene : Node3D
 
 		_wireframeMaterials.Clear();
 
-		foreach (KeyValuePair<ulong, ShaderMaterial> entry in _modelReferenceOverrideMaterials)
+		foreach (KeyValuePair<ModelReferenceOverrideKey, ShaderMaterial> entry in _modelReferenceOverrideMaterials)
 		{
 			if (entry.Value != null && GodotObject.IsInstanceValid(entry.Value))
 				entry.Value.Dispose();
 		}
 
 		_modelReferenceOverrideMaterials.Clear();
+		_modelReferenceOverrideMaterialSources.Clear();
+		_modelReferenceOverrideMaterialScalars.Clear();
+
+		foreach (ShaderMaterial copy in _roomCubeMaterials.Values)
+		{
+			if (copy != null && GodotObject.IsInstanceValid(copy))
+				copy.Dispose();
+		}
+		_roomCubeMaterials.Clear();
+		_roomCubesUnavailable.Clear();
+		_moverLookByTarget.Clear();
+		_materialMoverUse.Clear();
+		_moverEnvironmentMaps = null;
+		_moverEmissives = null;
+		_moverVisible = null;
+		_moverReflective = null;
+		_moverReflectiveEntities = null;
+	}
+
+	/* What the movers give an instance of its own, on a copy of its material:
+	   - The game reflects the cube of the room an instance is in - the EnvironmentMap whose area claims it - rather than the
+	     material's own ENVIRONMENT_MAP, a generic one most materials share (TECH_HUB's metals all point at env_base or
+	     env_base_2: dark, with hard white lights, where the lobby's own cube is a dim warm hall). The claims aren't resolved
+	     here, which would mean following each EnvironmentMap's links as the zone highlight does.
+	   - An EMISSIVE instance has its own EMISSIVE_TINT in place of its material's, from its mover (InstanceEmissiveTint):
+	     its tint and intensity, with replace_tint and replace_intensity as the constant's negative lanes. So a replaced
+	     tint colours the glow from the diffuse's brightness and leaves the surface as it is (HAB_SHOPPINGCENTRE's
+	     Bright_Warm panels glow cyan), and an instance at intensity 0, or with its lighting master off, doesn't glow (the
+	     alien nest's generator coils, 80 of its light panels).
+	   Both as WORLD/ENVIRONMENTMAP.BIN and the MVR had them, so this is the level as last saved: an instance added, moved or
+	   retinted since keeps its material's until then. A copy per (material, cube, glow) it's seen with. */
+	private ShaderMaterial WithMoverLook(ShaderMaterial material, Node3D renderTarget)
+	{
+		if (material == null || renderTarget == null)
+			return material;
+		if (!_materialMoverUse.TryGetValue(material, out (bool Reflects, bool Emissive) use))
+		{
+			use = (material.GetShaderParameter(AlienSceneMaterials.UseEnvironmentParam).AsBool(),
+				material.GetShaderParameter(AlienSceneMaterials.EmissiveParam).AsBool());
+			_materialMoverUse[material] = use;
+		}
+		if (!use.Reflects && !use.Emissive)
+			return material;
+
+		long start = System.Diagnostics.Stopwatch.GetTimestamp();
+		MoverLook look = GetMoverLook(renderTarget);
+		Textures.TEX4 cube = use.Reflects ? look.Cube : null;
+		if (cube != null && _roomCubesUnavailable.Contains(cube))
+			cube = null;
+		MoverEmissive? emissive = use.Emissive ? look.Emissive : null;
+		//The game only sets it on a material with an EMISSIVE_TINT of its own, and where it's that already nothing changes
+		if (emissive is MoverEmissive own && (!material.HasMeta(AlienSceneMaterials.EmissiveTintMeta)
+			|| material.GetMeta(AlienSceneMaterials.EmissiveTintMeta).AsVector4() == own.Tint))
+			emissive = null;
+
+		ShaderMaterial result = material;
+		ShaderMaterial copy = null;
+		//The cube is only converted for a copy not made yet: finding it in the texture table costs a search of the table
+		bool known = (cube != null || emissive != null) && TryGetMoverLookCopy(material, cube, emissive, out copy);
+		Cubemap cubemap = null;
+		if (!known && cube != null)
+		{
+			cubemap = GetTexOrCube(new TexturePtr() { Texture = cube, Location = TexturePtr.Source.LEVEL })?.Cubemap;
+			if (cubemap == null)
+			{
+				_roomCubesUnavailable.Add(cube);
+				cube = null;
+				known = emissive != null && TryGetMoverLookCopy(material, cube, emissive, out copy);
+			}
+		}
+		if (cube != null || emissive != null)
+		{
+			if (known)
+			{
+				result = copy;
+			}
+			else
+			{
+				/* Every uniform copied by hand: Duplicate() drops the ones whose value isn't the uniform's own type (the
+				   diffuse tint, a Color on a vec4), and the stairwell's black floor came out white */
+				copy = new ShaderMaterial() { Shader = material.Shader, RenderPriority = material.RenderPriority, NextPass = material.NextPass };
+				foreach (StringName name in GetShaderUniformNames(material.Shader))
+					copy.SetShaderParameter(name, material.GetShaderParameter(name));
+				if (cube != null)
+				{
+					copy.SetShaderParameter(AlienSceneMaterials.UseEnvironmentRoomCubeParam, true);
+					copy.SetShaderParameter(AlienSceneMaterials.EnvironmentRoomCubeParam, cubemap);
+				}
+				if (emissive is MoverEmissive glow)
+					AlienSceneMaterials.ApplyEmissiveTint(copy, glow.Tint, (float)material.GetMeta(AlienSceneMaterials.EmissiveMultMeta, 1f));
+				//A copy already wears its look: handed back in, it's left as it is
+				_materialMoverUse[copy] = (false, false);
+				_roomCubeMaterials[(material, cube, emissive)] = copy;
+				result = copy;
+			}
+		}
+		if (use.Reflects)
+		{
+			if (cube == null)
+				_roomCubeMisses++;
+			else
+				_roomCubeMeshes++;
+		}
+		if (emissive != null)
+			_moverEmissiveMeshes++;
+		_roomCubeTicks += System.Diagnostics.Stopwatch.GetTimestamp() - start;
+		return result;
+	}
+
+	/* The EMISSIVE_TINT the game sets on an instance's material from its mover: the tint's bytes as sRGB, made linear, and the
+	   intensity - the tint negated where it replaces the material's colour (replace_tint), the intensity where it replaces
+	   its strength (replace_intensity), and none at all while its lighting master is off. */
+	private static Vector4 InstanceEmissiveTint(Movers.MOVER_DESCRIPTOR mover)
+	{
+		static float Linear(float value)
+		{
+			float c = value / 255f;
+			return c <= 0.04045f ? c / 12.92f : Mathf.Pow((c + 0.055f) / 1.055f, 2.4f);
+		}
+		float sign = mover.EmissiveFlags.HasFlag(Movers.EmissiveFlag.ReplaceTint) ? -1f : 1f;
+		float intensity = mover.EmissiveFlags.HasFlag(Movers.EmissiveFlag.MasterOff) ? 0f
+			: mover.EmissiveFlags.HasFlag(Movers.EmissiveFlag.ReplaceIntensity) ? -mover.EmissiveIntensityMultiplier : mover.EmissiveIntensityMultiplier;
+		return new Vector4(Linear(mover.EmissiveTint.X) * sign, Linear(mover.EmissiveTint.Y) * sign, Linear(mover.EmissiveTint.Z) * sign, intensity);
+	}
+
+	private bool TryGetMoverLookCopy(ShaderMaterial material, Textures.TEX4 cube, MoverEmissive? emissive, out ShaderMaterial copy)
+	{
+		return _roomCubeMaterials.TryGetValue((material, cube, emissive), out copy) && copy != null && GodotObject.IsInstanceValid(copy);
+	}
+
+	/* A shader's uniform names, read once: GetShaderUniformList builds a fresh array of dictionaries on every call, and asking
+	   it for each room cube copy was most of their cost (ENG_REACTORCORE makes 3,389) */
+	private readonly Dictionary<Shader, StringName[]> _shaderUniformNames = new Dictionary<Shader, StringName[]>();
+
+	private StringName[] GetShaderUniformNames(Shader shader)
+	{
+		if (_shaderUniformNames.TryGetValue(shader, out StringName[] names))
+			return names;
+		Godot.Collections.Array uniforms = shader.GetShaderUniformList();
+		names = new StringName[uniforms.Count];
+		for (int i = 0; i < names.Length; i++)
+			names[i] = uniforms[i].AsGodotDictionary()["name"].AsStringName();
+		_shaderUniformNames[shader] = names;
+		return names;
+	}
+
+	//Each mover's Visible flag, by its entity handle (GetMoverShown); per populate
+	private Dictionary<(uint, uint), bool> _moverVisible;
+	//The movers in the water's mirror (CullFlag INCLUDE_IN_REFLECTIVE), by entity handle, and their entities; per populate
+	private HashSet<(uint, uint)> _moverReflective;
+	private HashSet<uint> _moverReflectiveEntities;
+	//Models whose include_in_planar_reflections has been edited since the level was loaded: their own flag is newer
+	private readonly HashSet<uint> _reflectiveByOwnFlag = new HashSet<uint>();
+
+	/* Puts a model's mesh in the water's mirror (LevelViewerPlanarReflection's layer) or out of it: as the level was built - its
+	   mover's INCLUDE_IN_REFLECTIVE - while the root is open and the instance was there when the level loaded, else as the
+	   script has it now: include_in_planar_reflections on its ModelReference, or on the composite instance placing it
+	   (CathodeLib's rule, Instancing) */
+	private void ApplyReflectionLayer(MeshInstance3D mesh, Node3D renderTarget)
+	{
+		if (mesh == null || !GodotObject.IsInstanceValid(mesh))
+			return;
+		//Never water: the mirror doesn't mirror the water reading it
+		bool water = AlienSceneMaterials.IsWaterMaterial(mesh.MaterialOverride);
+		bool reflective = !water && IsReflectiveInstance(renderTarget);
+		mesh.Layers = reflective ? mesh.Layers | LevelViewerPlanarReflection.ReflectionLayer : mesh.Layers & ~LevelViewerPlanarReflection.ReflectionLayer;
+	}
+
+	//A model drawn with a water material (a puddle) is a plane the water's mirror can be taken from: flat on the floor
+	private static void RegisterIfWater(MeshInstance3D mesh)
+	{
+		if (mesh != null && AlienSceneMaterials.IsWaterMaterial(mesh.MaterialOverride))
+			LevelViewerPlanarReflection.Register(mesh, false);
+	}
+
+	//The entity a mesh draws for: the nearest node up from it with one
+	private Entity FindRenderOwner(Node3D renderTarget, out Node3D ownerNode)
+	{
+		ownerNode = null;
+		for (Node node = renderTarget; node != null && node != _parentNode; node = node.GetParent())
+		{
+			if (node is Node3D node3D && _nodeEntities.TryGetValue(node3D, out Entity owner))
+			{
+				ownerNode = node3D;
+				return owner;
+			}
+		}
+		return null;
+	}
+
+	private bool IsReflectiveInstance(Node3D renderTarget)
+	{
+		Entity owner = FindRenderOwner(renderTarget, out Node3D ownerNode);
+		if (owner == null)
+			return false;
+
+		uint ownerId = owner.shortGUID.AsUInt32;
+		if (HasMovers && IsShowingLevelRoot && _entitiesAtLevelLoad != null && _entitiesAtLevelLoad.Contains(ownerId) && !_reflectiveByOwnFlag.Contains(ownerId))
+		{
+			if (_moverReflective == null)
+			{
+				_moverReflective = new HashSet<(uint, uint)>();
+				_moverReflectiveEntities = new HashSet<uint>();
+				foreach (Movers.MOVER_DESCRIPTOR mover in _content.Level.Movers.Entries)
+				{
+					if (mover?.Entity == null || !mover.CullFlags.HasFlag(Movers.CullFlag.INCLUDE_IN_REFLECTIVE))
+						continue;
+					_moverReflective.Add((mover.Entity.composite_instance_id.AsUInt32, mover.Entity.entity_id.AsUInt32));
+					_moverReflectiveEntities.Add(mover.Entity.entity_id.AsUInt32);
+				}
+			}
+			//Most aren't: only one any mover of is walked for its placement
+			if (!_moverReflectiveEntities.Contains(ownerId))
+				return false;
+			if (TryBuildEntityIdChainFromNode(ownerNode, out List<uint> chain) && chain.Count != 0 && chain.All(_entitiesAtLevelLoad.Contains))
+			{
+				List<ShortGuid> path = new List<ShortGuid>(chain.Count);
+				foreach (uint id in chain)
+					path.Add(new ShortGuid(id));
+				return _moverReflective.Contains((path.GenerateCompositeInstanceID().AsUInt32, chain[chain.Count - 1]));
+			}
+		}
+
+		if ((owner.GetParameter("include_in_planar_reflections")?.content as cBool)?.value == true)
+			return true;
+		for (Node node = ownerNode?.GetParent(); node != null && node != _parentNode; node = node.GetParent())
+		{
+			if (node is Node3D node3D && _nodeEntities.TryGetValue(node3D, out Entity entity) && entity is FunctionEntity function && !function.function.IsFunctionType)
+				return (function.GetParameter("include_in_planar_reflections")?.content as cBool)?.value == true;
+		}
+		return false;
+	}
+
+	/// <summary>After include_in_planar_reflections is edited on an entity: every model it places goes in or out of the mirror.</summary>
+	private void RefreshReflectionLayersUnder(Entity edited)
+	{
+		if (edited == null)
+			return;
+		_reflectiveByOwnFlag.Add(edited.shortGUID.AsUInt32);
+		foreach (MeshInstance3D mesh in _modelReferenceMeshes.Keys)
+		{
+			if (mesh == null || !GodotObject.IsInstanceValid(mesh))
+				continue;
+			for (Node node = mesh.GetParent(); node != null && node != _parentNode; node = node.GetParent())
+			{
+				if (node is Node3D node3D && _nodeEntities.TryGetValue(node3D, out Entity entity) && entity == edited)
+				{
+					//The edit is the model's own, or its placement's: either way the script speaks for it from now on
+					Entity model = FindRenderOwner(mesh.GetParent() as Node3D, out _);
+					if (model != null)
+						_reflectiveByOwnFlag.Add(model.shortGUID.AsUInt32);
+					ApplyReflectionLayer(mesh, mesh.GetParent() as Node3D);
+					break;
+				}
+			}
+		}
+	}
+
+	/// <summary>Whether the level has movers at all (a level made new has none until it's built).</summary>
+	public bool HasMovers => _content?.Level?.Movers?.Entries != null && _content.Level.Movers.Entries.Count != 0;
+
+	/* The composite instances, surface effects and water the level had when it was loaded, by entity (GetMoverShown). Taken
+	   before any edit reaches the viewer, so one pasted in since - or an instance of a composite holding one - is not among
+	   them however often the scene is rebuilt after */
+	private HashSet<uint> _entitiesAtLevelLoad;
+	//Effects whose show_on_reset has been edited since the level was loaded: their own flag is newer than their mover's
+	private readonly HashSet<uint> _effectsShownByOwnFlag = new HashSet<uint>();
+
+	private void CollectEffectsAtLevelLoad()
+	{
+		_entitiesAtLevelLoad = new HashSet<uint>();
+		if (_content?.Level?.Commands?.Entries == null)
+			return;
+		foreach (Composite composite in _content.Level.Commands.Entries)
+		{
+			if (composite?.functions == null)
+				continue;
+			foreach (FunctionEntity function in composite.functions)
+			{
+				//(and the models, for whether they're in the water's mirror: IsReflectiveInstance)
+				if (function != null && (!function.function.IsFunctionType || SurfaceEffectOverlay.IsSurfaceEffect(function) || WaterSurface.IsWater(function)
+					|| function.function.AsFunctionType == FunctionType.ModelReference))
+					_entitiesAtLevelLoad.Add(function.shortGUID.AsUInt32);
+			}
+		}
+	}
+
+	private bool IsShowingLevelRoot => _loadedComposite != null && _content?.Loaded == true
+		&& _loadedComposite == _content.Level?.Commands?.EntryPoints?[0];
+	/// <summary>
+	/// Whether the level shows a surface effect's or water's instance from the start, as its mover has it: show_on_reset as
+	/// the instance resolves it, links and overrides and all. False where the instance has no mover: one the level leaves out
+	/// (deleted, a template: HAB_CORPORATEPENT's walls are the frozen set pieces with no frost boxes built). Null where the
+	/// movers don't speak for it and its own flag says: outside the level's own scene (a composite opened on its own has none
+	/// of their handles), and for an instance added since the level was loaded or an effect shown or hidden since - the movers
+	/// are the level as last built.
+	/// </summary>
+	public bool? GetMoverShown(Node3D entityNode, Entity entity)
+	{
+		if (entityNode == null || entity == null || !HasMovers || !IsShowingLevelRoot || _entitiesAtLevelLoad == null
+			|| _effectsShownByOwnFlag.Contains(entity.shortGUID.AsUInt32))
+			return null;
+		if (!TryBuildEntityIdChainFromNode(entityNode, out List<uint> chain) || chain.Count == 0)
+			return null;
+		foreach (uint id in chain)
+		{
+			if (!_entitiesAtLevelLoad.Contains(id))
+				return null;
+		}
+
+		if (_moverVisible == null)
+		{
+			_moverVisible = new Dictionary<(uint, uint), bool>();
+			foreach (Movers.MOVER_DESCRIPTOR mover in _content.Level.Movers.Entries)
+			{
+				if (mover?.Entity != null)
+					_moverVisible[(mover.Entity.composite_instance_id.AsUInt32, mover.Entity.entity_id.AsUInt32)] = mover.Flags?.Visible ?? true;
+			}
+		}
+		List<ShortGuid> path = new List<ShortGuid>(chain.Count);
+		foreach (uint id in chain)
+			path.Add(new ShortGuid(id));
+		return _moverVisible.TryGetValue((path.GenerateCompositeInstanceID().AsUInt32, chain[chain.Count - 1]), out bool visible) && visible;
+	}
+
+	/// <summary>The cube and the glow the level's movers give the instance a render target belongs to (null where none).</summary>
+	private MoverLook GetMoverLook(Node3D renderTarget)
+	{
+		if (_moverLookByTarget.TryGetValue(renderTarget, out MoverLook known))
+			return known;
+
+		if (_moverEnvironmentMaps == null)
+		{
+			_moverEnvironmentMaps = new Dictionary<(uint, uint), Textures.TEX4>();
+			_moverEmissives = new Dictionary<(uint, uint), MoverEmissive>();
+			_moverLookEntities = new HashSet<uint>();
+			List<Movers.MOVER_DESCRIPTOR> movers = _content?.Level?.Movers?.Entries;
+			if (movers != null)
+			{
+				foreach (Movers.MOVER_DESCRIPTOR mover in movers)
+				{
+					if (mover?.Entity == null)
+						continue;
+					(uint, uint) key = (mover.Entity.composite_instance_id.AsUInt32, mover.Entity.entity_id.AsUInt32);
+					//Every instance drawing an EMISSIVE material has its own glow, even a plain white x1 one (in place of the
+					//material's tint); one that's the material's own already is left as it is (WithMoverLook)
+					bool glows = mover.RenderableElements.Any(o => AlienSceneMaterials.IsEmissiveEnvironment(o?.Material));
+					if (mover.EnvironmentMap == null && !glows)
+						continue;
+					if (mover.EnvironmentMap != null)
+						_moverEnvironmentMaps[key] = mover.EnvironmentMap;
+					if (glows)
+						_moverEmissives[key] = new MoverEmissive(InstanceEmissiveTint(mover));
+					_moverLookEntities.Add(key.Item2);
+				}
+			}
+		}
+
+		//Most movers give nothing of their own (TECH_HUB: 1,282 of 36,130 have a room cube), so the chain is only walked for
+		//a ModelReference one of those is an instance of - the nearest node up with an entity is it
+		MoverLook look = default;
+		Entity owner = null;
+		for (Node node = renderTarget; owner == null && node != null && node != _parentNode; node = node.GetParent())
+		{
+			if (node is Node3D node3D)
+				_nodeEntities.TryGetValue(node3D, out owner);
+		}
+		if (owner != null && _moverLookEntities.Contains(owner.shortGUID.AsUInt32) && TryBuildEntityIdChainFromNode(renderTarget, out List<uint> chain))
+		{
+			//The instance as a mover names it: the composites it's in, hashed, and the ModelReference within the last
+			List<ShortGuid> path = new List<ShortGuid>(chain.Count);
+			foreach (uint id in chain)
+				path.Add(new ShortGuid(id));
+			(uint, uint) key = (path.GenerateCompositeInstanceID().AsUInt32, chain[chain.Count - 1]);
+			_moverEnvironmentMaps.TryGetValue(key, out Textures.TEX4 cube);
+			look = new MoverLook(cube, _moverEmissives.TryGetValue(key, out MoverEmissive glow) ? glow : null);
+		}
+		_moverLookByTarget[renderTarget] = look;
+		return look;
 	}
 
 	private void EnsureSolidMaterial(Materials.Material material)
@@ -3670,6 +6396,10 @@ public partial class AlienScene : Node3D
 	}
 
 	private const string WireframeOverlayNodeName = "WireframeOverlay";
+	//The same name as the engine wants it, made once - a string here would be a temporary StringName or
+	//NodePath per call with nothing keeping it alive across the icall (see LevelViewerPick).
+	private static readonly StringName WireframeOverlayNodeStringName = new StringName(WireframeOverlayNodeName);
+	private static readonly NodePath WireframeOverlayNodePath = new NodePath(WireframeOverlayNodeName);
 	private const string LegacyWireframeOverlaySuffix = " WireframeOverlay";
 
 	private void ApplyModelReferenceMaterial(
@@ -3686,11 +6416,13 @@ public partial class AlienScene : Node3D
 				out overrideParameterEntity,
 				out fallbackParameterEntity);
 
-		solidMesh.MaterialOverride = GetSolidMaterialForModelReference(
+		solidMesh.MaterialOverride = WithMoverLook(GetSolidMaterialForModelReference(
 			material,
 			modelReferenceEntity,
 			overrideParameterEntity,
-			fallbackParameterEntity);
+			fallbackParameterEntity), solidMesh.GetParent() as Node3D);
+		PlanetLook.TryApply(this, solidMesh);
+		RegisterIfWater(solidMesh);
 		UpdateWireframeOverlay(
 			solidMesh,
 			material,
@@ -3734,7 +6466,8 @@ public partial class AlienScene : Node3D
 				fallbackParameterEntity);
 			if (wireframe != null)
 				overlay.MaterialOverride = wireframe;
-			overlay.Visible = true;
+			//A greyed-out mesh keeps its overlay hidden; LevelViewerCompositeFocus shows it again when the grey comes off
+			overlay.Visible = !LevelViewerCompositeFocus.IsMeshVisuallyDimmed(solidMesh);
 		}
 	}
 
@@ -3743,7 +6476,7 @@ public partial class AlienScene : Node3D
 		if (solidMesh == null || !GodotObject.IsInstanceValid(solidMesh))
 			return null;
 
-		return solidMesh.GetNodeOrNull<MeshInstance3D>(WireframeOverlayNodeName);
+		return solidMesh.GetNodeOrNull<MeshInstance3D>(WireframeOverlayNodePath);
 	}
 
 	private void RemoveLegacySiblingWireframeOverlay(MeshInstance3D solidMesh)
@@ -3769,13 +6502,13 @@ public partial class AlienScene : Node3D
 
 		MeshInstance3D overlay = new MeshInstance3D
 		{
-			Name = WireframeOverlayNodeName,
+			Name = WireframeOverlayNodeStringName,
 			Mesh = solidMesh.Mesh,
 			CastShadow = GeometryInstance3D.ShadowCastingSetting.Off,
 			Visible = true,
 		};
 		LevelViewerMeshUtil.ConfigureMeshInstance(overlay);
-		overlay.AddToGroup("model_reference_wireframe_overlay");
+		overlay.AddToGroup(LevelViewerPick.WireframeOverlayGroupName);
 		solidMesh.AddChild(overlay);
 		return overlay;
 	}
@@ -3785,10 +6518,15 @@ public partial class AlienScene : Node3D
 		SceneTree tree = GetTree();
 		if (tree != null)
 		{
-			foreach (Node node in tree.GetNodesInGroup("model_reference_wireframe_overlay"))
+			foreach (Node node in tree.GetNodesInGroup(LevelViewerPick.WireframeOverlayGroupName))
 			{
-				if (node is Node3D node3D && GodotObject.IsInstanceValid(node3D))
-					node3D.QueueFree();
+				/* Out of the group and off its name first: wireframe off and on again within one frame (two settings packets
+				   handled together) found the queued overlays by name, kept them, and they were freed at the end of it */
+				if (node is Node3D node3D && GodotObject.IsInstanceValid(node3D) && !node3D.IsQueuedForDeletion())
+				{
+					node3D.RemoveFromGroup(LevelViewerPick.WireframeOverlayGroupName);
+					FreeReleasingName(node3D);
+				}
 			}
 		}
 
@@ -3807,6 +6545,7 @@ public partial class AlienScene : Node3D
 			if (entry.Key == null || !GodotObject.IsInstanceValid(entry.Key))
 			{
 				_modelReferenceMeshes.Remove(entry.Key);
+				_meshBindings.Remove(entry.Key);
 				continue;
 			}
 
@@ -3834,6 +6573,100 @@ public partial class AlienScene : Node3D
 
 		TexOrCube texture = GetTexOrCube(texturePtr);
 		return texture?.Texture;
+	}
+
+	/* Textures an entity names by path (a SurfaceEffectBox's TEXTURE_MAP): the level's pak first, then global's, converted
+	   as a material's are. The paks are only searchable by name a texture at a time, so each path found is kept; one not
+	   found is looked for again next time (a texture imported since, or a path still being typed) */
+	private readonly Dictionary<string, Texture2D> _texturesByPath = new Dictionary<string, Texture2D>(StringComparer.OrdinalIgnoreCase);
+
+	public Texture2D GetTextureByPath(string path)
+	{
+		if (string.IsNullOrEmpty(path))
+			return null;
+		//Null: found, restored, and still not convertible - not worth another read of the pak
+		if (_texturesByPath.TryGetValue(path, out Texture2D known) && (known == null || GodotObject.IsInstanceValid(known)))
+			return known;
+
+		TexturePtr.Source source = TexturePtr.Source.LEVEL;
+		Textures.TEX4 tex = _content?.Level?.Textures?.GetEnvironmentMapByPath(path);
+		if (tex == null)
+		{
+			source = TexturePtr.Source.GLOBAL;
+			tex = LevelContent.Global?.Textures?.GetEnvironmentMapByPath(path);
+		}
+		if (tex == null)
+			return null;
+
+		/* A populate converts the textures its surface effects name (AddSurfaceEffectTextures) and lets go of every texture's
+		   bytes after; one named since - a TEXTURE_MAP typed in, a frost box pasted in - had none left to convert, and the
+		   overlay drew as flat white. Restored and converted here, as an entity spawned since has its models */
+		LevelViewerPopulatePrewarm.Plan plan = new LevelViewerPopulatePrewarm.Plan();
+		plan.Textures.Add(tex);
+		plan.TextureLocations[tex] = source;
+		PrewarmPlanIfMissing(plan, "texture " + path);
+
+		Texture2D texture = GetTexOrCube(new TexturePtr() { Texture = tex, Location = source })?.Texture;
+		_texturesByPath[path] = texture;
+		return texture;
+	}
+
+	/* Volume textures an entity names by path (a SimpleWater's CAUSTIC_TEXTURE: sixteen slices played as a loop), built from the
+	   source binaries while a populate holds them - the water's are in its plan (AddSurfaceEffectTextures) and built as soon
+	   as it is restored (RestoreReleasedSourceData), before converting it lets go of them - and kept for the level. Null
+	   where it can't be: not found, not a volume, or its bytes gone (an entity added after the populates). */
+	//By the texture itself: TEX4 hashes its content's first bytes, so once they're let go of it would hash as another
+	private readonly Dictionary<Textures.TEX4, Texture3D> _volumeTextures = new Dictionary<Textures.TEX4, Texture3D>(ReferenceEqualityComparer.Instance);
+
+	public Texture3D GetVolumeTextureByPath(string path)
+	{
+		if (string.IsNullOrEmpty(path))
+			return null;
+		Textures.TEX4 tex = _content?.Level?.Textures?.GetEnvironmentMapByPath(path) ?? LevelContent.Global?.Textures?.GetEnvironmentMapByPath(path);
+		if (tex == null)
+			return null;
+		if (_volumeTextures.TryGetValue(tex, out Texture3D known) && GodotObject.IsInstanceValid(known))
+			return known;
+
+		Textures.TEX4.Texture part = SelectTexPartForConversion(tex);
+		Image.Format format = AlienSceneTextures.MapImageFormat(tex.Format);
+		if (part == null || part.Depth <= 1 || format == Image.Format.Max)
+		{
+			ViewerLog.Print("[Texture] No volume of " + path + ": " + (part == null ? "its data is let go of" : "depth " + part.Depth + ", " + tex.Format));
+			return null;
+		}
+		int width = part.Width, height = part.Height, depth = part.Depth;
+		int sliceBytes = AlienSceneTextures.GetBaseMipByteSize(width, height, format, tex.Format);
+		if (sliceBytes <= 0 || part.Content.Length < sliceBytes * depth)
+			return null;
+
+		//The slices are stored one after another, a mip each
+		Godot.Collections.Array<Image> slices = new Godot.Collections.Array<Image>();
+		for (int i = 0; i < depth; i++)
+		{
+			byte[] bytes = new byte[sliceBytes];
+			System.Array.Copy(part.Content, i * sliceBytes, bytes, 0, sliceBytes);
+			slices.Add(Image.CreateFromData(width, height, false, format, bytes));
+		}
+		//Kept compressed where the renderer takes it so; otherwise as plain colour
+		ImageTexture3D volume = new ImageTexture3D { ResourceName = path };
+		if (volume.Create(slices[0].GetFormat(), width, height, depth, false, slices) != Error.Ok)
+		{
+			foreach (Image slice in slices)
+			{
+				if (slice.IsCompressed())
+					slice.Decompress();
+			}
+			volume = new ImageTexture3D { ResourceName = path };
+			if (volume.Create(slices[0].GetFormat(), width, height, depth, false, slices) != Error.Ok)
+			{
+				ViewerLog.Print("[Texture] Volume " + path + " would not build (" + width + "x" + height + "x" + depth + ", " + format + ")");
+				return null;
+			}
+		}
+		ViewerLog.Print("[Texture] Volume " + path + ": " + width + "x" + height + "x" + depth + " " + slices[0].GetFormat() + ".");
+		_volumeTextures[tex] = volume;
+		return volume;
 	}
 
 	private Textures GetTexturesForSource(TexturePtr.Source source) =>
@@ -3895,7 +6728,7 @@ public partial class AlienScene : Node3D
 			int faceByteCount = texPart.Content.Length / 6;
 			byte[] faceData = new byte[faceByteCount];
 			Array.Copy(texPart.Content, 0, faceData, 0, faceByteCount);
-			Image image = AlienSceneTextures.CreateImageFromRaw(
+			using Image image = AlienSceneTextures.CreateImageFromRaw(
 				faceData,
 				(int)texPart.Width,
 				(int)texPart.Height,
@@ -3917,6 +6750,7 @@ public partial class AlienScene : Node3D
 							ptr.Texture.Format));
 				}
 			}
+			tex.Cubemap = CreateCubemap(texPart, format, ptr.Texture);
 		}
 		else
 		{
@@ -3933,6 +6767,92 @@ public partial class AlienScene : Node3D
 
 		return tex;
 	}
+
+	/// <summary>
+	/// The six faces of a cube texture (each with its own mip chain, one after another) as a cubemap, decompressed, with the
+	/// game's own blurred mips so a rough surface samples it as the game does by glossiness. Null if a face won't read.
+	/// </summary>
+	private static Cubemap CreateCubemap(Textures.TEX4.Texture texPart, Image.Format format, Textures.TEX4 texture)
+	{
+		int faceByteCount = texPart.Content.Length / 6;
+		Godot.Collections.Array<Image> faces = new Godot.Collections.Array<Image>();
+		for (int face = 0; face < 6; face++)
+		{
+			byte[] faceData = new byte[faceByteCount];
+			Array.Copy(texPart.Content, face * faceByteCount, faceData, 0, faceByteCount);
+			Image image = CreateCubeFace(faceData, (int)texPart.Width, (int)texPart.Height, format, texture);
+			if (image == null)
+				return null;
+			faces.Add(image);
+		}
+		Cubemap cubemap = new Cubemap();
+		if (cubemap.CreateFromImages(faces) != Error.Ok)
+		{
+			cubemap.Dispose();
+			ViewerLog.PrintErr("Could not make a cubemap of " + texture.Name);
+			return null;
+		}
+		cubemap.ResourceLocalToScene = false;
+		return cubemap;
+	}
+
+	/* One face with the game's own mips: they're pre-blurred (by mip 3 of a 128 cube a light is a soft glow, by mip 4 near
+	   enough flat), where mips made here keep every light a hard blob - which a rough metal then shows as chrome stripes.
+	   The levels the file has, each decoded on its own; below that (and under 4x4 for a block format), halved down to 1x1. */
+	private static Image CreateCubeFace(byte[] faceData, int width, int height, Image.Format format, Textures.TEX4 texture)
+	{
+		List<byte> chain = new List<byte>();
+		Image level = null;
+		int offset = 0, w = width, h = height;
+		bool block = format == Image.Format.Dxt1 || format == Image.Format.Dxt3 || format == Image.Format.Dxt5 || format == Image.Format.BptcRgba;
+		while (w >= 1 && h >= 1 && (!block || (w >= 4 && h >= 4)))
+		{
+			int size = AlienSceneTextures.GetBaseMipByteSize(w, h, format, texture.Format);
+			if (size <= 0 || offset + size > faceData.Length)
+				break;
+			byte[] bytes = new byte[size];
+			Array.Copy(faceData, offset, bytes, 0, size);
+			Image read = AlienSceneTextures.CreateImageFromRaw(bytes, w, h, format, texture.Format, texture.Name);
+			if (read == null || read.IsEmpty())
+				break;
+			if (read.IsCompressed())
+				read.Decompress();
+			read.ClearMipmaps();
+			if (read.GetFormat() != Image.Format.Rgba8)
+				read.Convert(Image.Format.Rgba8);
+			chain.AddRange(read.GetData());
+			level = read;
+			offset += size;
+			if (w == 1 && h == 1)
+				break;
+			w = Math.Max(1, w / 2);
+			h = Math.Max(1, h / 2);
+		}
+		if (level == null)
+			return null;
+		while (level.GetWidth() > 1 || level.GetHeight() > 1)
+		{
+			level.Resize(Math.Max(1, level.GetWidth() / 2), Math.Max(1, level.GetHeight() / 2), Image.Interpolation.Bilinear);
+			chain.AddRange(level.GetData());
+		}
+		Image face = Image.CreateFromData(width, height, true, Image.Format.Rgba8, chain.ToArray());
+		return face == null || face.IsEmpty() ? null : face;
+	}
+
+	/// <summary>A material's cube texture at a sampler, as a cubemap (its environment map); null when it isn't one.</summary>
+	public Cubemap GetSamplerCubemap(Materials.Material material, Shaders.Shader shader, int samplerIndex)
+	{
+		if (samplerIndex < 0 || shader.SamplerRemaps.Count <= samplerIndex)
+			return null;
+		int index = shader.SamplerRemaps[samplerIndex];
+		if (index == 255 || index >= material.TextureReferences.Count)
+			return null;
+		TexturePtr texturePtr = material.TextureReferences[index];
+		if (texturePtr == null || texturePtr.Location == TexturePtr.Source.NONE || texturePtr.Texture == null)
+			return null;
+		return GetTexOrCube(texturePtr)?.Cubemap;
+	}
+
 
 	private void FinalizePrewarmGodotResources(
 		LevelViewerPopulatePrewarm.Result result,
@@ -3962,9 +6882,7 @@ public partial class AlienScene : Node3D
 				continue;
 			}
 
-			Models.CS2.Component.LOD lod = models.FindModelLOD(submesh);
-			Models.CS2 mesh = models.FindModel(submesh);
-			arrayMesh.ResourceName = ((mesh == null) ? "?" : mesh.Name) + ": " + ((lod == null) ? "?" : lod.Name);
+			arrayMesh.ResourceName = GetSubmeshDisplayName(submesh);
 			arrayMesh.ResourceLocalToScene = false;
 			submesh.Data = null;
 
@@ -4001,10 +6919,14 @@ public partial class AlienScene : Node3D
 
 		int missingTextureCount = ConvertMissingPlanTextures(plan);
 		textureCount += missingTextureCount;
-		ViewerLog.Print(
-			"Converted "
-			+ meshCount + "/" + result.Meshes.Count + " meshes and "
-			+ textureCount + "/" + plan.Textures.Count + " textures.");
+		//A preview batch's populates find everything cached; a line per composite would only say so
+		if (!_previewBatchPopulate || meshCount > 0 || textureCount > 0)
+		{
+			ViewerLog.Print(
+				"Converted "
+				+ meshCount + "/" + result.Meshes.Count + " meshes and "
+				+ textureCount + "/" + plan.Textures.Count + " textures.");
+		}
 	}
 
 	private int ConvertMissingPlanTextures(LevelViewerPopulatePrewarm.Plan plan)
@@ -4055,19 +6977,218 @@ public partial class AlienScene : Node3D
 	private static bool HasTextureContent(Textures.TEX4.Texture part) =>
 		part?.Content != null && part.Content.Length > 0;
 
-	private static void ReleaseTex4SourceContent(Textures.TEX4 tex)
+	private static long ReleaseTex4SourceContent(Textures.TEX4 tex)
 	{
 		if (tex == null)
-			return;
+			return 0;
 
+		long released = 0;
 		if (tex.TextureStreamed != null)
+		{
+			released += tex.TextureStreamed.Content?.Length ?? 0;
 			tex.TextureStreamed.Content = null;
+		}
 		if (tex.TexturePersistent != null)
+		{
+			released += tex.TexturePersistent.Content?.Length ?? 0;
 			tex.TexturePersistent.Content = null;
+		}
+		return released;
 	}
 
-	private void ReleaseCathodeBinarySourceData()
+	/// <summary>
+	/// Re-reads source binaries that ReleaseCathodeBinarySourceData freed after an earlier
+	/// populate, for just the entries this populate's plan needs. Composites opened after the
+	/// first populate routinely reference models nothing has parsed yet (pickup and archetype
+	/// composites whose models are not placed in the level root); without this their meshes
+	/// silently never spawn.
+	/// </summary>
+	private void RestoreReleasedSourceData(LevelViewerPopulatePrewarm.Plan plan)
 	{
+		if (plan == null)
+			return;
+
+		RestoreReleasedModelData(plan);
+		RestoreReleasedTextureData(plan);
+
+		//The volumes the plan's water named, built now: converting the plan lets go of the bytes they're made from
+		foreach (string path in _pendingVolumePaths)
+			GetVolumeTextureByPath(path);
+		_pendingVolumePaths.Clear();
+	}
+
+	private readonly HashSet<string> _pendingVolumePaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+	/* Submeshes this file cannot give back - it has no data for them (the "non-parsed model" ones), or the table has drifted
+	   from it since an import: each populate that planned one read the whole model pak again and restored nothing -
+	   hundreds of MB read and dropped, every time (stress runs: "Restored 0/1", "0/15" over and over). Remembered for the
+	   file and table they were looked up in; a synced snapshot is a new file, a level load a new table, and a save that
+	   rewrites the level pak in place a new write time. */
+	private readonly HashSet<int> _modelWriteIndicesNotInFile = new HashSet<int>();
+	private string _modelWriteIndicesNotInFilePath;
+	private DateTime _modelWriteIndicesNotInFileWriteTime;
+	private Models _modelWriteIndicesNotInFileTable;
+
+	private void RestoreReleasedModelData(LevelViewerPopulatePrewarm.Plan plan)
+	{
+		Models models = _content?.Level?.Models;
+		if (models == null)
+			return;
+
+		string sourcePath = _modelsRestorePath ?? models.Filepath; //a synced snapshot, once there is one: the level pak lacks what it brought
+		DateTime writeTime = DateTime.MinValue;
+		try { writeTime = File.GetLastWriteTimeUtc(sourcePath); } catch { }
+		if (!ReferenceEquals(_modelWriteIndicesNotInFileTable, models) || _modelWriteIndicesNotInFilePath != sourcePath
+			|| _modelWriteIndicesNotInFileWriteTime != writeTime)
+		{
+			_modelWriteIndicesNotInFile.Clear();
+			_modelWriteIndicesNotInFileTable = models;
+			_modelWriteIndicesNotInFilePath = sourcePath;
+			_modelWriteIndicesNotInFileWriteTime = writeTime;
+		}
+
+		List<int> missing = null;
+		foreach (int writeIndex in plan.MeshWriteIndices)
+		{
+			if (_modelMeshesByWriteIndex.ContainsKey(writeIndex) || _modelWriteIndicesNotInFile.Contains(writeIndex))
+				continue;
+
+			Models.CS2.Component.LOD.Submesh submesh = models.GetAtWriteIndex(writeIndex);
+			if (submesh != null && (submesh.Data == null || submesh.Data.Length == 0))
+				(missing ??= new List<int>()).Add(writeIndex);
+		}
+
+		if (missing == null)
+			return;
+
+		try
+		{
+			_restoreReadWholePak = true;
+			Models fresh = new Models(
+				sourcePath,
+				_content.Level.Materials,
+				_content.Level.WeightedCollisions,
+				_content.Level.MorphTargetDB);
+			int restored = 0;
+			foreach (int writeIndex in missing)
+			{
+				Models.CS2.Component.LOD.Submesh target = models.GetAtWriteIndex(writeIndex);
+				Models.CS2.Component.LOD.Submesh source = fresh.GetAtWriteIndex(writeIndex);
+				if (target != null && fresh.Loaded && (source?.Data == null || source.Data.Length == 0))
+					_modelWriteIndicesNotInFile.Add(writeIndex);
+				if (target == null || source?.Data == null || source.Data.Length == 0)
+					continue;
+
+				//Write-index order comes from the same file both times; count mismatches catch
+				//an in-memory list that has drifted from what is on disk (imports, deletions).
+				//Reading the same file again will not undo that drift, so it is remembered as well.
+				if (source.VertexCount != target.VertexCount || source.IndexCount != target.IndexCount)
+				{
+					_modelWriteIndicesNotInFile.Add(writeIndex);
+					continue;
+				}
+
+				target.Data = source.Data;
+				restored++;
+			}
+
+			ViewerLog.Print("Restored " + restored + "/" + missing.Count + " released model binaries for populate.");
+		}
+		catch (Exception e)
+		{
+			ViewerLog.PrintErr("Failed to restore released model data: " + e.Message);
+		}
+	}
+
+	private void RestoreReleasedTextureData(LevelViewerPopulatePrewarm.Plan plan)
+	{
+		Dictionary<TexturePtr.Source, List<int>> missingBySource = null;
+		foreach (Textures.TEX4 planned in plan.Textures)
+		{
+			if (planned == null || SelectTexPartForConversion(planned) != null)
+				continue;
+
+			if (!plan.TextureLocations.TryGetValue(planned, out TexturePtr.Source source))
+				continue;
+
+			int writeIndex = GetTextureWriteIndex(planned, source);
+			if (writeIndex < 0 || TryGetCachedTexture(source, writeIndex, out _))
+				continue;
+
+			missingBySource ??= new Dictionary<TexturePtr.Source, List<int>>();
+			if (!missingBySource.TryGetValue(source, out List<int> indexes))
+				missingBySource[source] = indexes = new List<int>();
+			indexes.Add(writeIndex);
+		}
+
+		if (missingBySource == null)
+			return;
+
+		foreach (KeyValuePair<TexturePtr.Source, List<int>> entry in missingBySource)
+		{
+			Textures live = GetTexturesForSource(entry.Key);
+			if (live == null)
+				continue;
+
+			try
+			{
+				string restorePath = entry.Key == TexturePtr.Source.LEVEL && _levelTexturesRestorePath != null ? _levelTexturesRestorePath : live.Filepath;
+				_restoreReadWholePak = true;
+				Textures fresh = new Textures(restorePath);
+				Dictionary<string, Textures.TEX4> globalByName = null;
+				int restored = 0;
+				foreach (int writeIndex in entry.Value)
+				{
+					Textures.TEX4 target = live.GetAtWriteIndex(writeIndex);
+					Textures.TEX4 source = fresh.GetAtWriteIndex(writeIndex);
+
+					//Past the end of the level's pak: a texture Level.Load copied in from global (see
+					//ExecuteLoadLevel), which only reaches the level's own file when the level is saved
+					if (source == null && target != null && entry.Key == TexturePtr.Source.LEVEL)
+					{
+						globalByName ??= LoadGlobalTexturesByName();
+						globalByName.TryGetValue(target.Name ?? "", out source);
+					}
+
+					if (target == null || source == null || target.Format != source.Format)
+						continue;
+
+					if (target.TextureStreamed != null && source.TextureStreamed?.Content != null)
+						target.TextureStreamed.Content = source.TextureStreamed.Content;
+					if (target.TexturePersistent != null && source.TexturePersistent?.Content != null)
+						target.TexturePersistent.Content = source.TexturePersistent.Content;
+					restored++;
+				}
+
+				ViewerLog.Print("Restored " + restored + "/" + entry.Value.Count + " released " + entry.Key + " texture binaries for populate.");
+			}
+			catch (Exception e)
+			{
+				ViewerLog.PrintErr("Failed to restore released " + entry.Key + " texture data: " + e.Message);
+			}
+		}
+	}
+
+	/// <summary>The global texture pak read fresh from disk, by texture name.</summary>
+	private static Dictionary<string, Textures.TEX4> LoadGlobalTexturesByName()
+	{
+		Dictionary<string, Textures.TEX4> byName = new Dictionary<string, Textures.TEX4>(StringComparer.OrdinalIgnoreCase);
+		string path = LevelContent.Global?.Textures?.Filepath;
+		if (string.IsNullOrEmpty(path))
+			return byName;
+
+		foreach (Textures.TEX4 texture in new Textures(path).Entries)
+		{
+			if (texture?.Name != null && !byName.ContainsKey(texture.Name))
+				byName[texture.Name] = texture;
+		}
+		return byName;
+	}
+
+	/// <summary>Drops the source binaries the Godot resources were built from; how many bytes that let go of.</summary>
+	private long ReleaseCathodeBinarySourceData()
+	{
+		long released = 0;
 		Models models = _content?.Level?.Models;
 		if (models?.Entries != null)
 		{
@@ -4087,23 +7208,29 @@ public partial class AlienScene : Node3D
 							continue;
 
 						foreach (Models.CS2.Component.LOD.Submesh submesh in lod.Submeshes)
+						{
+							released += submesh.Data?.Length ?? 0;
 							submesh.Data = null;
+						}
 					}
 				}
 			}
 		}
 
-		ReleaseTextureSourceContent(_content?.Level?.Textures);
-		ReleaseTextureSourceContent(LevelContent.Global?.Textures);
+		released += ReleaseTextureSourceContent(_content?.Level?.Textures);
+		released += ReleaseTextureSourceContent(LevelContent.Global?.Textures);
+		return released;
 	}
 
-	private static void ReleaseTextureSourceContent(Textures textures)
+	private static long ReleaseTextureSourceContent(Textures textures)
 	{
 		if (textures?.Entries == null)
-			return;
+			return 0;
 
+		long released = 0;
 		foreach (Textures.TEX4 entry in textures.Entries)
-			ReleaseTex4SourceContent(entry);
+			released += ReleaseTex4SourceContent(entry);
+		return released;
 	}
 
 }
@@ -4148,14 +7275,32 @@ public class LevelContent
 	{
 		Reset();
 
-		if (Global == null)
-			Global = new Global(aiPath + "\\DATA\\ENV\\GLOBAL", new PAK2(aiPath + "\\DATA\\GLOBAL\\ANIMATION.PAK"));
-		Level = new Level(aiPath + "\\DATA\\ENV\\" + levelName, Global);
+		/* Read on a worker, with this thread answering OpenCAGE's calls to it while it waits (see LevelViewerSentMessages).
+		   Answering them between the phases of the read was not enough: one phase of a big level - SOLACE's scripts - held
+		   the thread for 21 s, and anything OpenCAGE did that needed this window (a focus change, the window activated)
+		   waited as long. Nothing in here touches Godot: CathodeLib reads the files and builds its own objects. */
+		Level level = null;
+		System.Threading.Tasks.Task read = System.Threading.Tasks.Task.Run(() =>
+		{
+			if (Global == null)
+				Global = new Global(aiPath + "\\DATA\\ENV\\GLOBAL");
+			level = new Level(aiPath + "\\DATA\\ENV\\" + levelName, Global, loadImmediately: false);
+			level.Load();
+		});
+		//Waited on its handle: Task.Wait would throw a failed read as an AggregateException around the real one
+		while (!((IAsyncResult)read).AsyncWaitHandle.WaitOne(20))
+			LevelViewerSentMessages.PumpIfDue();
+		read.GetAwaiter().GetResult(); //the read's own exception, if it failed
+		Level = level;
 	}
 
 	public void Reset()
 	{
 		Level = null;
+		//Keyed by the old level's entities (and through their resource parameters, some of its data): nothing removed
+		//them, so they piled up with every level loaded. A new dictionary rather than Clear(), so anything still
+		//enumerating the old one is unaffected
+		RemappedResources = new Dictionary<Entity, List<Tuple<int, int>>>();
 	}
 
 	public bool Loaded => Level?.Commands != null && Level.Commands.Loaded;

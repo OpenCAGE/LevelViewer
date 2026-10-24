@@ -14,18 +14,21 @@ using static CATHODE.Models;
 /// </summary>
 public static class LevelViewerPopulatePrewarm
 {
+	/* Textures are held by reference: TEX4 hashes the first bytes of its content, and a plan's are released and restored
+	   between being planned and being looked up again (RestoreReleasedTextureData, FinalizePrewarmGodotResources) - by its
+	   own hash a restored texture was another, and a global one restored after a release fell back to the level's table. */
 	public sealed class Plan
 	{
 		public HashSet<int> MeshWriteIndices { get; } = new HashSet<int>();
-		public HashSet<Textures.TEX4> Textures { get; } = new HashSet<Textures.TEX4>();
-		public Dictionary<Textures.TEX4, TexturePtr.Source> TextureLocations { get; } = new Dictionary<Textures.TEX4, TexturePtr.Source>();
+		public HashSet<Textures.TEX4> Textures { get; } = new HashSet<Textures.TEX4>(ReferenceEqualityComparer.Instance);
+		public Dictionary<Textures.TEX4, TexturePtr.Source> TextureLocations { get; } = new Dictionary<Textures.TEX4, TexturePtr.Source>(ReferenceEqualityComparer.Instance);
 		public HashSet<Materials.Material> Materials { get; } = new HashSet<Materials.Material>();
 	}
 
 	public sealed class Result
 	{
 		public Dictionary<int, ParsedMeshSurface> Meshes { get; } = new Dictionary<int, ParsedMeshSurface>();
-		public Dictionary<Textures.TEX4, BakedTextureCpu> Textures { get; } = new Dictionary<Textures.TEX4, BakedTextureCpu>();
+		public Dictionary<Textures.TEX4, BakedTextureCpu> Textures { get; } = new Dictionary<Textures.TEX4, BakedTextureCpu>(ReferenceEqualityComparer.Instance);
 		public double CpuElapsedMs { get; set; }
 	}
 
@@ -230,7 +233,7 @@ public static class LevelViewerPopulatePrewarm
 		};
 
 		ConcurrentDictionary<int, ParsedMeshSurface> meshes = new ConcurrentDictionary<int, ParsedMeshSurface>();
-		ConcurrentDictionary<Textures.TEX4, BakedTextureCpu> textures = new ConcurrentDictionary<Textures.TEX4, BakedTextureCpu>();
+		ConcurrentDictionary<Textures.TEX4, BakedTextureCpu> textures = new ConcurrentDictionary<Textures.TEX4, BakedTextureCpu>(ReferenceEqualityComparer.Instance);
 
 		Parallel.Invoke(
 			() => Parallel.ForEach(plan.MeshWriteIndices, options, writeIndex =>

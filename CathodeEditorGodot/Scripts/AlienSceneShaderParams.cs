@@ -56,16 +56,77 @@ public static class AlienSceneShaderParams
 
 	public static Color GetDiffuseTint(Materials.Material material, Shaders.Shader shader, MaterialParams parameters, bool preserveAlpha = false)
 	{
-		if (parameters.DiffuseTintIndex < 0 || parameters.DiffuseTintIndex >= shader.PixelShaderParameterRemaps.Count)
-			return Colors.White;
+		if (!TryGetColour(material, shader, parameters.DiffuseTintIndex, parameters.DiffuseTintParameterName, preserveAlpha, out Color tint))
+			tint = Colors.White;
 
-		int remappedIndex = shader.PixelShaderParameterRemaps[parameters.DiffuseTintIndex];
+		//A corpse carries the colour its character was dressed in as a constant, and the shader draws that
+		//in place of the diffuse tint's rgb - the alpha is still the diffuse tint's
+		if (HasFeature(shader, "HI_LOD_CUSTOM_CHARACTER_CORPSE_CONSTANTS")
+			&& TryGetColour(material, shader, (int)CA_ENVIRONMENT.PARAMETERS.CUSTOM_TINT_COLOUR, "CUSTOM_TINT_COLOUR", false, out Color custom))
+		{
+			tint = new Color(custom.R, custom.G, custom.B, tint.A);
+		}
+
+		return tint;
+	}
+
+	/// <summary>
+	/// The secondary diffuse layer's own tint. CA_SKIN has none: its layer multiplies in untinted.
+	/// </summary>
+	public static Color GetSecondaryDiffuseTint(Materials.Material material, Shaders.Shader shader)
+	{
+		return TryGetColour(material, shader, GetSecondaryDiffuseTintIndex(shader.Ubershader), "SECONDARY_DIFFUSE_TINT", false, out Color tint)
+			? tint
+			: Colors.White;
+	}
+
+	private static int GetSecondaryDiffuseTintIndex(SHADER_LIST ubershader)
+	{
+		switch (ubershader)
+		{
+			case SHADER_LIST.CA_ENVIRONMENT:
+				return (int)CA_ENVIRONMENT.PARAMETERS.SECONDARY_DIFFUSE_TINT;
+			case SHADER_LIST.CA_DECAL_ENVIRONMENT:
+				return (int)CA_DECAL_ENVIRONMENT.PARAMETERS.SECONDARY_DIFFUSE_TINT;
+			case SHADER_LIST.CA_CHARACTER:
+				return (int)CA_CHARACTER.PARAMETERS.SECONDARY_DIFFUSE_TINT;
+			case SHADER_LIST.CA_LIGHTMAP_ENVIRONMENT:
+				return (int)CA_LIGHTMAP_ENVIRONMENT.PARAMETERS.SECONDARY_DIFFUSE_TINT;
+			case SHADER_LIST.CA_STREAMER:
+				return (int)CA_STREAMER.PARAMETERS.SECONDARY_DIFFUSE_TINT;
+			default:
+				return -1;
+		}
+	}
+
+	private static bool HasFeature(Shaders.Shader shader, string featureName)
+	{
+		int? index = ShaderUtility.GetShaderFunctionalityIndex(shader.Ubershader, ShaderIndexType.FEATURES, featureName);
+		return index.HasValue && (shader.UbershaderFeatureFlags & (1L << index.Value)) != 0;
+	}
+
+	/// <summary>
+	/// Reads a colour constant, clamped to 0-1. False when the material's shader does not carry it.
+	/// </summary>
+	private static bool TryGetColour(
+		Materials.Material material,
+		Shaders.Shader shader,
+		int parameterIndex,
+		string parameterName,
+		bool preserveAlpha,
+		out Color colour)
+	{
+		colour = Colors.White;
+		if (parameterIndex < 0 || parameterIndex >= shader.PixelShaderParameterRemaps.Count)
+			return false;
+
+		int remappedIndex = shader.PixelShaderParameterRemaps[parameterIndex];
 		if (remappedIndex == 255 || remappedIndex >= material.PixelShaderConstants.Count)
-			return Colors.White;
+			return false;
 
-		UberShaderParameterType? parameterType = ShaderUtility.GetParameterType(shader.Ubershader, parameters.DiffuseTintParameterName);
+		UberShaderParameterType? parameterType = ShaderUtility.GetParameterType(shader.Ubershader, parameterName);
 		if (!parameterType.HasValue)
-			return ReadTintVector4(material, remappedIndex, preserveAlpha);
+			return TryReadTintVector4(material, remappedIndex, preserveAlpha, out colour);
 
 		float r = 0f;
 		float g = 0f;
@@ -95,7 +156,7 @@ public static class AlienSceneShaderParams
 					a = material.PixelShaderConstants[remappedIndex + 3];
 				break;
 			default:
-				return ReadTintVector4(material, remappedIndex, preserveAlpha);
+				return TryReadTintVector4(material, remappedIndex, preserveAlpha, out colour);
 		}
 
 		r = Mathf.Clamp(r, 0f, 1f);
@@ -105,13 +166,15 @@ public static class AlienSceneShaderParams
 		if (!preserveAlpha)
 			a = 1f;
 
-		return new Color(r, g, b, a);
+		colour = new Color(r, g, b, a);
+		return true;
 	}
 
-	private static Color ReadTintVector4(Materials.Material material, int remappedIndex, bool preserveAlpha)
+	private static bool TryReadTintVector4(Materials.Material material, int remappedIndex, bool preserveAlpha, out Color colour)
 	{
+		colour = Colors.White;
 		if (remappedIndex + 3 >= material.PixelShaderConstants.Count)
-			return Colors.White;
+			return false;
 
 		float r = Mathf.Clamp(material.PixelShaderConstants[remappedIndex], 0f, 1f);
 		float g = Mathf.Clamp(material.PixelShaderConstants[remappedIndex + 1], 0f, 1f);
@@ -120,13 +183,48 @@ public static class AlienSceneShaderParams
 		if (!preserveAlpha)
 			a = 1f;
 
-		return new Color(r, g, b, a);
+		colour = new Color(r, g, b, a);
+		return true;
 	}
 
 	public static Vector2 GetUvScale(Materials.Material material, Shaders.Shader shader, MaterialParams parameters)
 	{
 		float scale = GetFloat(shader, material, parameters.DiffuseUvMultIndex, 1f);
 		return new Vector2(scale, scale);
+	}
+
+	/// <summary>
+	/// What a CA_ENVIRONMENT DECAL material's alpha is scaled by - its OPACITY_MODIFIER_VALUE: the game blends a decal by that
+	/// times the diffuse's alpha times the tint's, so a decal-flagged glass with an opaque map (the nodding bird's tube, 0.6)
+	/// is see-through. 1 for anything else, or a material without the value.
+	/// </summary>
+	public static float GetDecalOpacity(Materials.Material material, Shaders.Shader shader)
+	{
+		if (shader == null || shader.Ubershader != SHADER_LIST.CA_ENVIRONMENT || !HasFeature(shader, "DECAL"))
+			return 1f;
+		return Mathf.Clamp(GetFloat(shader, material, (int)CA_ENVIRONMENT.PARAMETERS.OPACITY_MODIFIER_VALUE, 1f), 0f, 1f);
+	}
+
+	/// <summary>
+	/// Whether this is a CA_ENVIRONMENT GLASS material, and its transmission constants if so. Retail draws glass as
+	/// absorption through GLASS_TINT at GLASS_DENSITY (the glass variant in AlienSceneMaterials), so its DIFFUSE_TINT - black
+	/// on most retail glass - only colours what its coverage (the separate alpha times the vertex alpha) makes solid.
+	/// </summary>
+	public static bool TryGetGlass(Materials.Material material, Shaders.Shader shader, out Color tint, out float density, out float lightness, out float fresnel)
+	{
+		tint = Colors.White;
+		density = 0f;
+		lightness = 0f;
+		fresnel = 1f;
+		if (shader == null || shader.Ubershader != SHADER_LIST.CA_ENVIRONMENT || !HasFeature(shader, "GLASS"))
+			return false;
+
+		if (!TryGetColour(material, shader, (int)CA_ENVIRONMENT.PARAMETERS.GLASS_TINT, "GLASS_TINT", true, out tint))
+			tint = Colors.White;
+		density = Mathf.Max(0f, GetFloat(shader, material, (int)CA_ENVIRONMENT.PARAMETERS.GLASS_DENSITY, 0f));
+		lightness = Mathf.Max(0f, GetFloat(shader, material, (int)CA_ENVIRONMENT.PARAMETERS.GLASS_LIGHTNESS, 0f));
+		fresnel = Mathf.Max(0f, GetFloat(shader, material, (int)CA_ENVIRONMENT.PARAMETERS.FRESNEL_INTENSITY, 1f));
+		return true;
 	}
 
 	public static float GetAlphaScissorThreshold(Materials.Material material, Shaders.Shader shader)
@@ -140,6 +238,34 @@ public static class AlienSceneShaderParams
 		{
 			case SHADER_LIST.CA_DECAL_ENVIRONMENT:
 				return (int)CA_DECAL_ENVIRONMENT.PARAMETERS.ALPHATHRESHOLD_RANGE;
+			default:
+				return -1;
+		}
+	}
+
+	/// <summary>The secondary diffuse layer's own tiling - it never shares the primary's.</summary>
+	public static Vector2 GetSecondaryDiffuseUvScale(Materials.Material material, Shaders.Shader shader)
+	{
+		float scale = GetFloat(shader, material, GetSecondaryDiffuseUvMultIndex(shader.Ubershader), 1f);
+		return new Vector2(scale, scale);
+	}
+
+	private static int GetSecondaryDiffuseUvMultIndex(SHADER_LIST ubershader)
+	{
+		switch (ubershader)
+		{
+			case SHADER_LIST.CA_ENVIRONMENT:
+				return (int)CA_ENVIRONMENT.PARAMETERS.SECONDARY_DIFFUSE_UV_MULT;
+			case SHADER_LIST.CA_DECAL_ENVIRONMENT:
+				return (int)CA_DECAL_ENVIRONMENT.PARAMETERS.SECONDARY_DIFFUSE_UV_MULT;
+			case SHADER_LIST.CA_CHARACTER:
+				return (int)CA_CHARACTER.PARAMETERS.SECONDARY_DIFFUSE_UV_MULT;
+			case SHADER_LIST.CA_SKIN:
+				return (int)CA_SKIN.PARAMETERS.SECONDARY_DIFFUSE_UV_MULT;
+			case SHADER_LIST.CA_LIGHTMAP_ENVIRONMENT:
+				return (int)CA_LIGHTMAP_ENVIRONMENT.PARAMETERS.SECONDARY_DIFFUSE_UV_MULT;
+			case SHADER_LIST.CA_STREAMER:
+				return (int)CA_STREAMER.PARAMETERS.SECONDARY_DIFFUSE_UV_MULT;
 			default:
 				return -1;
 		}
@@ -168,6 +294,50 @@ public static class AlienSceneShaderParams
 			default:
 				return -1;
 		}
+	}
+
+	/// <summary>A CA_ENVIRONMENT pixel constant by its parameter, or the fallback where this permutation has none.</summary>
+	public static float GetEnvironmentFloat(Materials.Material material, Shaders.Shader shader, CA_ENVIRONMENT.PARAMETERS parameter, float fallback)
+	{
+		return GetFloat(shader, material, (int)parameter, fallback);
+	}
+
+	/// <summary>
+	/// A CA_ENVIRONMENT vertex constant (VERT_AO_TINT, ALPHABLEND_NOISE_POWER - the game feeds those to the vertex shader),
+	/// its first <paramref name="width"/> lanes, or the fallback where this permutation has none.
+	/// </summary>
+	public static float[] GetEnvironmentVertexValues(Materials.Material material, Shaders.Shader shader, CA_ENVIRONMENT.PARAMETERS parameter, int width, float fallback)
+	{
+		float[] values = new float[width];
+		for (int i = 0; i < width; i++)
+			values[i] = fallback;
+		int index = (int)parameter;
+		if (shader.VertexShaderParameterRemaps == null || index < 0 || index >= shader.VertexShaderParameterRemaps.Count)
+			return values;
+		int remap = shader.VertexShaderParameterRemaps[index];
+		if (remap == 255 || material.VertexShaderConstants == null)
+			return values;
+		for (int i = 0; i < width && remap + i < material.VertexShaderConstants.Count; i++)
+			values[i] = material.VertexShaderConstants[remap + i];
+		return values;
+	}
+
+	/// <summary>
+	/// A CA_ENVIRONMENT pixel constant's first <paramref name="width"/> lanes (EMISSIVE_TINT), or null where this permutation
+	/// has none.
+	/// </summary>
+	public static float[] GetEnvironmentPixelValues(Materials.Material material, Shaders.Shader shader, CA_ENVIRONMENT.PARAMETERS parameter, int width)
+	{
+		int index = (int)parameter;
+		if (shader.PixelShaderParameterRemaps == null || index < 0 || index >= shader.PixelShaderParameterRemaps.Count)
+			return null;
+		int remap = shader.PixelShaderParameterRemaps[index];
+		if (remap == 255 || material.PixelShaderConstants == null || remap + width > material.PixelShaderConstants.Count)
+			return null;
+		float[] values = new float[width];
+		for (int i = 0; i < width; i++)
+			values[i] = material.PixelShaderConstants[remap + i];
+		return values;
 	}
 
 	private static float GetFloat(Shaders.Shader shader, Materials.Material material, int index, float fallback)

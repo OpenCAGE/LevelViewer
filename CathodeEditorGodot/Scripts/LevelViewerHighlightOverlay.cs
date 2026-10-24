@@ -16,12 +16,27 @@ public static class LevelViewerHighlightOverlay
     private const float DefaultStrength = 0.55f;
     private const int RenderPriority = 2;
 
+    private const string BackFacesShaderPath = "res://shaders/selection_highlight_overlay_backfaces.gdshader";
+    private const string WireframeShaderPath = "res://shaders/selection_wireframe.gdshader";
+
+    //Shader parameter names as StringNames, made once: a literal here would be a temporary whose
+    //native handle the binding gives the engine with nothing keeping it alive - see LevelViewerPick.
+    private static readonly StringName HighlightColorParam = new StringName("highlight_color");
+    private static readonly StringName HighlightStrengthParam = new StringName("highlight_strength");
+    private static readonly StringName WireframeColorParam = new StringName("wireframe_color");
+
+
+    private static ShaderMaterial _selectionWireframe;
+
     private static ShaderMaterial _selectionMeshOverlay;
     private static ShaderMaterial _selectionBillboardOverlay;
+    private static ShaderMaterial _selectionBackFacesOverlay;
     private static ShaderMaterial _aliasMeshOverlay;
     private static ShaderMaterial _aliasBillboardOverlay;
+    private static ShaderMaterial _aliasBackFacesOverlay;
     private static ShaderMaterial _proxyMeshOverlay;
     private static ShaderMaterial _proxyBillboardOverlay;
+    private static ShaderMaterial _proxyBackFacesOverlay;
 
     public static ShaderMaterial GetSelectionMeshOverlay()
         => GetOrCreate(ref _selectionMeshOverlay, "res://shaders/selection_highlight_overlay.gdshader", LevelViewerSelection.HighlightGreen);
@@ -41,19 +56,142 @@ public static class LevelViewerHighlightOverlay
     public static ShaderMaterial GetProxyBillboardOverlay()
         => GetOrCreate(ref _proxyBillboardOverlay, "res://shaders/selection_highlight_overlay_billboard.gdshader", LevelViewerProxyHighlight.HighlightBlue);
 
+    public static ShaderMaterial GetSelectionBackFacesOverlay()
+        => GetOrCreate(ref _selectionBackFacesOverlay, BackFacesShaderPath, LevelViewerSelection.HighlightGreen);
+
+    public static ShaderMaterial GetAliasBackFacesOverlay()
+        => GetOrCreate(ref _aliasBackFacesOverlay, BackFacesShaderPath, LevelViewerAliasHighlight.HighlightOrange);
+
+    public static ShaderMaterial GetProxyBackFacesOverlay()
+        => GetOrCreate(ref _proxyBackFacesOverlay, BackFacesShaderPath, LevelViewerProxyHighlight.HighlightBlue);
+
     public static ShaderMaterial GetOverlayForMesh(Material sourceMaterial, HighlightOverlayMode mode)
     {
         bool billboard = PreviewVisualUtility.IsIconBillboardMaterial(sourceMaterial);
+
+        //Geometry drawn back-face-only (occlusion hulls) needs the overlay culled the same way, or the
+        //highlight paints in the near half of the hull and blocks the view of everything inside it.
+        bool backFaces = !billboard && AlienSceneMaterials.IsBackFaceOnlyMaterial(sourceMaterial);
+
         switch (mode)
         {
             case HighlightOverlayMode.Alias:
+                if (backFaces) return GetAliasBackFacesOverlay();
                 return billboard ? GetAliasBillboardOverlay() : GetAliasMeshOverlay();
             case HighlightOverlayMode.Proxy:
+                if (backFaces) return GetProxyBackFacesOverlay();
                 return billboard ? GetProxyBillboardOverlay() : GetProxyMeshOverlay();
             default:
+                if (backFaces) return GetSelectionBackFacesOverlay();
                 return billboard ? GetSelectionBillboardOverlay() : GetSelectionMeshOverlay();
         }
     }
+
+    /// <summary>
+    /// Draws the mesh's edges over the top of it, leaving the surface as it is - the shape stays
+    /// readable and the selection reads as an outline drawn through it.
+    /// </summary>
+    public static bool TryApplyWireframeOverlay(MeshInstance3D meshInstance, Dictionary<MeshInstance3D, Material> savedOverlays)
+    {
+        if (meshInstance == null || !GodotObject.IsInstanceValid(meshInstance))
+            return false;
+
+        if (meshInstance.IsInGroup(LevelViewerPick.WireframeOverlayGroupName))
+            return false;
+
+        //A planet is drawn at the sky, far from its mesh (PlanetLook): an overlay of the mesh draws where nothing is
+        if (PlanetLook.IsPlanet(meshInstance))
+            return false;
+
+        if (savedOverlays.ContainsKey(meshInstance))
+            return false;
+
+        ShaderMaterial wireframe = GetSelectionWireframeMaterial();
+        if (wireframe == null)
+            return false;
+
+        savedOverlays[meshInstance] = meshInstance.MaterialOverlay;
+        meshInstance.MaterialOverlay = wireframe;
+        return true;
+    }
+
+    /// <summary>Draws the mesh as its own edges. Replaces the material, so the surface stops filling in.</summary>
+    /// <param name="underneath">
+    /// What to put back when the selection lets go, given the mesh, when that is not simply what it is wearing now - a zone
+    /// colour is lent rather than kept (<see cref="LevelViewerZoneHighlight.LendToSelection"/>).
+    /// </param>
+    public static bool TryApplyWireframe(MeshInstance3D meshInstance, Dictionary<MeshInstance3D, Material> savedOverrides,
+        System.Func<MeshInstance3D, Material> underneath = null)
+    {
+        if (meshInstance == null || !GodotObject.IsInstanceValid(meshInstance))
+            return false;
+
+        if (meshInstance.IsInGroup(LevelViewerPick.WireframeOverlayGroupName))
+            return false;
+
+        //A planet is drawn at the sky, far from its mesh (PlanetLook): an overlay of the mesh draws where nothing is
+        if (PlanetLook.IsPlanet(meshInstance))
+            return false;
+
+        if (savedOverrides.ContainsKey(meshInstance))
+            return false;
+
+        ShaderMaterial wireframe = GetSelectionWireframeMaterial();
+        if (wireframe == null)
+            return false;
+
+        savedOverrides[meshInstance] = underneath != null ? underneath(meshInstance) : meshInstance.MaterialOverride;
+        meshInstance.MaterialOverride = wireframe;
+        return true;
+    }
+
+    /// <summary>Whether a selection is drawing the mesh as its edges alone (it holds the mesh's material slot).</summary>
+    public static bool IsSelectionWireframe(Material material)
+    {
+        return material != null && _selectionWireframe != null && ReferenceEquals(material, _selectionWireframe);
+    }
+
+    /// <summary>
+    /// Puts back the materials TryApplyWireframe replaced - unless something else has taken the
+    /// override over since (a material edit while the entity was selected), which is then left alone.
+    /// </summary>
+    public static void RestoreOverrides(Dictionary<MeshInstance3D, Material> savedOverrides)
+    {
+        foreach (KeyValuePair<MeshInstance3D, Material> entry in savedOverrides)
+        {
+            if (entry.Key == null || !GodotObject.IsInstanceValid(entry.Key))
+                continue;
+            if (_selectionWireframe != null && entry.Key.MaterialOverride != _selectionWireframe)
+                continue;
+            entry.Key.MaterialOverride = entry.Value;
+        }
+
+        savedOverrides.Clear();
+    }
+
+    /// <summary>
+
+
+
+
+    public static ShaderMaterial GetSelectionWireframeMaterial()
+    {
+        if (_selectionWireframe == null)
+        {
+            Shader shader = GD.Load<Shader>(WireframeShaderPath);
+            if (shader == null)
+            {
+                ViewerLog.PrintErr("[Selection] Missing " + WireframeShaderPath + " - the wireframe highlight needs the project exporting again.");
+                return null;
+            }
+            _selectionWireframe = new ShaderMaterial { Shader = shader };
+            _selectionWireframe.SetShaderParameter(WireframeColorParam, LevelViewerSelection.HighlightGreen);
+            _selectionWireframe.RenderPriority = RenderPriority;
+        }
+
+        return _selectionWireframe;
+    }
+
 
     public static bool TryApplyOverlay(
         MeshInstance3D meshInstance,
@@ -63,7 +201,11 @@ public static class LevelViewerHighlightOverlay
         if (meshInstance == null || !GodotObject.IsInstanceValid(meshInstance))
             return false;
 
-        if (meshInstance.IsInGroup("model_reference_wireframe_overlay"))
+        if (meshInstance.IsInGroup(LevelViewerPick.WireframeOverlayGroupName))
+            return false;
+
+        //A planet is drawn at the sky, far from its mesh (PlanetLook): an overlay of the mesh draws where nothing is
+        if (PlanetLook.IsPlanet(meshInstance))
             return false;
 
         if (savedOverlays.ContainsKey(meshInstance))
@@ -97,8 +239,8 @@ public static class LevelViewerHighlightOverlay
             {
                 Shader = GD.Load<Shader>(shaderPath),
             };
-            cache.SetShaderParameter("highlight_color", highlightColor);
-            cache.SetShaderParameter("highlight_strength", DefaultStrength);
+            cache.SetShaderParameter(HighlightColorParam, highlightColor);
+            cache.SetShaderParameter(HighlightStrengthParam, DefaultStrength);
             cache.RenderPriority = RenderPriority;
         }
 

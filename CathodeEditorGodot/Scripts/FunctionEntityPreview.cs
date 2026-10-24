@@ -38,6 +38,9 @@ public abstract partial class FunctionEntityPreview : Node3D
         LevelViewerPick.RegisterPickablePreviewSubtree(this, owner);
     }
 
+    /// <summary>Whether this preview is drawn now: the one test Refresh, the pickable sync and the visibility toggle share.</summary>
+    protected virtual bool IsDrawnNow() => PreviewVisualUtility.IsPreviewVisible(Entity, OwnerCompositeId);
+
     public void SyncPickablesWithVisibility()
     {
         if (Entity == null)
@@ -47,7 +50,7 @@ public abstract partial class FunctionEntityPreview : Node3D
         if (owner == null || !GodotObject.IsInstanceValid(owner))
             return;
 
-        if (PreviewVisualUtility.IsPreviewVisible(Entity, OwnerCompositeId))
+        if (IsDrawnNow())
             RegisterPickablesWithOwner();
         else
             LevelViewerPick.UnregisterPickablePreviewSubtree(this, owner);
@@ -61,7 +64,7 @@ public abstract partial class FunctionEntityPreview : Node3D
         if (Entity == null)
             return;
 
-        bool visible = PreviewVisualUtility.IsPreviewVisible(Entity, OwnerCompositeId);
+        bool visible = IsDrawnNow();
         if (SyncVisibility(visible, GetVisibilityRoot()))
             return;
 

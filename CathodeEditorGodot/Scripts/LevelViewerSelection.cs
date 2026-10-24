@@ -10,26 +10,85 @@ public static class LevelViewerSelection
     public static readonly Color HighlightGreen = new(0.35f, 1f, 0.45f, 1f);
 
     private static readonly Dictionary<MeshInstance3D, Material> _savedOverlays = new();
-    private static Node3D _selectionRoot;
+    private static readonly Dictionary<MeshInstance3D, Material> _savedOverrides = new();
+    /* Everything currently marked. One entry for an ordinary selection; several once entities are
+       ctrl-clicked together. The first is the one the rest of the viewer treats as the selection. */
+    private static readonly List<Node3D> _selectionRoots = new();
     private static readonly List<MeshInstance3D> _selectionMeshes = new();
 
-    public static void SetSelectionRoot(Node3D root) => _selectionRoot = root;
+    /// <summary>
+    /// The mode came from OpenCAGE and may have changed with something already selected: what is drawn
+    /// now belongs to the old mode, so it comes off before the same selection is drawn the new way.
+    /// </summary>
+    public static void SetMode(OpenCAGE.UnityConnection.LevelViewerHighlightMode mode)
+    {
+        if (PreviewVisibilitySettings.SelectionHighlightMode == mode)
+            return;
+
+        List<Node3D> selected = new List<Node3D>(_selectionRoots);
+        ClearInternal();
+        PreviewVisibilitySettings.SelectionHighlightMode = mode;
+        MarkAll(selected);
+        //Out of Wireframe Transparent, the zone colour it held off goes back on
+        LevelViewerZoneHighlight.SyncWithSelection();
+    }
 
     public static void Apply(Node3D selected)
     {
-        if (selected != null && GodotObject.IsInstanceValid(selected) && selected == _selectionRoot)
+        Apply(selected == null ? null : new List<Node3D> { selected });
+    }
+
+    /// <summary>Mark every node in the selection. The first is the one the gizmo and camera follow.</summary>
+    public static void Apply(IReadOnlyList<Node3D> selected)
+    {
+        if (SameAsCurrent(selected))
             return;
 
         ClearInternal();
-        _selectionRoot = selected;
+        MarkAll(selected);
+    }
 
-        if (selected == null || !GodotObject.IsInstanceValid(selected))
+    private static void MarkAll(IReadOnlyList<Node3D> selected)
+    {
+        if (selected == null)
             return;
 
-        CollectSelectionMeshes(selected);
+        for (int i = 0; i < selected.Count; i++)
+        {
+            Node3D node = selected[i];
+            if (node == null || !GodotObject.IsInstanceValid(node))
+                continue;
+
+            _selectionRoots.Add(node);
+            CollectSelectionMeshes(node, append: true);
+        }
 
         for (int i = 0; i < _selectionMeshes.Count; i++)
             ApplyMeshHighlight(_selectionMeshes[i]);
+    }
+
+    private static bool SameAsCurrent(IReadOnlyList<Node3D> selected)
+    {
+        int count = selected?.Count ?? 0;
+        int valid = 0;
+        for (int i = 0; i < count; i++)
+            if (selected[i] != null && GodotObject.IsInstanceValid(selected[i]))
+                valid++;
+
+        if (valid != _selectionRoots.Count || valid == 0)
+            return false;
+
+        int at = 0;
+        for (int i = 0; i < count; i++)
+        {
+            Node3D node = selected[i];
+            if (node == null || !GodotObject.IsInstanceValid(node))
+                continue;
+            if (_selectionRoots[at++] != node)
+                return false;
+        }
+
+        return true;
     }
 
     public static void Clear()
@@ -37,23 +96,35 @@ public static class LevelViewerSelection
         ClearInternal();
     }
 
+    /// <summary>
+    /// Take the highlight off the meshes without forgetting the selection - for a picture of the scene
+    /// that must not show it (composite previews). <see cref="ReapplyIfSelectionActive"/> puts it back.
+    /// </summary>
+    public static void Suspend()
+    {
+        LevelViewerHighlightOverlay.RestoreOverlays(_savedOverlays);
+        LevelViewerHighlightOverlay.RestoreOverrides(_savedOverrides);
+    }
+
     private static void ClearInternal()
     {
         LevelViewerHighlightOverlay.RestoreOverlays(_savedOverlays);
-        _selectionRoot = null;
+        LevelViewerHighlightOverlay.RestoreOverrides(_savedOverrides);
+        _selectionRoots.Clear();
         _selectionMeshes.Clear();
     }
 
     public static bool IsUnderSelection(Node node)
     {
-        if (_selectionRoot == null || node == null)
+        if (node == null || _selectionRoots.Count == 0)
             return false;
 
         Node current = node;
         while (current != null)
         {
-            if (current == _selectionRoot)
-                return true;
+            for (int i = 0; i < _selectionRoots.Count; i++)
+                if (current == _selectionRoots[i])
+                    return true;
 
             current = current.GetParent();
         }
@@ -61,10 +132,39 @@ public static class LevelViewerSelection
         return false;
     }
 
-    public static void ReapplyIfSelectionActive()
+    public static void ReapplyIfSelectionActive() => Reapply(recollectEmpty: false);
+
+    /// <summary>
+    /// After Edit in Viewport has redrawn the spline being edited: a selection that had nothing to mark looks again, as the
+    /// spline may have been drawn only now (its filter off when it was selected). Only here - the other callers run several
+    /// times a frame, and a selection with nothing to mark would be walked each time.
+    /// </summary>
+    public static void ReapplyAfterSplineEditRefresh() => Reapply(recollectEmpty: true);
+
+    private static void Reapply(bool recollectEmpty)
     {
-        if (_selectionRoot == null || !GodotObject.IsInstanceValid(_selectionRoot))
+        if (_selectionRoots.Count == 0)
             return;
+
+        /* A selected ModelReference respawned in place (a parameter or resource edit) has new meshes; the marked ones
+           are on their way out. The highlight goes on the meshes the selection has now. */
+        bool stale = recollectEmpty && _selectionMeshes.Count == 0;
+        for (int i = 0; i < _selectionMeshes.Count && !stale; i++)
+        {
+            MeshInstance3D mesh = _selectionMeshes[i];
+            stale = mesh == null || !GodotObject.IsInstanceValid(mesh) || mesh.IsQueuedForDeletion();
+        }
+        if (stale)
+        {
+            //What was saved for the outgoing meshes has nothing left to go back onto. Kept, every respawn of a selection
+            //that stays put (each tick of a slider) added a set until the selection changed
+            DropDeadKeys(_savedOverlays);
+            DropDeadKeys(_savedOverrides);
+            _selectionMeshes.Clear();
+            for (int i = 0; i < _selectionRoots.Count; i++)
+                CollectSelectionMeshes(_selectionRoots[i], append: true);
+            _selectionMeshes.RemoveAll(mesh => mesh == null || !GodotObject.IsInstanceValid(mesh) || mesh.IsQueuedForDeletion());
+        }
 
         for (int i = 0; i < _selectionMeshes.Count; i++)
         {
@@ -72,21 +172,36 @@ public static class LevelViewerSelection
             if (mesh == null || !GodotObject.IsInstanceValid(mesh))
                 continue;
 
-            if (_savedOverlays.ContainsKey(mesh))
-                continue;
-
-            ApplyMeshHighlight(mesh);
+            ApplyMeshHighlight(mesh); //each mode's apply is a no-op on a mesh it already marked
         }
     }
 
-    private static void CollectSelectionMeshes(Node3D selected)
+    private static void DropDeadKeys(Dictionary<MeshInstance3D, Material> saved)
     {
-        _selectionMeshes.Clear();
+        List<MeshInstance3D> dead = null;
+        foreach (MeshInstance3D mesh in saved.Keys)
+        {
+            if (mesh == null || !GodotObject.IsInstanceValid(mesh) || mesh.IsQueuedForDeletion())
+                (dead ??= new List<MeshInstance3D>()).Add(mesh);
+        }
+        if (dead != null)
+        {
+            foreach (MeshInstance3D mesh in dead)
+                saved.Remove(mesh);
+        }
+    }
+
+    private static void CollectSelectionMeshes(Node3D selected, bool append = false)
+    {
+        if (!append)
+            _selectionMeshes.Clear();
+
         if (selected == null || !GodotObject.IsInstanceValid(selected))
             return;
 
+        int before = _selectionMeshes.Count;
         LevelViewerPick.CollectPickMeshesForEntitySubtree(selected, _selectionMeshes);
-        if (_selectionMeshes.Count > 0)
+        if (_selectionMeshes.Count > before)
             return;
 
         PreviewVisualUtility.CollectMeshInstancesForEntityVisual(selected, _selectionMeshes);
@@ -94,9 +209,20 @@ public static class LevelViewerSelection
 
     private static bool ApplyMeshHighlight(MeshInstance3D meshInstance)
     {
-        return LevelViewerHighlightOverlay.TryApplyOverlay(
-            meshInstance,
-            _savedOverlays,
-            LevelViewerHighlightOverlay.HighlightOverlayMode.Selection);
+        switch (PreviewVisibilitySettings.SelectionHighlightMode)
+        {
+            case OpenCAGE.UnityConnection.LevelViewerHighlightMode.None:
+                return false;
+            case OpenCAGE.UnityConnection.LevelViewerHighlightMode.Wireframe:
+                return LevelViewerHighlightOverlay.TryApplyWireframeOverlay(meshInstance, _savedOverlays);
+            case OpenCAGE.UnityConnection.LevelViewerHighlightMode.WireframeTransparent:
+                //The one mode that takes the material slot: a zone colour in it is lent, and the mesh's own material is what goes back
+                return LevelViewerHighlightOverlay.TryApplyWireframe(meshInstance, _savedOverrides, LevelViewerZoneHighlight.LendToSelection);
+            default:
+                return LevelViewerHighlightOverlay.TryApplyOverlay(
+                    meshInstance,
+                    _savedOverlays,
+                    LevelViewerHighlightOverlay.HighlightOverlayMode.Selection);
+        }
     }
 }

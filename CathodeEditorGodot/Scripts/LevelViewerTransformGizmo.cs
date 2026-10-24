@@ -12,11 +12,73 @@ public partial class LevelViewerTransformGizmo : Node3D
 {
     public enum GizmoMode { None, TranslateWorld, RotateLocal, RotateWorld, TranslateLocal }
 
-    /// <summary>Fired when dragging moves/rotates the target. Args: local position, local euler rotation degrees.</summary>
-    public Action<Vector3, Vector3> OnTransformChanged;
+    /// <summary>
+    /// Fired for each target a drag has moved when it ends - not for one it left where it was. Args:
+    /// its index in the selection (0 = the anchor the gizmo takes its orientation from), local
+    /// position, local euler rotation degrees, and the gesture the drag belongs to
+    /// (<see cref="NextGesture"/>) - the same for every target it moved.
+    /// </summary>
+    public Action<int, Vector3, Vector3, uint> OnTransformChanged;
+
+    /// <summary>
+    /// While a drag is under way, a few times a second (<see cref="PreviewIntervalMs"/>): where each target it is moving
+    /// is now, with the same args as <see cref="OnTransformChanged"/>, so the editor can follow the move as it happens.
+    /// Nothing is recorded from it: <see cref="OnTransformChanged"/> is still the edit, when the drag is let go.
+    /// </summary>
+    public Action<int, Vector3, Vector3, uint> OnTransformPreview;
+
+    /// <summary>
+    /// A target <see cref="OnTransformPreview"/> showed moving gets no edit after all - the drag was called off, ended as
+    /// a click, or left it where it started - so the editor shows it where the level has it again. Args: its index in
+    /// the selection, and the gesture.
+    /// </summary>
+    public Action<int, uint> OnTransformPreviewEnded;
+
+    /// <summary>The least time between two <see cref="OnTransformPreview"/>s of one drag.</summary>
+    public const ulong PreviewIntervalMs = 66;
+    private ulong _lastPreviewMs;
+    private bool _previewSent;
 
     /// <summary>Fired once when a drag ends — use for pick-cache invalidation (not every mouse-move frame).</summary>
     public Action<Node3D> OnDragCommitted;
+
+    /// <summary>
+    /// Shift was held when a handle was pressed, and the press is surely a drag (a shift-click makes no
+    /// copies): the caller should duplicate the selection and let the copies replace the drag targets
+    /// (3ds Max shift-clone). Fired instead of beginning a real drag. Carries the gesture the drag that
+    /// picks the copies up will commit under, so the copies and their move are one gesture.
+    /// </summary>
+    public Action<uint> OnDuplicateRequested;
+
+    /// <summary>
+    /// A shift-clone was called off after its copies were asked for (Escape, or the selection changing
+    /// under its drag), whether or not they have arrived: the caller should take back the step that
+    /// made them - only if it is still the latest step - rather than leave them stacked unseen on the
+    /// originals. Carries the clone's gesture.
+    /// </summary>
+    public Action<uint> OnCloneCancelled;
+
+    /// <summary>
+    /// Nearest mesh vertex to the cursor for vertex snapping: (mousePos, current targets) -> world
+    /// point, or null when the ray misses. Set by the connection, which owns the scene and pick data.
+    /// </summary>
+    public Func<Vector2, IReadOnlyList<Node3D>, Vector3?> VertexSnapProvider;
+
+    /// <summary>Vertex snapping is on for this drag (V held, or the persistent toolbar option).</summary>
+    public bool VertexSnapActive { get; set; }
+
+    /// <summary>
+    /// A handle is still held on a shift-clone whose copies have been asked for but not arrived: the
+    /// drag moves them once they do. (Let go first, the copies still get the drag as it stood - that
+    /// wait is not a held handle.)
+    /// </summary>
+    public bool IsHandoverArmed => _handoverArmed && !_handoverReleased;
+
+    /// <summary>
+    /// The latest <see cref="SetTargets"/> handed a shift-clone's drag to its copies: that selection
+    /// change was the clone's own, not one to fly the camera to.
+    /// </summary>
+    public bool TookHandover { get; private set; }
 
     // ── visual constants ──────────────────────────────────────────────────────
     private const float GizmoScreenSize  = 0.10f;  // desired fraction of viewport height
@@ -48,7 +110,10 @@ public partial class LevelViewerTransformGizmo : Node3D
     private enum DragAxis { None, X, Y, Z, XY, XZ, YZ, RotX, RotY, RotZ }
 
     private GizmoMode  _mode      = GizmoMode.None;
+    /* The anchor: it decides the gizmo's orientation in local modes, and a one-entity selection is
+       just this. _targets holds the whole selection with the anchor first. */
     private Node3D     _target;
+    private readonly List<Node3D> _targets = new List<Node3D>();
     private Camera3D   _camera;
     private DragAxis   _dragAxis  = DragAxis.None;
     private DragAxis   _hovAxis   = DragAxis.None;
@@ -58,26 +123,116 @@ public partial class LevelViewerTransformGizmo : Node3D
     private Vector3 _dragPivot;        // world position at drag start (never moves during drag)
     private Vector3 _dragStartPos;
     private Vector3 _dragStartRot;
+    private readonly List<Vector3> _dragStartPositions = new List<Vector3>();     // per target, world
+    private readonly List<Quaternion> _dragStartQuaternions = new List<Quaternion>(); // per target, world
+    private readonly List<Transform3D> _dragStartTransforms = new List<Transform3D>(); // per target, local (what the level holds)
     private Vector3 _dragStartHit;       // ray-plane hit at mouse-down
     private Vector3 _dragAxisDir;      // constrained axis (translate) or rotation axis (rotate)
     private Vector3 _dragPlaneNormal;  // plane used for ray intersection during drag
     private bool    _isDragging;
+    private bool    _dragFromPress;    // the live drag grew out of a press on the originals: a quick one is still a click
+    private bool    _dragIsClone;      // the live drag is a shift-clone's, on its copies: calling it off takes them back
+    private bool    _dragIsPivot;      // the live drag moves the handles alone (Ctrl+Shift): the selection stays where it is
+
+    /* Where the handles sit, once they have been moved off the selection (Ctrl+Shift-drag a translate handle):
+       what the selection then turns about. Held in the anchor's own frame, so it goes wherever the selection
+       is taken - moved, it moves with it; turned about it, it stays put - and forgotten as soon as the
+       selection changes. */
+    private bool    _pivotMoved;
+    private Vector3 _pivotInAnchor;
+    private bool    _dragStartPivotMoved;      // as they stood at the press, to put back if the drag is called off
+    private Vector3 _dragStartPivotInAnchor;
+    private static readonly List<Node3D> NoTargets = new List<Node3D>();
+
+    /* A handle pressed but not yet dragged. Nothing moves, snaps, duplicates or commits until the mouse has
+       gone LevelViewerBoxSelect.DragThresholdPixels from the press - a click on a handle is not a drag
+       (issue 718: a press that began the drag at once committed it on the release, snapping an off-grid
+       entity onto the grid and leaving an undo step behind for a click). */
+    private bool    _pressArmed;
+    private Vector2 _pressPos;
+    private ulong   _pressMs;          // when it went down
+    private float   _pressMaxTravel;   // the furthest the held cursor has been from _pressPos
+    private Vector2 _lastHeldPos;      // where the cursor last was with the button known to be down
+    private bool    _pressDuplicate;   // shift was held: the drag, once it is one, is a shift-clone
+    private bool    _pressPivot;       // Ctrl+Shift was held: the drag, once it is one, moves the handles alone; a click puts them back
+
+    /* Let go this soon, having been no further than this from the press, a press is a click however it
+       moved in between. Clicking while the mouse is still travelling (issue 718's second report) covers
+       more than the drag threshold in the ~100 ms the button is down; a drag this short and this quick is
+       not one anybody means to make - it is over before it can be seen. A plain drag still shows from the
+       threshold on, and is put back if it ends as a click; a shift-clone asks for no copies until it is
+       past being one. */
+    private const ulong ClickMaxMs       = 250;
+    private const float ClickMaxTravelPx = 24f;
+
+    //Closer than this to where the drag found it (metres, or a basis column's length) is not a change
+    private const float UnchangedEpsilon = 1e-4f;
 
     // rotation-only: incremental angle tracking (avoids acos wrap at ±180°)
     private Quaternion _dragStartGlobalQuat;
     private Vector3    _dragRotRefDir;
     private float      _dragAccumAngleRad;
 
+    private bool    _vertexSnappedThisMove;
+
+    /* Shift-clone handover: armed once a shift-press is surely a drag (the copies are asked for then),
+       disarmed once the copies replace the targets. The drag is all kept here rather than in the live
+       drag state, so a release - or a new press - before the copies arrive does not lose it. */
+    private bool          _handoverArmed;
+    private bool          _handoverReleased;   // let go before the copies came: they get the drag as it stood then
+    private Vector2       _handoverPressPos;
+    private Vector2       _handoverReleasePos;
+    private ulong         _handoverArmedMs;
+    private GizmoMode     _handoverMode;
+    private DragAxis      _handoverAxis;
+    private uint          _handoverGesture;
+    private bool          _handoverVertexSnap;
+    private Vector3?      _handoverPivot;      // world: where the handles had been moved to, which the copies keep
+    private readonly List<Node3D> _handoverOriginals = new List<Node3D>();
+    private readonly List<Vector3> _handoverOriginalPositions = new List<Vector3>(); // world, where the copies will be made
+    private const ulong HandoverTimeoutMs = 2000;
+    private const float CopyMatchEpsilon  = 0.01f;
+
+    /* The gesture the drag being made (or armed, for a shift-clone) belongs to. Taken at the press, so a
+       shift-clone's duplicate request and the drag that carries its copies share it. */
+    private uint _gesture;
+
+    /* Seeded at random, so a viewer restarted mid-session does not hand out an id that is still on top
+       of the editor's history from before. */
+    private static uint _lastGesture = (uint)Random.Shared.Next(1, int.MaxValue);
+
+    /// <summary>
+    /// An id for one gesture. Everything a single drag sends goes out under it - a packet per entity it
+    /// moved - which is what lets the editor undo the whole of it as one step. Never 0.
+    /// </summary>
+    public static uint NextGesture()
+    {
+        _lastGesture = unchecked(_lastGesture + 1);
+        if (_lastGesture == 0)
+            _lastGesture = 1;
+        return _lastGesture;
+    }
+
     // mesh children
     private StandardMaterial3D[] _axisMats;  // 0=X 1=Y 2=Z  (shared by shaft+head)
     private StandardMaterial3D[] _planeMats; // 0=XY 1=XZ 2=YZ
     private StandardMaterial3D[] _ringMats;  // 0=RotX 1=RotY 2=RotZ
 
-    public bool IsDragging => _isDragging;
+    /// <summary>
+    /// A handle is held: a drag under way, or a press on one that turns into a drag once the mouse
+    /// moves far enough (until then it moves nothing).
+    /// </summary>
+    public bool IsDragging => _isDragging || _pressArmed;
 
     /// <summary>True when a visible gizmo handle would be hit at this screen position (ignores depth).</summary>
     public bool HitsAtScreen(Vector2 mousePos)
         => Visible && HitTest(mousePos) != DragAxis.None;
+
+    /// <summary>The handles have been moved off the selection (Ctrl+Shift-drag), and it turns about where they are.</summary>
+    public bool PivotMoved => _pivotMoved;
+
+    /// <summary>Where the handles are, in world space: the middle of the selection, unless they have been moved.</summary>
+    public Vector3 Pivot => GetPivot();
 
     // ─────────────────────────────────────────────────────────────────────────
     public override void _Ready()
@@ -91,8 +246,19 @@ public partial class LevelViewerTransformGizmo : Node3D
     {
         if (_mode == mode)
             return;
+
+        /* Mid gesture (a mode key pressed with the button still down): finish it where it was last held, as
+           letting go there would, rather than leave what it moved shown somewhere the level doesn't have it.
+           A shift-clone still waiting on its copies is let go the same way - they get the drag, in the mode
+           it was made in, when they come - rather than handed a drag in a mode it was never made in. */
+        if (_isDragging)
+            FinishDrag(_lastHeldPos);
+        if (IsHandoverArmed)
+            ReleaseHandover(_lastHeldPos);
+
         _mode = mode;
-        _isDragging = false;
+        _pressArmed = false;
+        _dragAxis = DragAxis.None;
         RebuildMeshes();
         RefreshVisibility();
     }
@@ -101,32 +267,359 @@ public partial class LevelViewerTransformGizmo : Node3D
 
     public void SetTarget(Node3D target, Camera3D camera)
     {
-        if (_isDragging)
-            CommitDrag();
+        SetTargets(target == null ? null : new List<Node3D> { target }, camera);
+    }
 
-        _target  = target;
-        _camera  = camera;
-        _isDragging = false;
-        if (!PreviewVisualUtility.HasValidWorldAnchor(_target))
+    /// <summary>
+    /// Drive several entities at once. The first is the anchor; the gizmo sits at the centre of them
+    /// all and a drag moves the group rigidly, so what it does to one it does to every one.
+    /// </summary>
+    public void SetTargets(IReadOnlyList<Node3D> targets, Camera3D camera)
+    {
+        List<Node3D> incoming = new List<Node3D>();
+        if (targets != null)
         {
-            _target = null;
+            for (int i = 0; i < targets.Count; i++)
+            {
+                Node3D target = targets[i];
+                if (target != null && GodotObject.IsInstanceValid(target)
+                    && PreviewVisualUtility.HasValidWorldAnchor(target))
+                {
+                    incoming.Add(target);
+                }
+            }
+        }
+
+        /* The same selection again (a render filter refresh, an echo): whatever the handle is doing carries on.
+           A different one takes the targets away from under it. A drag is put back, not committed - by now the
+           entity ids and path it would be sent under are the new selection's, so it wrote the old nodes'
+           transforms into the new entities - and a press not yet a drag is let go: the handle it was held on
+           belongs to what was selected before. */
+        if (!SameNodes(incoming, _targets))
+        {
+            AbandonDrag();
+            _pressArmed = false;
+            //Handles moved off the old selection mean nothing to the new one
+            _pivotMoved = false;
+        }
+
+        _camera  = camera;
+        TookHandover = false;
+        _targets.Clear();
+        _targets.AddRange(incoming);
+
+        _target = _targets.Count > 0 ? _targets[0] : null;
+        if (_target == null)
+        {
             Visible = false;
             return;
         }
 
-        GlobalPosition = _target.GlobalPosition;
+        if (!_isDragging)
+            GlobalPosition = GetPivot();
         RefreshVisibility();
+
+        TryBeginHandover();
+    }
+
+    private static bool SameNodes(List<Node3D> a, List<Node3D> b)
+    {
+        if (a.Count != b.Count)
+            return false;
+        for (int i = 0; i < a.Count; i++)
+            if (a[i] != b[i])
+                return false;
+        return true;
+    }
+
+    /// <summary>
+    /// A shift-clone's copies may just have been selected (this is what SetTargets is handing us). If the
+    /// left button is still down, pick the drag up on them from where it was pressed and jump to where
+    /// the cursor is now, so the copies follow the cursor as one continuous gesture; let go already, give
+    /// them the drag as it stood when it was.
+    /// </summary>
+    private void TryBeginHandover()
+    {
+        ExpireHandover();
+        if (!_handoverArmed)
+            return;
+
+        //Not the copies (still the originals - the ENTITY_ADDED echo - or something unrelated): keep waiting
+        if (!AreTheCopies(_targets))
+            return;
+
+        _handoverArmed = false;
+        TookHandover = true;
+
+        //The copies stand where the originals did, so moved handles go where they were on those
+        if (_handoverPivot.HasValue)
+        {
+            SetPivot(_handoverPivot.Value);
+            GlobalPosition = GetPivot();
+        }
+
+        //Let go before they came - or the release never reached this window - so they go where it was let go
+        if (_handoverReleased || !Input.IsMouseButtonPressed(MouseButton.Left))
+        {
+            ApplyHandoverDrag(_handoverReleased ? _handoverReleasePos : _lastHeldPos);
+            return;
+        }
+
+        _dragAxis      = _handoverAxis;
+        _gesture       = _handoverGesture;
+        _isDragging    = true;
+        _dragIsClone   = true;
+        _dragFromPress = false;
+        ApplyHighlight();
+        BeginDrag(_handoverPressPos);
+        DragUpdate(_lastHeldPos);
+    }
+
+    /// <summary>
+    /// The copies arrived after the button came up: make the drag the press and release describe on them
+    /// in one go, in the mode it was made in, and commit it under the clone's gesture - the step that made
+    /// the copies - so the copies land where they were dragged to rather than stacked on the originals.
+    /// </summary>
+    private void ApplyHandoverDrag(Vector2 releasePos)
+    {
+        if (_camera == null || !GodotObject.IsInstanceValid(_camera))
+            return;
+
+        GizmoMode mode = _mode;
+        bool vertexSnap = VertexSnapActive;
+        _mode            = _handoverMode;
+        VertexSnapActive = _handoverVertexSnap;
+        _dragAxis        = _handoverAxis;
+        _gesture         = _handoverGesture;
+        _isDragging      = true;
+        try
+        {
+            BeginDrag(_handoverPressPos);
+            DragUpdate(releasePos);
+            CommitDrag();
+        }
+        finally
+        {
+            _mode = mode;
+            VertexSnapActive = vertexSnap;
+            EndDragState();
+            ApplyHighlight();
+        }
+    }
+
+    /// <summary>
+    /// The shift-clone's copies: none of them an original, and each where an original stood when they were
+    /// asked for (they are made in place). A selection of anything else made meanwhile is not handed the drag.
+    /// </summary>
+    private bool AreTheCopies(List<Node3D> targets)
+    {
+        if (targets.Count == 0 || SharesAnyNode(targets, _handoverOriginals))
+            return false;
+
+        for (int i = 0; i < targets.Count; i++)
+        {
+            if (!GodotObject.IsInstanceValid(targets[i]))
+                return false;
+
+            bool onAnOriginal = false;
+            for (int j = 0; j < _handoverOriginalPositions.Count && !onAnOriginal; j++)
+                onAnOriginal = targets[i].GlobalPosition.DistanceTo(_handoverOriginalPositions[j]) <= CopyMatchEpsilon;
+            if (!onAnOriginal)
+                return false;
+        }
+        return true;
+    }
+
+    //Timed out (the editor refused the duplicate, say, or is still making it): stop waiting, so a held
+    //handle is never left swallowing motion; late copies stay where they were made.
+    private void ExpireHandover()
+    {
+        if (_handoverArmed && Time.GetTicksMsec() - _handoverArmedMs > HandoverTimeoutMs)
+            _handoverArmed = false;
+    }
+
+    /// <summary>The button came up on a shift-clone still waiting on its copies: they get the drag as it stands.</summary>
+    private void ReleaseHandover(Vector2 mousePos)
+    {
+        _handoverReleased   = true;
+        _handoverReleasePos = mousePos;
+        _handoverVertexSnap = VertexSnapActive;
+    }
+
+    private static bool SharesAnyNode(List<Node3D> a, List<Node3D> b)
+    {
+        for (int i = 0; i < a.Count; i++)
+            for (int j = 0; j < b.Count; j++)
+                if (a[i] == b[j])
+                    return true;
+        return false;
     }
 
     public void ClearTarget()
     {
-        if (_isDragging)
-            CommitDrag();
+        //The selection is gone from under the handle: put back what its drag moved, which the level never had.
+        //A shift-clone still waiting on its copies keeps waiting - they arrive selected.
+        AbandonDrag();
 
         _target = null;
-        _isDragging = false;
+        _targets.Clear();
+        _pressArmed = false;
+        _pivotMoved = false;
+        TookHandover = false;
         Visible = false;
     }
+
+    /// <summary>
+    /// Call off what the held handle is doing (Escape). A drag puts every target back where the press
+    /// found it and sends nothing; a press that isn't a drag yet is let go. A shift-clone's copies - asked
+    /// for, whether or not they have arrived - are taken back too (<see cref="OnCloneCancelled"/>), rather
+    /// than left stacked unseen on the originals.
+    /// </summary>
+    public void CancelDrag()
+    {
+        AbandonDrag();
+
+        if (IsHandoverArmed)
+        {
+            _handoverArmed = false;
+            OnCloneCancelled?.Invoke(_handoverGesture);
+        }
+
+        _pressArmed = false;
+        _dragAxis   = DragAxis.None;
+        ApplyHighlight();
+    }
+
+    /// <summary>
+    /// Another button went down while a handle is held but not yet dragged: that press is let go, so the
+    /// camera moving under it - a look puts the cursor back in the middle of the view - cannot make a
+    /// drag of it.
+    /// </summary>
+    public void DropPendingPress()
+    {
+        if (!_pressArmed)
+            return;
+
+        _pressArmed = false;
+        _dragAxis   = DragAxis.None;
+        ApplyHighlight();
+    }
+
+    /// <summary>A live drag is called off: every target goes back where it found them, and a clone's copies are taken back.</summary>
+    private void AbandonDrag()
+    {
+        if (!_isDragging)
+            return;
+
+        RevertDrag();
+        if (_dragIsClone)
+            OnCloneCancelled?.Invoke(_gesture);
+        EndDragState();
+    }
+
+    /// <summary>Put every target back exactly where the drag found it. Nothing is sent: the level never had it moved.</summary>
+    private void RevertDrag()
+    {
+        for (int i = 0; i < _targets.Count && i < _dragStartTransforms.Count; i++)
+        {
+            if (GodotObject.IsInstanceValid(_targets[i]))
+                _targets[i].Transform = _dragStartTransforms[i];
+            EndPreview(i);
+        }
+
+        //Handles a Ctrl+Shift drag was moving go back too
+        _pivotMoved    = _dragStartPivotMoved;
+        _pivotInAnchor = _dragStartPivotInAnchor;
+    }
+
+    private void EndDragState()
+    {
+        _isDragging    = false;
+        _dragFromPress = false;
+        _dragIsClone   = false;
+        _dragIsPivot   = false;
+        _dragAxis      = DragAxis.None;
+        _previewSent   = false;
+        _lastPreviewMs = 0;
+    }
+
+    /* The drag so far, for the editor to follow: at once, then at most every PreviewIntervalMs. Not for a drag of the
+       handles alone, which moves nothing in the level. */
+    private void PreviewDrag()
+    {
+        if (OnTransformPreview == null || _dragIsPivot)
+            return;
+        ulong now = Time.GetTicksMsec();
+        if (_previewSent && now - _lastPreviewMs < PreviewIntervalMs)
+            return;
+        _lastPreviewMs = now;
+        _previewSent = true;
+        for (int i = 0; i < _targets.Count; i++)
+        {
+            Node3D target = _targets[i];
+            if (target != null && GodotObject.IsInstanceValid(target))
+                OnTransformPreview(i, target.Position, target.RotationDegrees, _gesture);
+        }
+    }
+
+    /* This target is getting no edit from the drag: the editor takes back what the previews showed it */
+    private void EndPreview(int index)
+    {
+        if (_previewSent)
+            OnTransformPreviewEnded?.Invoke(index, _gesture);
+    }
+
+    /// <summary>Where the handles sit: on the entity for one, in the middle of them for several.</summary>
+    private Vector3 GetTargetsCentre()
+    {
+        Vector3 total = Vector3.Zero;
+        int count = 0;
+        for (int i = 0; i < _targets.Count; i++)
+        {
+            Node3D target = _targets[i];
+            if (target == null || !GodotObject.IsInstanceValid(target))
+                continue;
+
+            total += target.GlobalPosition;
+            count++;
+        }
+
+        return count == 0 ? GlobalPosition : total / count;
+    }
+
+    /// <summary>Where the handles sit and what the selection turns about: the middle of it, unless they have been moved.</summary>
+    private Vector3 GetPivot()
+    {
+        if (_pivotMoved && _target != null && GodotObject.IsInstanceValid(_target))
+            return _target.GlobalTransform * _pivotInAnchor;
+        return GetTargetsCentre();
+    }
+
+    /// <summary>Move the handles to <paramref name="world"/>, held from now on in the anchor's frame.</summary>
+    private void SetPivot(Vector3 world)
+    {
+        if (_target == null || !GodotObject.IsInstanceValid(_target))
+            return;
+
+        Transform3D anchor = _target.GlobalTransform;
+        if (Mathf.Abs(anchor.Basis.Determinant()) < 1e-12f)
+            return;
+
+        _pivotInAnchor = anchor.AffineInverse() * world;
+        _pivotMoved    = true;
+    }
+
+    /// <summary>The handles go back to the middle of the selection (a Ctrl+Shift click on one).</summary>
+    private void ResetPivot()
+    {
+        _pivotMoved = false;
+        if (!_isDragging)
+            GlobalPosition = GetTargetsCentre();
+    }
+
+    /* A single entity turns where it stands; a group, or handles moved off the selection, turn about the
+       handles - every target swinging round them as well as turning */
+    private bool TurnsAboutPivot => _targets.Count > 1 || _pivotMoved;
 
     // ─────────────────────────────────────────────────────────────────────────
     public override void _Process(double delta)
@@ -162,24 +655,55 @@ public partial class LevelViewerTransformGizmo : Node3D
             }
         }
 
-        if (!_isDragging)
-            GlobalPosition = _target.GlobalPosition;
+        /* A shift-press that moved past the drag threshold and is then held still stops being a click once
+           the click time is up: ask for the copies now, rather than at the next motion or the release. */
+        ExpireHandover();
+        if (_pressArmed && _pressDuplicate && Input.IsMouseButtonPressed(MouseButton.Left) && PressIsDrag())
+            BeginPressedDrag(_lastHeldPos);
 
-        GlobalBasis = GetOrientationBasis();
+        if (!_isDragging)
+            GlobalPosition = GetPivot();
+
+        GlobalBasis = GetDrawnBasis();
 
         UpdateWorldScale();
         Scale   = Vector3.One * _worldScale;
         Visible = true;
+        UpdatePivotGuide();
     }
 
     // ─────────────────────────────────────────────────────────────────────────
     //  Input forwarding (called by LevelViewerCamera)
     // ─────────────────────────────────────────────────────────────────────────
 
-    public bool HandleMouseMotion(Vector2 mousePos)
+    public bool HandleMouseMotion(Vector2 mousePos) => HandleMouseMotion(mousePos, leftHeld: true);
+
+    /// <param name="leftHeld">The left button is down, as far as this motion knows.</param>
+    public bool HandleMouseMotion(Vector2 mousePos, bool leftHeld)
     {
         if (_mode == GizmoMode.None || !Visible)
             return false;
+
+        //The button came up somewhere this window never heard about (let go over another window): whatever the
+        //handle held ended there, as a release where it was last held - not following the cursor with no
+        //button down until the next click commits it wherever it has got to.
+        if (!leftHeld)
+            EndHeldGesture(_lastHeldPos);
+        else if (IsHandleHeld)
+            TrackHeld(mousePos);
+
+        ExpireHandover();
+
+        //Waiting on a shift-clone's copies: hold the gesture, but move nothing until they arrive.
+        if (IsHandoverArmed)
+            return true;
+
+        if (_pressArmed)
+        {
+            if (PressIsDrag())
+                BeginPressedDrag(mousePos);
+            return true;
+        }
 
         if (_isDragging)
         {
@@ -196,8 +720,21 @@ public partial class LevelViewerTransformGizmo : Node3D
         return false;
     }
 
-    public bool HandleMouseButtonDown(Vector2 mousePos)
+    public bool HandleMouseButtonDown(Vector2 mousePos) => HandleMouseButtonDown(mousePos, duplicate: false);
+
+    public bool HandleMouseButtonDown(Vector2 mousePos, bool duplicate) => HandleMouseButtonDown(mousePos, duplicate, movePivot: false);
+
+    /// <param name="duplicate">Shift: a drag on a translate handle is a shift-clone.</param>
+    /// <param name="movePivot">
+    /// Ctrl+Shift: a drag on a translate handle moves the handles alone - what the selection then turns
+    /// about - and a click on one puts them back in the middle of the selection.
+    /// </param>
+    public bool HandleMouseButtonDown(Vector2 mousePos, bool duplicate, bool movePivot)
     {
+        //Still holding from a press whose release never arrived: that ended where it was last held, and
+        //must not carry on under this press
+        EndHeldGesture(_lastHeldPos);
+
         if (_mode == GizmoMode.None || !Visible || _target == null)
             return false;
 
@@ -205,25 +742,157 @@ public partial class LevelViewerTransformGizmo : Node3D
         if (hit == DragAxis.None)
             return false;
 
-        _dragAxis   = hit;
-        _hovAxis    = hit;
-        _isDragging = true;
+        _dragAxis    = hit;
+        _hovAxis     = hit;
+        _lastHeldPos = mousePos;
+        _gesture     = NextGesture();
         ApplyHighlight();
-        BeginDrag(mousePos);
+
+        /* Only armed: the drag waits for the mouse to move (see _pressArmed). The press is the gizmo's
+           either way, so a click on a handle still never selects what is behind it. */
+        _pressArmed     = true;
+        _pressPos       = mousePos;
+        _pressMs        = Time.GetTicksMsec();
+        _pressMaxTravel = 0f;
+        _pressPivot     = movePivot && IsTranslateMode;
+        _pressDuplicate = duplicate && IsTranslateMode && !_pressPivot;
         return true;
     }
 
     public bool HandleMouseButtonUp(Vector2 mousePos)
     {
-        if (!_isDragging)
+        if (!IsHandleHeld)
             return false;
 
-        CommitDrag();
-        _isDragging = false;
-        _dragAxis   = DragAxis.None;
-        _hovAxis    = HitTest(mousePos);
+        EndHeldGesture(mousePos);
+        _hovAxis = HitTest(mousePos);
         ApplyHighlight();
         return true;
+    }
+
+    //The button is down on a handle: a press not yet a drag, a drag, or a shift-clone waiting on its copies
+    private bool IsHandleHeld => _pressArmed || _isDragging || IsHandoverArmed;
+
+    private void TrackHeld(Vector2 mousePos)
+    {
+        _lastHeldPos = mousePos;
+        _pressMaxTravel = Mathf.Max(_pressMaxTravel, mousePos.DistanceTo(_pressPos));
+    }
+
+    //Let go now, the press would still be a click: quick, and never far from where it went down
+    private bool PressIsClickSoFar()
+        => Time.GetTicksMsec() - _pressMs < ClickMaxMs && _pressMaxTravel < ClickMaxTravelPx;
+
+    /// <summary>
+    /// The held press has gone far enough to be a drag. A plain one shows it from the threshold on (and is
+    /// put back if it ends as a click); a shift-clone asks for copies only once it cannot be a click.
+    /// </summary>
+    private bool PressIsDrag()
+    {
+        if (_pressMaxTravel < LevelViewerBoxSelect.DragThresholdPixels)
+            return false;
+        return !_pressDuplicate || !PressIsClickSoFar();
+    }
+
+    /// <summary>
+    /// The button is up - let go at <paramref name="mousePos"/>, or found up and taken as let go there. A press
+    /// never a drag was a click and changes nothing; a drag ends (<see cref="FinishDrag"/>); a shift-clone
+    /// still waiting on its copies hands them the drag as it stands, when they come.
+    /// </summary>
+    private void EndHeldGesture(Vector2 mousePos)
+    {
+        if (_pressArmed)
+        {
+            TrackHeld(mousePos);
+            //Surely a drag though never begun (a shift-clone moved, then held still until it was let go)
+            if (PressIsDrag())
+            {
+                BeginPressedDrag(mousePos);
+            }
+            else
+            {
+                //A Ctrl+Shift click on a handle puts the handles back in the middle of the selection
+                if (_pressPivot)
+                    ResetPivot();
+                _pressArmed = false;
+                _dragAxis   = DragAxis.None;
+            }
+        }
+
+        if (_isDragging)
+            FinishDrag(mousePos);
+
+        if (IsHandoverArmed)
+            ReleaseHandover(mousePos);
+    }
+
+    /// <summary>
+    /// The drag ends, let go at <paramref name="mousePos"/>. One that grew out of a press and ends as a
+    /// click - let go quickly, having hardly moved - is put back: nothing is sent and no undo step made. The
+    /// rest are committed as they stand (snapped to the grid and steps).
+    /// </summary>
+    private void FinishDrag(Vector2 mousePos)
+    {
+        if (!_isDragging)
+            return;
+
+        if (_dragFromPress)
+            TrackHeld(mousePos);
+
+        bool click = _dragFromPress && PressIsClickSoFar();
+        if (click)
+            RevertDrag();
+        //Moving the handles alone changes nothing in the level, so there is nothing to send
+        else if (!_dragIsPivot)
+            CommitDrag();
+
+        //...and a Ctrl+Shift click, however it moved, puts them back in the middle
+        if (click && _dragIsPivot)
+            ResetPivot();
+
+        EndDragState();
+    }
+
+    /// <summary>
+    /// The held handle is a drag now. It begins from the press, so the pixels it took to get here aren't
+    /// lost, and catches up to the cursor.
+    /// </summary>
+    private void BeginPressedDrag(Vector2 mousePos)
+    {
+        _pressArmed = false;
+
+        //Shift-clone (translate only): don't touch the originals - arm the handover, ask the caller to
+        //duplicate, and pick the drag up on the copies once they are selected in.
+        if (_pressDuplicate)
+        {
+            _handoverArmed      = true;
+            _handoverReleased   = false;
+            _handoverPressPos   = _pressPos;
+            _handoverArmedMs    = Time.GetTicksMsec();
+            _handoverMode       = _mode;
+            _handoverAxis       = _dragAxis;
+            _handoverGesture    = _gesture;
+            _handoverVertexSnap = VertexSnapActive;
+            _handoverPivot      = _pivotMoved ? GetPivot() : (Vector3?)null;
+            _handoverOriginals.Clear();
+            _handoverOriginalPositions.Clear();
+            for (int i = 0; i < _targets.Count; i++)
+            {
+                if (!GodotObject.IsInstanceValid(_targets[i]))
+                    continue;
+                _handoverOriginals.Add(_targets[i]);
+                _handoverOriginalPositions.Add(_targets[i].GlobalPosition);
+            }
+            OnDuplicateRequested?.Invoke(_gesture);
+            return;
+        }
+
+        _isDragging    = true;
+        _dragFromPress = true;
+        _dragIsClone   = false;
+        _dragIsPivot   = _pressPivot;
+        BeginDrag(_pressPos);
+        DragUpdate(mousePos);
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -231,9 +900,22 @@ public partial class LevelViewerTransformGizmo : Node3D
     // ─────────────────────────────────────────────────────────────────────────
     private void BeginDrag(Vector2 mousePos)
     {
-        _dragPivot    = _target.GlobalPosition;
-        _dragStartPos = _dragPivot;
+        //The whole group turns about where the handles are, which for one entity is the entity itself - unless they were moved
+        _dragPivot    = GetPivot();
+        _dragStartPivotMoved    = _pivotMoved;
+        _dragStartPivotInAnchor = _pivotInAnchor;
+        _dragStartPos = _target.GlobalPosition;
         _dragStartRot = _target.RotationDegrees;
+
+        _dragStartPositions.Clear();
+        _dragStartQuaternions.Clear();
+        _dragStartTransforms.Clear();
+        for (int i = 0; i < _targets.Count; i++)
+        {
+            _dragStartPositions.Add(_targets[i].GlobalPosition);
+            _dragStartQuaternions.Add(GetGlobalQuaternion(_targets[i]));
+            _dragStartTransforms.Add(_targets[i].Transform);
+        }
 
         if (IsTranslateMode)
         {
@@ -292,19 +974,44 @@ public partial class LevelViewerTransformGizmo : Node3D
         {
             Vector3 worldDelta = currentHit.Value - _dragStartHit;
 
-            if (IsPlane(_dragAxis))
+            // Free movement within the picked plane, or camera-plane movement projected onto one axis.
+            Vector3 delta = IsPlane(_dragAxis)
+                ? worldDelta
+                : _dragAxisDir * worldDelta.Dot(_dragAxisDir);
+
+            //Vertex snap: put the anchor's pivot on the nearest vertex under the cursor, still held to
+            //the handle's axis or plane so the gizmo behaves as it looks. The others keep their offset.
+            //Handles moved off the selection are what lands on the vertex instead, and moving the handles
+            //alone they may land on the selection's own vertices - a door's hinge, say - so none are left out.
+            _vertexSnappedThisMove = false;
+            if (VertexSnapActive && VertexSnapProvider != null)
             {
-                // Free movement within the picked plane.
-                _target.GlobalPosition = _dragStartPos + worldDelta;
-            }
-            else
-            {
-                // Project camera-plane movement onto the constrained axis.
-                float axisDelta = worldDelta.Dot(_dragAxisDir);
-                _target.GlobalPosition = _dragStartPos + _dragAxisDir * axisDelta;
+                Vector3? vertex = VertexSnapProvider(mousePos, _dragIsPivot ? NoTargets : _targets);
+                if (vertex.HasValue)
+                {
+                    Vector3 want = vertex.Value - (_dragIsPivot || _pivotMoved ? _dragPivot : _dragStartPositions[0]);
+                    delta = IsPlane(_dragAxis)
+                        ? want - _dragPlaneNormal * want.Dot(_dragPlaneNormal)
+                        : _dragAxisDir * want.Dot(_dragAxisDir);
+                    _vertexSnappedThisMove = true;
+                }
             }
 
-            GlobalPosition = _target.GlobalPosition;
+            //Moving the handles alone: the selection stays where it is, so nothing is snapped to the grid either
+            if (_dragIsPivot)
+            {
+                GlobalPosition = _dragPivot + delta;
+                SetPivot(GlobalPosition);
+                return;
+            }
+
+            for (int i = 0; i < _targets.Count; i++)
+            {
+                if (GodotObject.IsInstanceValid(_targets[i]))
+                    _targets[i].GlobalPosition = _dragStartPositions[i] + delta;
+            }
+
+            GlobalPosition = _dragPivot + delta;
         }
         else if (IsRotateMode)
         {
@@ -317,24 +1024,61 @@ public partial class LevelViewerTransformGizmo : Node3D
             _dragRotRefDir      = to;
             _dragAccumAngleRad += deltaRad;
 
+            /* A group rotates by whole steps of the snap, rather than each entity being snapped to
+               its own angle afterwards - that would pull the group apart. So does anything turning about
+               handles moved off it: snapping its angle afterwards would leave it where the unsnapped turn put it. */
+            float angleRad = _dragAccumAngleRad;
+            float rotationStep = LevelViewerTransformSnap.RotationDegrees;
+            if (TurnsAboutPivot && rotationStep > 0f)
+            {
+                angleRad = Mathf.DegToRad(
+                    LevelViewerTransformSnap.SnapValue(Mathf.RadToDeg(angleRad), rotationStep));
+            }
+
             if (_mode == GizmoMode.RotateWorld)
             {
                 Vector3 axis = _dragAxisDir.Normalized();
-                Quaternion worldDelta = new Quaternion(axis, _dragAccumAngleRad);
-                SetGlobalQuaternion(_target, worldDelta * _dragStartGlobalQuat);
+                ApplyGroupRotation(new Quaternion(axis, angleRad));
             }
             else
             {
+                /* The ring is the anchor's own axis as it stood at the press. Turning about it is, in
+                   world terms, q0 * delta * q0^-1 - one world rotation, which the whole group makes. */
                 Vector3 localAxis = AxisToLocalDir(_dragAxis).Normalized();
-                Quaternion localDelta = new Quaternion(localAxis, _dragAccumAngleRad);
-                SetGlobalQuaternion(_target, _dragStartGlobalQuat * localDelta);
+                Quaternion localDelta = new Quaternion(localAxis, angleRad);
+                Quaternion anchorRotation = _dragStartGlobalQuat * localDelta;
+                ApplyGroupRotation(anchorRotation * _dragStartGlobalQuat.Inverse());
                 GlobalBasis = _target.GlobalBasis;
             }
         }
 
         ApplyDragSnap();
 
-        // Sync to OpenCAGE / all entity instances only on CommitDrag — not every mouse-move frame.
+        // The edit (OpenCAGE, every instance of the entity) is made on CommitDrag; this only lets the editor follow along
+        PreviewDrag();
+    }
+
+    /// <summary>
+    /// Turn the group rigidly by one world rotation about the pivot - where the rings are. Every
+    /// target, the anchor included, turns by it and swings round the pivot by it, so the group keeps
+    /// its shape; the anchor turning on the spot while the rest orbited (issue 694) left the pivot
+    /// nowhere in particular. One entity is its own pivot, so it turns where it stands - unless the
+    /// handles have been moved off it, when it swings round them like a group.
+    /// </summary>
+    private void ApplyGroupRotation(Quaternion worldDelta)
+    {
+        bool orbit = TurnsAboutPivot;
+        for (int i = 0; i < _targets.Count; i++)
+        {
+            Node3D target = _targets[i];
+            if (target == null || !GodotObject.IsInstanceValid(target))
+                continue;
+
+            SetGlobalQuaternion(target, worldDelta * _dragStartQuaternions[i]);
+            //One entity is its own pivot: its position is left alone, as it always was (no round trip through its parent)
+            if (orbit)
+                target.GlobalPosition = _dragPivot + worldDelta * (_dragStartPositions[i] - _dragPivot);
+        }
     }
 
     private void ApplyDragSnap()
@@ -342,18 +1086,34 @@ public partial class LevelViewerTransformGizmo : Node3D
         if (_target == null || !GodotObject.IsInstanceValid(_target))
             return;
 
-        float grid = LevelViewerTransformSnap.GridSize;
+        //A vertex-snapped move is already exactly where it should be; the grid would pull it back off.
+        float grid = _vertexSnappedThisMove ? 0f : LevelViewerTransformSnap.GridSize;
         if (grid > 0f && IsTranslateMode)
         {
+            Vector3 before = _target.GlobalPosition;
             Vector3 pos = _target.Position;
             _target.Position = new Vector3(
                 LevelViewerTransformSnap.SnapValue(pos.X, grid),
                 LevelViewerTransformSnap.SnapValue(pos.Y, grid),
                 LevelViewerTransformSnap.SnapValue(pos.Z, grid));
-            GlobalPosition = _target.GlobalPosition;
+
+            /* Snapping each entity to the grid on its own would pull a group apart, so the anchor is
+               the one that lands on the grid and the rest move with it. */
+            Vector3 correction = _target.GlobalPosition - before;
+            if (correction.LengthSquared() > 0f)
+            {
+                for (int i = 1; i < _targets.Count; i++)
+                {
+                    if (GodotObject.IsInstanceValid(_targets[i]))
+                        _targets[i].GlobalPosition += correction;
+                }
+            }
+
+            GlobalPosition = GetPivot();
         }
 
-        float rotationStep = LevelViewerTransformSnap.RotationDegrees;
+        //A group's rotation is snapped as one angle while it turns, not per entity afterwards (and so is a turn about moved handles)
+        float rotationStep = TurnsAboutPivot ? 0f : LevelViewerTransformSnap.RotationDegrees;
         if (rotationStep > 0f && IsRotateMode)
         {
             Vector3 rot = _target.RotationDegrees;
@@ -426,8 +1186,35 @@ public partial class LevelViewerTransformGizmo : Node3D
             return;
 
         ApplyDragSnap();
-        OnTransformChanged?.Invoke(_target.Position, _target.RotationDegrees);
-        OnDragCommitted?.Invoke(_target);
+
+        for (int i = 0; i < _targets.Count; i++)
+        {
+            Node3D target = _targets[i];
+            if (target == null || !GodotObject.IsInstanceValid(target))
+                continue;
+
+            /* Back where the drag found it (dragged there and back, or snapped onto where it started): there
+               is nothing to record, so nothing is sent and no undo step made. It is put exactly back, so what
+               the view shows is still what the level holds. */
+            if (i < _dragStartTransforms.Count && IsSameTransform(target.Transform, _dragStartTransforms[i]))
+            {
+                target.Transform = _dragStartTransforms[i];
+                EndPreview(i);
+                continue;
+            }
+
+            OnTransformChanged?.Invoke(i, target.Position, target.RotationDegrees, _gesture);
+            OnDragCommitted?.Invoke(target);
+        }
+    }
+
+    private static bool IsSameTransform(Transform3D a, Transform3D b)
+    {
+        const float epsilonSq = UnchangedEpsilon * UnchangedEpsilon;
+        return a.Origin.DistanceSquaredTo(b.Origin) <= epsilonSq
+            && (a.Basis.X - b.Basis.X).LengthSquared() <= epsilonSq
+            && (a.Basis.Y - b.Basis.Y).LengthSquared() <= epsilonSq
+            && (a.Basis.Z - b.Basis.Z).LengthSquared() <= epsilonSq;
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -436,6 +1223,12 @@ public partial class LevelViewerTransformGizmo : Node3D
     private DragAxis HitTest(Vector2 mousePos)
     {
         if (_camera == null || !Visible)
+            return DragAxis.None;
+
+        /* Behind the camera nothing of the gizmo is drawn, but a point behind it still projects - mirrored
+           through the middle of the view. Turned away from a selection, its handles sat unseen in the middle of
+           the screen and took the press, and the click there selected nothing. */
+        if (IsBehindCamera(GlobalPosition))
             return DragAxis.None;
 
         DragAxis bestAxis = DragAxis.None;
@@ -470,8 +1263,13 @@ public partial class LevelViewerTransformGizmo : Node3D
         ref DragAxis bestAxis, ref float bestDist)
     {
         Vector3 worldAxis = GetOrientationBasis() * localAxisDir;
+        Vector3 worldEnd  = GlobalPosition + worldAxis * axisLength;
+        //Only what is in front of the camera can be hit (see HitTest); the centre already is
+        if (IsBehindCamera(worldEnd))
+            return;
+
         Vector2 centre = WorldToScreen(GlobalPosition);
-        Vector2 end    = WorldToScreen(GlobalPosition + worldAxis * axisLength);
+        Vector2 end    = WorldToScreen(worldEnd);
         float dist     = ScreenDistToSegment(mouse, centre, end);
         if (dist < AxisScreenPickPx && dist < bestDist)
         {
@@ -492,6 +1290,8 @@ public partial class LevelViewerTransformGizmo : Node3D
         Vector3 c10 = centre + ( u - v) * halfSize;
         Vector3 c11 = centre + ( u + v) * halfSize;
         Vector3 c01 = centre + (-u + v) * halfSize;
+        if (IsBehindCamera(c00) || IsBehindCamera(c10) || IsBehindCamera(c11) || IsBehindCamera(c01))
+            return;
 
         Vector2 s00 = WorldToScreen(c00);
         Vector2 s10 = WorldToScreen(c10);
@@ -522,6 +1322,7 @@ public partial class LevelViewerTransformGizmo : Node3D
         Vector3 ringNormal = (GetOrientationBasis() * localRingNormal).Normalized();
         GetRingBasis(ringNormal, out Vector3 basisU, out Vector3 basisV);
         Vector2 prevScreen = WorldToScreen(GlobalPosition);
+        bool prevBehind = false;
         float minSegDist = float.MaxValue;
 
         for (int i = 0; i <= RingHitSamples; i++)
@@ -530,11 +1331,14 @@ public partial class LevelViewerTransformGizmo : Node3D
             Vector3 worldPoint = GlobalPosition
                 + (basisU * Mathf.Cos(angle) + basisV * Mathf.Sin(angle)) * radius;
             Vector2 screenPoint = WorldToScreen(worldPoint);
+            bool behind = IsBehindCamera(worldPoint);
 
-            if (i > 0)
+            //A stretch of the ring that runs behind the camera is not drawn, so not hit either
+            if (i > 0 && !behind && !prevBehind)
                 minSegDist = Mathf.Min(minSegDist, ScreenDistToSegment(mouse, prevScreen, screenPoint));
 
             prevScreen = screenPoint;
+            prevBehind = behind;
         }
 
         if (minSegDist < RingScreenPickPx && minSegDist < bestDist)
@@ -546,6 +1350,9 @@ public partial class LevelViewerTransformGizmo : Node3D
 
     private Vector2 WorldToScreen(Vector3 world)
         => _camera.UnprojectPosition(world);
+
+    private bool IsBehindCamera(Vector3 world)
+        => _camera.IsPositionBehind(world);
 
     private static float ScreenDistToSegment(Vector2 point, Vector2 segA, Vector2 segB)
     {
@@ -581,6 +1388,53 @@ public partial class LevelViewerTransformGizmo : Node3D
             BuildTranslateMeshes();
         else if (IsRotateMode)
             BuildRotateMeshes();
+        BuildPivotGuide();
+    }
+
+    /* Handles moved off the selection: a line from them back to its middle (its origin, for one entity) and a
+       dot there, so it is plain that the handles are not where the selection is, and where they go back to. */
+    private MeshInstance3D _pivotGuideLine;
+    private MeshInstance3D _pivotGuideDot;
+    private ImmediateMesh  _pivotGuideMesh;
+    private const float    PivotGuideDotRadius = 0.06f;
+    private static readonly Color ColPivotGuide = new Color(1f, 1f, 1f, 0.8f);
+
+    private void BuildPivotGuide()
+    {
+        StandardMaterial3D material = UnlitMat(ColPivotGuide);
+        _pivotGuideMesh = new ImmediateMesh();
+        //Placed in world space, not scaled and turned with the handles
+        _pivotGuideLine = new MeshInstance3D { Mesh = _pivotGuideMesh, MaterialOverride = material, TopLevel = true, Visible = false };
+        AddChild(_pivotGuideLine);
+        _pivotGuideDot = new MeshInstance3D
+        {
+            Mesh = new SphereMesh { Radius = PivotGuideDotRadius, Height = PivotGuideDotRadius * 2f, RadialSegments = 12, Rings = 6 },
+            MaterialOverride = material,
+            TopLevel = true,
+            Visible = false,
+        };
+        AddChild(_pivotGuideDot);
+    }
+
+    private void UpdatePivotGuide()
+    {
+        if (_pivotGuideLine == null || !GodotObject.IsInstanceValid(_pivotGuideLine))
+            return;
+
+        Vector3 home = GetTargetsCentre();
+        bool show = _pivotMoved && GlobalPosition.DistanceTo(home) > PivotGuideDotRadius * _worldScale;
+        _pivotGuideLine.Visible = show;
+        _pivotGuideDot.Visible  = show;
+        if (!show)
+            return;
+
+        _pivotGuideMesh.ClearSurfaces();
+        _pivotGuideMesh.SurfaceBegin(Mesh.PrimitiveType.Lines);
+        _pivotGuideMesh.SurfaceAddVertex(GlobalPosition);
+        _pivotGuideMesh.SurfaceAddVertex(home);
+        _pivotGuideMesh.SurfaceEnd();
+        _pivotGuideLine.GlobalTransform = Transform3D.Identity;
+        _pivotGuideDot.GlobalTransform  = new Transform3D(Basis.Identity.Scaled(Vector3.One * _worldScale), home);
     }
 
     private void BuildTranslateMeshes()
@@ -690,14 +1544,14 @@ public partial class LevelViewerTransformGizmo : Node3D
             }
         }
 
-        var arrays = new Godot.Collections.Array();
+        using var arrays = new Godot.Collections.Array(); //alive across the native call - see CollisionMeshOverlay.BuildMesh
         arrays.Resize((int)Mesh.ArrayType.Max);
         arrays[(int)Mesh.ArrayType.Vertex] = verts.ToArray();
         arrays[(int)Mesh.ArrayType.Color]  = cols.ToArray();
         arrays[(int)Mesh.ArrayType.Index]  = idxs.ToArray();
 
         var mesh = new ArrayMesh();
-        mesh.AddSurfaceFromArrays(Mesh.PrimitiveType.Triangles, arrays);
+        LevelViewerMeshUtil.AddSurface(mesh, Mesh.PrimitiveType.Triangles, arrays);
         return mesh;
     }
 
@@ -803,6 +1657,23 @@ public partial class LevelViewerTransformGizmo : Node3D
 
     private bool IsRotateMode
         => _mode == GizmoMode.RotateLocal || _mode == GizmoMode.RotateWorld;
+
+    /* How the handles are drawn. World rings sit on the world's axes, so they stayed still while the selection turned under
+       them; during the drag they turn with it, by as much as the anchor has actually turned (snap included), as the local
+       rings do - and are back on the world's axes once it ends. Only the drawing: the drag and hit testing keep to
+       GetOrientationBasis. A turn is only read once the drag has its start rotation, which a rotate drag always has. */
+    private Basis GetDrawnBasis()
+    {
+        if (_isDragging && !_dragIsPivot && _mode == GizmoMode.RotateWorld
+            && _target != null && GodotObject.IsInstanceValid(_target))
+        {
+            Quaternion turned = GetGlobalQuaternion(_target) * _dragStartGlobalQuat.Inverse();
+            if (IsFiniteQuaternion(turned))
+                return new Basis(turned.Normalized());
+        }
+
+        return GetOrientationBasis();
+    }
 
     private Basis GetOrientationBasis()
     {

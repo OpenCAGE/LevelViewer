@@ -10,9 +10,31 @@ using System.Collections.Generic;
 public static class LevelViewerPick
 {
 	public const string PickableGroup = "level_viewer_pickable";
-	public const string OwnerEntityMetaKey = "pick_owner_entity";
+	//Every IsInGroup/AddToGroup taking a string interns a fresh StringName, and registering a
+	//level's meshes does that hundreds of thousands of times. These are the same names, converted once.
+	//They are also the safe form: the binding passes a temporary StringName's native handle to the
+	//engine with nothing keeping the wrapper alive, so the collector may finalize it mid-call and free
+	//the name the engine is still hashing. A static field is never a temporary. Nothing in the viewer
+	//should hand these methods a string literal or a const string.
+	internal static readonly StringName PickableGroupName = new StringName(PickableGroup);
+
+	/// <summary>
+	/// Scene-filter geometry (occlusion hulls). Registered and unregistered by the filter that draws
+	/// it rather than by a subtree walk, so a switched-off hull never becomes clickable.
+	/// </summary>
+	public const string SceneFilterGroup = "scene_filter_renderable";
+	internal static readonly StringName SceneFilterGroupName = new StringName(SceneFilterGroup);
+
 	private const string WireframeOverlayGroup = "model_reference_wireframe_overlay";
+	internal static readonly StringName WireframeOverlayGroupName = new StringName(WireframeOverlayGroup);
 	private const float RayEpsilon = 0.000001f;
+
+	private enum PickFaceMode
+	{
+		FrontOnly,
+		BackOnly,
+		DoubleSided,
+	}
 
 	private sealed class CachedMeshSurface
 	{
@@ -45,6 +67,9 @@ public static class LevelViewerPick
 
 		public Node HitNode { get; }
 		public float Distance { get; }
+
+		/// <summary>The point of impact, along the ray at <see cref="Distance"/>. Filled by the ray helpers.</summary>
+		public Vector3 Position { get; init; }
 	}
 
 	public readonly struct SelectionTarget
@@ -68,6 +93,7 @@ public static class LevelViewerPick
 		_ownerGlobalBounds.Clear();
 		_scopedPickOwners.Clear();
 		_registeredPickables.Clear();
+		_pickOwners.Clear();
 		_suppressedPickOwners.Clear();
 		_scopedPickablesDirty = true;
 		_batchInvalidateActive = false;
@@ -113,12 +139,15 @@ public static class LevelViewerPick
 
 		TryCopyPickMeshesForOwner(root, destination);
 
-		foreach (Node child in root.GetChildren())
+		//By index: GetChildren() is a native array per node, and under an environment instance this is the whole level
+		int childCount = root.GetChildCount();
+		for (int i = 0; i < childCount; i++)
 		{
+			Node child = root.GetChild(i);
 			if (child is not Node3D child3D || !GodotObject.IsInstanceValid(child3D))
 				continue;
 
-			if (!child3D.HasMeta(AlienScene.OwnerCompositeMetaKey))
+			if (!AlienScene.HasOwnerComposite(child3D))
 				continue;
 
 			CollectPickMeshesForEntitySubtree(child3D, destination);
@@ -282,7 +311,7 @@ public static class LevelViewerPick
 			return;
 
 		PruneInvalidPickables(ownerEntityNode);
-		ownerEntityNode.SetMeta(OwnerEntityMetaKey, ownerEntityNode);
+		_pickOwners[ownerEntityNode] = ownerEntityNode;
 		RegisterPickableRecursive(ownerEntityNode, ownerEntityNode);
 	}
 
@@ -326,7 +355,11 @@ public static class LevelViewerPick
 				continue;
 
 			if (mesh != null)
+			{
 				_registeredPickables.Remove(mesh);
+				//A freed wrapper is still a usable key; left here, every refresh's old meshes stayed until the next populate
+				_pickOwners.Remove(mesh);
+			}
 
 			meshes.RemoveAt(i);
 		}
@@ -344,7 +377,11 @@ public static class LevelViewerPick
 		if (meshInstance == null || ownerNode == null || !GodotObject.IsInstanceValid(meshInstance))
 			return;
 
-		if (meshInstance.IsInGroup(WireframeOverlayGroup))
+		//A refresh queues its old meshes and registers the owner's subtree straight away, while they are still attached
+		if (meshInstance.IsQueuedForDeletion())
+			return;
+
+		if (meshInstance.IsInGroup(WireframeOverlayGroupName))
 			return;
 
 		Mesh mesh = meshInstance.Mesh;
@@ -354,12 +391,10 @@ public static class LevelViewerPick
 		if (!_registeredPickables.Add(meshInstance))
 			return;
 
-		if (!LevelViewerCompositeFocus.IsMeshVisuallyDimmed(meshInstance))
-		{
-			if (!meshInstance.IsInGroup(PickableGroup))
-				meshInstance.AddToGroup(PickableGroup);
-		}
-		meshInstance.SetMeta(OwnerEntityMetaKey, ownerNode);
+		/* No engine group any more: nothing read it (picking goes through the tables here), and Godot checks a group for
+		   the node with a linear scan before adding it - with a level's few hundred thousand meshes already in, an undo
+		   that put a composite back spent a third of its minutes there, per mesh. Removal scanned the same way. */
+		_pickOwners[meshInstance] = ownerNode;
 
 		if (!_pickablesByOwner.TryGetValue(ownerNode, out List<MeshInstance3D> meshes))
 		{
@@ -372,9 +407,30 @@ public static class LevelViewerPick
 		_scopedPickablesDirty = true;
 	}
 
+	/// <summary>
+	/// Which entity node a pickable mesh belongs to. This was node metadata, but a metadata store
+	/// is allocated per node and a level registers tens of thousands of meshes.
+	/// </summary>
+	private static readonly Dictionary<GodotObject, Node3D> _pickOwners = new Dictionary<GodotObject, Node3D>();
+
+	public static bool TryGetPickOwner(GodotObject pickable, out Node3D ownerNode)
+	{
+		if (pickable != null)
+			return _pickOwners.TryGetValue(pickable, out ownerNode);
+
+		ownerNode = null;
+		return false;
+	}
+
 	private static void RegisterPickableRecursive(Node node, Node3D ownerEntityNode)
 	{
-		if (node.IsInGroup(WireframeOverlayGroup))
+		/* A subtree queued for freeing is still attached until the end of the frame, and only its root says so: a preview's
+		   Refresh frees its old geometry this way (a spline's segment arrows and lines, every settings packet) and the meshes
+		   under it were registered again, greyed by the reapply that follows, and freed with the grey-out still holding them */
+		if (node.IsQueuedForDeletion())
+			return;
+
+		if (node.IsInGroup(WireframeOverlayGroupName) || node.IsInGroup(SceneFilterGroupName))
 			goto children;
 
 		if (node is MeshInstance3D meshInstance)
@@ -383,8 +439,8 @@ public static class LevelViewerPick
 			RegisterPickableVisual(visual, ownerEntityNode);
 
 		children:
-		foreach (Node child in node.GetChildren())
-			RegisterPickableRecursive(child, ownerEntityNode);
+		for (int i = 0, childCount = node.GetChildCount(); i < childCount; i++)
+			RegisterPickableRecursive(node.GetChild(i), ownerEntityNode);
 	}
 
 	private static void UnregisterPickableRecursive(Node node, Node3D ownerEntityNode)
@@ -394,22 +450,21 @@ public static class LevelViewerPick
 		else if (node is VisualInstance3D visual)
 			UnregisterPickableVisual(visual);
 
-		foreach (Node child in node.GetChildren())
-			UnregisterPickableRecursive(child, ownerEntityNode);
+		int childCount = node.GetChildCount();
+		for (int i = 0; i < childCount; i++)
+			UnregisterPickableRecursive(node.GetChild(i), ownerEntityNode);
 	}
 
 	private static void RegisterPickableVisual(VisualInstance3D visual, Node3D ownerEntityNode)
 	{
-		if (visual == null || visual.IsInGroup(WireframeOverlayGroup))
+		if (visual == null || visual.IsInGroup(WireframeOverlayGroupName) || visual.IsQueuedForDeletion())
 			return;
 
 		Aabb bounds = visual.GetAabb();
 		if (bounds.Size.LengthSquared() <= RayEpsilon)
 			return;
 
-		if (!visual.IsInGroup(PickableGroup))
-			visual.AddToGroup(PickableGroup);
-		visual.SetMeta(OwnerEntityMetaKey, ownerEntityNode);
+		_pickOwners[visual] = ownerEntityNode;
 	}
 
 	private static void UnregisterPickableVisual(VisualInstance3D visual)
@@ -417,28 +472,71 @@ public static class LevelViewerPick
 		if (visual == null || !GodotObject.IsInstanceValid(visual))
 			return;
 
-		if (visual.IsInGroup(PickableGroup))
-			visual.RemoveFromGroup(PickableGroup);
-		if (visual.HasMeta(OwnerEntityMetaKey))
-			visual.RemoveMeta(OwnerEntityMetaKey);
+		_pickOwners.Remove(visual);
 	}
 
-	private static void UnregisterPickableMesh(MeshInstance3D meshInstance, Node3D ownerEntityNode)
+	public static void UnregisterPickableMesh(MeshInstance3D meshInstance, Node3D ownerEntityNode)
 	{
 		if (meshInstance == null || !GodotObject.IsInstanceValid(meshInstance))
 			return;
 
-		if (meshInstance.IsInGroup(PickableGroup))
-			meshInstance.RemoveFromGroup(PickableGroup);
-		if (meshInstance.HasMeta(OwnerEntityMetaKey))
-			meshInstance.RemoveMeta(OwnerEntityMetaKey);
+		_pickOwners.Remove(meshInstance);
 		_registeredPickables.Remove(meshInstance);
 
 		if (ownerEntityNode != null
-			&& _pickablesByOwner.TryGetValue(ownerEntityNode, out List<MeshInstance3D> meshes))
+			&& _pickablesByOwner.TryGetValue(ownerEntityNode, out List<MeshInstance3D> meshes)
+			&& meshes.Remove(meshInstance))
 		{
-			meshes.Remove(meshInstance);
+			//The owner just got smaller, so its cached bounds would keep claiming space it no longer has
+			_ownerGlobalBounds.Remove(ownerEntityNode);
+			_scopedPickablesDirty = true;
 		}
+	}
+
+	/// <summary>
+	/// Forget a node that is leaving the scene: as a pickable, and as an owner along with the meshes registered against
+	/// it. Called for every node of a removed subtree (a delete, an undo, an instance taken out) while it is still valid.
+	/// Removals used to leave all of it here until the next populate, and every pick pass, bounds invalidation and scope
+	/// rebuild walked the dead owners.
+	/// </summary>
+	public static void ForgetNode(Node3D node)
+	{
+		if (node == null)
+			return;
+
+		bool forgot = false;
+		if (node is MeshInstance3D mesh)
+		{
+			_registeredPickables.Remove(mesh);
+			//Registered against an owner outside the removed subtree (an alias's override mesh): out of that owner's list too
+			if (_pickOwners.TryGetValue(mesh, out Node3D meshOwner) && meshOwner != node
+				&& _pickablesByOwner.TryGetValue(meshOwner, out List<MeshInstance3D> ownerMeshes) && ownerMeshes.Remove(mesh))
+			{
+				_ownerGlobalBounds.Remove(meshOwner);
+				forgot = true;
+			}
+		}
+		forgot |= _pickOwners.Remove(node);
+
+		if (_pickablesByOwner.TryGetValue(node, out List<MeshInstance3D> meshes))
+		{
+			//An alias's meshes sit under the node it points at, outside the subtree: only those still recorded as its own
+			foreach (MeshInstance3D owned in meshes)
+			{
+				if (owned != null && _pickOwners.TryGetValue(owned, out Node3D owner) && owner == node)
+				{
+					_pickOwners.Remove(owned);
+					_registeredPickables.Remove(owned);
+				}
+			}
+			_pickablesByOwner.Remove(node);
+			forgot = true;
+		}
+
+		forgot |= _ownerGlobalBounds.Remove(node);
+		forgot |= _suppressedPickOwners.Remove(node);
+		if (forgot)
+			_scopedPickablesDirty = true;
 	}
 
 	private static void EnsureScopedPickOwners(Node contentRoot, Commands commands)
@@ -514,7 +612,8 @@ public static class LevelViewerPick
 		Camera3D camera,
 		Vector3 origin,
 		Vector3 direction,
-		ref PickHit? best)
+		ref PickHit? best,
+		bool forceDoubleSided = false)
 	{
 		if (!_pickablesByOwner.TryGetValue(owner, out List<MeshInstance3D> meshes) || meshes.Count == 0)
 			return false;
@@ -533,17 +632,119 @@ public static class LevelViewerPick
 			if (meshInstance == null || !GodotObject.IsInstanceValid(meshInstance))
 				continue;
 
-			if (!TryRayIntersectMeshInstance(meshInstance, camera, origin, direction, out float distance))
+			if (!TryRayIntersectMeshInstance(meshInstance, camera, origin, direction, forceDoubleSided, out float distance))
 				continue;
 
 			if (best.HasValue && distance >= best.Value.Distance)
 				continue;
 
-			best = new PickHit(meshInstance, distance);
+			best = new PickHit(meshInstance, distance) { Position = origin + direction * distance };
 			anyHit = true;
 		}
 
 		return anyHit;
+	}
+
+	/// <summary>
+	/// Cast an arbitrary world ray through the level's pickable geometry - the same triangle test the
+	/// screen pick uses, but from any origin/direction. Owners for which <paramref name="excludeOwner"/>
+	/// returns true are skipped (a dragged or self entity), and <paramref name="forceDoubleSided"/>
+	/// lets a ray hit the back of a surface (an upward ray meeting a floor from below).
+	/// </summary>
+	public static PickHit? RaycastClosest(
+		Vector3 origin,
+		Vector3 direction,
+		Camera3D camera,
+		Node contentRoot,
+		Commands commands,
+		System.Func<Node3D, bool> excludeOwner = null,
+		bool forceDoubleSided = false)
+	{
+		if (direction.LengthSquared() < 0.0001f)
+			return null;
+		direction = direction.Normalized();
+
+		if (LevelViewerCompositeFocus.HasActiveComposite && commands != null)
+			LevelViewerCompositeFocus.RebuildScopeCache(commands);
+
+		EnsureScopedPickOwners(contentRoot, commands);
+
+		PickHit? best = null;
+		for (int i = 0; i < _scopedPickOwners.Count; i++)
+		{
+			Node3D owner = _scopedPickOwners[i];
+			if (excludeOwner != null && owner != null && excludeOwner(owner))
+				continue;
+			TryPickOwner(owner, camera, origin, direction, ref best, forceDoubleSided);
+		}
+
+		return best;
+	}
+
+	/// <summary>
+	/// The normal (world space, unit, facing back along the ray) of the triangle of <paramref name="meshInstance"/> that a ray
+	/// meets first - for a hit <see cref="RaycastClosest"/> found, which keeps only the distance. The same faces count as there.
+	/// False for an icon billboard, which has no surface of its own but the side that faces the camera.
+	/// </summary>
+	public static bool TryGetSurfaceNormal(MeshInstance3D meshInstance, Vector3 origin, Vector3 direction, out Vector3 normal)
+	{
+		normal = Vector3.Zero;
+		if (meshInstance == null || !GodotObject.IsInstanceValid(meshInstance) || direction.LengthSquared() < RayEpsilon)
+			return false;
+
+		Material material = meshInstance.MaterialOverride ?? meshInstance.GetActiveMaterial(0);
+		if (PreviewVisualUtility.IsIconBillboardMaterial(material))
+			return false;
+
+		Mesh mesh = meshInstance.Mesh;
+		if (mesh == null || mesh.GetSurfaceCount() == 0)
+			return false;
+
+		Transform3D inverse = meshInstance.GlobalTransform.AffineInverse();
+		Vector3 localOrigin = inverse * origin;
+		Vector3 localDirection = inverse.Basis * direction;
+		if (localDirection.LengthSquared() < RayEpsilon)
+			return false;
+		localDirection = localDirection.Normalized();
+
+		PickFaceMode faceMode = GetMeshFaceMode(meshInstance);
+		float closest = float.MaxValue;
+		Vector3 a = Vector3.Zero, b = Vector3.Zero, c = Vector3.Zero;
+		bool found = false;
+		CachedMeshSurface[] surfaces = GetCachedMeshSurfaces(mesh);
+		for (int surfaceIndex = 0; surfaceIndex < surfaces.Length; surfaceIndex++)
+		{
+			CachedMeshSurface surface = surfaces[surfaceIndex];
+			Vector3[] vertices = surface.Vertices;
+			int[] indices = surface.Indices;
+			int count = indices.Length > 0 ? indices.Length : vertices.Length;
+			for (int i = 0; i + 2 < count; i += 3)
+			{
+				Vector3 v0 = indices.Length > 0 ? vertices[indices[i]] : vertices[i];
+				Vector3 v1 = indices.Length > 0 ? vertices[indices[i + 1]] : vertices[i + 1];
+				Vector3 v2 = indices.Length > 0 ? vertices[indices[i + 2]] : vertices[i + 2];
+				if (!TryRayIntersectTriangle(localOrigin, localDirection, v0, v1, v2, faceMode, out float t) || t >= closest)
+					continue;
+				closest = t;
+				a = v0;
+				b = v1;
+				c = v2;
+				found = true;
+			}
+		}
+
+		if (!found)
+			return false;
+
+		//Normals go through the inverse transpose, which keeps them square to the surface under a scale
+		Vector3 local = (b - a).Cross(c - a);
+		Vector3 world = meshInstance.GlobalTransform.Basis.Inverse().Transposed() * local;
+		if (world.LengthSquared() < RayEpsilon)
+			return false;
+		normal = world.Normalized();
+		if (normal.Dot(direction) > 0f)
+			normal = -normal;
+		return true;
 	}
 
 	public static PickHit? PickClosest(
@@ -573,6 +774,220 @@ public static class LevelViewerPick
 			TryPickOwner(_scopedPickOwners[i], camera, origin, direction, ref best);
 
 		return best;
+	}
+
+	/// <summary>
+	/// Every owner a click could land on right now, with its world bounds, for box selection: the same
+	/// in-scope set <see cref="PickClosest"/> walks, so what the composite focus, the render filters and
+	/// a hide leave out of a click is left out of a box too. Owners with no extent at all are skipped.
+	/// </summary>
+	public static void CollectScopedPickOwnerBounds(Node contentRoot, Commands commands, List<(Node3D Owner, Aabb Bounds)> destination)
+	{
+		if (destination == null)
+			return;
+
+		if (LevelViewerCompositeFocus.HasActiveComposite && commands != null)
+			LevelViewerCompositeFocus.RebuildScopeCache(commands);
+
+		EnsureScopedPickOwners(contentRoot, commands);
+
+		for (int i = 0; i < _scopedPickOwners.Count; i++)
+		{
+			Node3D owner = _scopedPickOwners[i];
+			if (owner == null || !GodotObject.IsInstanceValid(owner))
+				continue;
+
+			Aabb bounds = GetOwnerGlobalBounds(owner);
+			if (bounds.Size.LengthSquared() <= RayEpsilon)
+				continue;
+
+			destination.Add((owner, bounds));
+		}
+	}
+
+	/// <summary>
+	/// Whether any of the owner's pickable meshes is actually being drawn. A mesh can be registered and
+	/// still hidden (a hidden parent, a load that hasn't switched it on yet); the click's ray test
+	/// doesn't ask, but a box that takes in a whole screen's worth of entities has to.
+	/// </summary>
+	public static bool IsOwnerDrawn(Node3D owner)
+	{
+		if (owner == null || !_pickablesByOwner.TryGetValue(owner, out List<MeshInstance3D> meshes) || meshes == null)
+			return false;
+
+		for (int i = 0; i < meshes.Count; i++)
+		{
+			MeshInstance3D mesh = meshes[i];
+			if (mesh != null && GodotObject.IsInstanceValid(mesh) && mesh.IsVisibleInTree())
+				return true;
+		}
+
+		return false;
+	}
+
+	/// <summary>
+	/// The nearest mesh vertex to the cursor, for vertex snapping. Rays the scene, then walks only the
+	/// hit mesh's cached vertices and keeps the one closest to the hit point. Owners in
+	/// <paramref name="excludeOwners"/> (the dragged entity's own nodes) are skipped, or the object
+	/// would snap to itself. Returns false when the ray misses everything - deliberately no whole-level
+	/// vertex scan, which would be O(every vertex) on a real level.
+	/// </summary>
+	public static bool TryPickNearestVertex(
+		Camera3D camera,
+		Vector2 screenPosition,
+		Node contentRoot,
+		Commands commands,
+		System.Func<Node3D, bool> excludeOwner,
+		out Vector3 worldVertex)
+	{
+		worldVertex = Vector3.Zero;
+		if (camera == null || !GodotObject.IsInstanceValid(camera))
+			return false;
+
+		Vector3 origin = camera.ProjectRayOrigin(screenPosition);
+		Vector3 direction = camera.ProjectRayNormal(screenPosition);
+		PickHit? hit = RaycastClosest(origin, direction, camera, contentRoot, commands, excludeOwner);
+		if (hit == null || hit.Value.HitNode is not MeshInstance3D meshInstance || !GodotObject.IsInstanceValid(meshInstance))
+			return false;
+
+		Mesh mesh = meshInstance.Mesh;
+		if (mesh == null || mesh.GetSurfaceCount() == 0)
+			return false;
+
+		//No meaningful vertices on a camera-facing icon quad - snap to its origin instead
+		Material material = meshInstance.MaterialOverride ?? meshInstance.GetActiveMaterial(0);
+		if (PreviewVisualUtility.IsIconBillboardMaterial(material))
+		{
+			worldVertex = meshInstance.GlobalPosition;
+			return true;
+		}
+
+		Transform3D xf = meshInstance.GlobalTransform;
+		Vector3 localHit = xf.AffineInverse() * hit.Value.Position;
+
+		CachedMeshSurface[] surfaces = GetCachedMeshSurfaces(mesh);
+		float bestDistSq = float.MaxValue;
+		Vector3 bestLocal = Vector3.Zero;
+		bool found = false;
+		for (int s = 0; s < surfaces.Length; s++)
+		{
+			Vector3[] vertices = surfaces[s].Vertices;
+			for (int v = 0; v < vertices.Length; v++)
+			{
+				float distSq = vertices[v].DistanceSquaredTo(localHit);
+				if (distSq >= bestDistSq)
+					continue;
+				bestDistSq = distSq;
+				bestLocal = vertices[v];
+				found = true;
+			}
+		}
+
+		if (!found)
+			return false;
+
+		worldVertex = xf * bestLocal;
+		return true;
+	}
+
+	/// <summary>
+	/// The world-space bounds of an entity's own rendered geometry, from the pick registry. Not
+	/// <see cref="LevelViewerView.TryComputeGlobalAabb"/>, which also swallows preview icons and the
+	/// selected-light radius sphere. An alias/proxy draws through the node it points at, so that is
+	/// merged in too. Falls back to a zero-size box at the entity's origin (icon-only entities rest
+	/// their pivot on the floor).
+	/// </summary>
+	public static bool TryGetEntityPickBounds(Node3D entityNode, out Aabb bounds)
+	{
+		bounds = new Aabb();
+		if (entityNode == null || !GodotObject.IsInstanceValid(entityNode))
+			return false;
+
+		List<MeshInstance3D> meshes = new List<MeshInstance3D>();
+		CollectPickMeshesForEntitySubtree(entityNode, meshes);
+		if (entityNode is EntityOverride entityOverride && entityOverride.PointedEntity != null
+			&& GodotObject.IsInstanceValid(entityOverride.PointedEntity))
+		{
+			CollectPickMeshesForEntitySubtree(entityOverride.PointedEntity, meshes);
+		}
+
+		bool hasBounds = false;
+		for (int i = 0; i < meshes.Count; i++)
+		{
+			MeshInstance3D mesh = meshes[i];
+			if (mesh == null || !GodotObject.IsInstanceValid(mesh))
+				continue;
+
+			Material material = mesh.MaterialOverride ?? mesh.GetActiveMaterial(0);
+			if (PreviewVisualUtility.IsIconBillboardMaterial(material))
+				continue;
+
+			Aabb local = mesh.GetAabb();
+			if (local.Size.LengthSquared() <= RayEpsilon)
+				continue;
+
+			Aabb global = mesh.GlobalTransform * local;
+			bounds = hasBounds ? bounds.Merge(global) : global;
+			hasBounds = true;
+		}
+
+		if (!hasBounds)
+			bounds = new Aabb(entityNode.GlobalPosition, Vector3.Zero);
+		return true;
+	}
+
+	/// <summary>
+	/// Rest an entity on the floor: how far it has to move so the bottom of its geometry sits on the
+	/// nearest surface below it (or above, if there is nothing below). Excludes the entity's own nodes.
+	/// </summary>
+	public static bool TrySnapToFloor(Node3D entityNode, Node contentRoot, Commands commands, out Vector3 newGlobalPosition)
+	{
+		newGlobalPosition = Vector3.Zero;
+		if (entityNode == null || !GodotObject.IsInstanceValid(entityNode))
+			return false;
+
+		if (!TryGetEntityPickBounds(entityNode, out Aabb bounds))
+			return false;
+
+		System.Func<Node3D, bool> exclude = owner => IsSelfOrPointedBy(entityNode, owner);
+		Vector3 pos = entityNode.GlobalPosition;
+		float bottomY = bounds.Position.Y;
+		float topY = bounds.Position.Y + bounds.Size.Y;
+
+		//Down from the top of the entity, so a partly-sunk one still finds the floor beneath it. A
+		//floor's front face points up, so the ordinary front-only test is right for a downward ray.
+		Vector3 down = new Vector3(pos.X, topY + 0.001f, pos.Z);
+		PickHit? hit = RaycastClosest(down, Vector3.Down, null, contentRoot, commands, exclude);
+
+		//Nothing below: try upward. The floor's back face meets an upward ray, which front-only culls,
+		//so this pass allows either side.
+		if (hit == null)
+		{
+			Vector3 up = new Vector3(pos.X, bottomY - 0.001f, pos.Z);
+			hit = RaycastClosest(up, Vector3.Up, null, contentRoot, commands, exclude, forceDoubleSided: true);
+		}
+
+		if (hit == null)
+			return false;
+
+		newGlobalPosition = pos + Vector3.Up * (hit.Value.Position.Y - bottomY);
+		return true;
+	}
+
+	/// <summary>True if <paramref name="owner"/> is the entity, sits under it, or is what it points at.</summary>
+	private static bool IsSelfOrPointedBy(Node3D entityNode, Node3D owner)
+	{
+		if (owner == null)
+			return false;
+		if (owner == entityNode || entityNode.IsAncestorOf(owner))
+			return true;
+		if (entityNode is EntityOverride entityOverride && entityOverride.PointedEntity != null)
+		{
+			Node3D pointed = entityOverride.PointedEntity;
+			if (owner == pointed || pointed.IsAncestorOf(owner))
+				return true;
+		}
+		return false;
 	}
 
 	/// <summary>
@@ -606,9 +1021,9 @@ public static class LevelViewerPick
 		if (hitNode == null || nodeEntities == null)
 			return null;
 
-		if (hitNode is MeshInstance3D mesh && mesh.HasMeta(OwnerEntityMetaKey))
+		Node3D owner;
+		if (hitNode is MeshInstance3D mesh && TryGetPickOwner(mesh, out owner))
 		{
-			Node owner = mesh.GetMeta(OwnerEntityMetaKey).AsGodotObject() as Node;
 			if (owner is Node3D owner3D && GodotObject.IsInstanceValid(owner3D))
 			{
 				Node3D resolved = ResolveNearestEntityNode(owner3D, nodeEntities);
@@ -652,10 +1067,11 @@ public static class LevelViewerPick
 				return null;
 
 			entityIds.Add(entity.shortGUID.AsUInt32);
-			if (!chain[i].HasMeta(AlienScene.OwnerCompositeMetaKey))
+			uint ownerCompositeId;
+			if (!AlienScene.TryGetOwnerCompositeId(chain[i], out ownerCompositeId))
 				return null;
 
-			compositeIds.Add(chain[i].GetMeta(AlienScene.OwnerCompositeMetaKey).AsUInt32());
+			compositeIds.Add(ownerCompositeId);
 		}
 
 		return new SelectionTarget(entityIds, compositeIds, entityIds[entityIds.Count - 1]);
@@ -1368,6 +1784,7 @@ public static class LevelViewerPick
 		Camera3D camera,
 		Vector3 origin,
 		Vector3 direction,
+		bool forceDoubleSided,
 		out float distance)
 	{
 		distance = 0f;
@@ -1376,7 +1793,13 @@ public static class LevelViewerPick
 
 		Material material = meshInstance.MaterialOverride ?? meshInstance.GetActiveMaterial(0);
 		if (PreviewVisualUtility.IsIconBillboardMaterial(material))
+		{
+			//A billboard is a camera-facing quad, so it can only be tested against a camera ray. An
+			//arbitrary world ray (floor snapping) has no camera and simply does not hit one.
+			if (camera == null || !GodotObject.IsInstanceValid(camera))
+				return false;
 			return PreviewVisualUtility.TryRayIntersectIconBillboard(meshInstance, camera, origin, direction, out distance);
+		}
 
 		Mesh mesh = meshInstance.Mesh;
 		if (mesh == null || mesh.GetSurfaceCount() == 0)
@@ -1392,7 +1815,7 @@ public static class LevelViewerPick
 
 		float closestLocalT = float.MaxValue;
 		bool anyHit = false;
-		bool doubleSided = IsDoubleSidedMesh(meshInstance);
+		PickFaceMode faceMode = forceDoubleSided ? PickFaceMode.DoubleSided : GetMeshFaceMode(meshInstance);
 		CachedMeshSurface[] surfaces = GetCachedMeshSurfaces(mesh);
 
 		for (int surfaceIndex = 0; surfaceIndex < surfaces.Length; surfaceIndex++)
@@ -1410,7 +1833,7 @@ public static class LevelViewerPick
 						vertices[indices[i]],
 						vertices[indices[i + 1]],
 						vertices[indices[i + 2]],
-						doubleSided,
+						faceMode,
 						ref closestLocalT,
 						ref anyHit);
 				}
@@ -1426,7 +1849,7 @@ public static class LevelViewerPick
 						vertices[i],
 						vertices[i + 1],
 						vertices[i + 2],
-						doubleSided,
+						faceMode,
 						ref closestLocalT,
 						ref anyHit);
 				}
@@ -1459,7 +1882,7 @@ public static class LevelViewerPick
 	private static CachedMeshSurface BuildCachedMeshSurface(Mesh mesh, int surfaceIndex)
 	{
 		CachedMeshSurface surface = new CachedMeshSurface { Vertices = System.Array.Empty<Vector3>() };
-		Godot.Collections.Array arrays = mesh.SurfaceGetArrays(surfaceIndex);
+		using Godot.Collections.Array arrays = mesh.SurfaceGetArrays(surfaceIndex); //released here rather than by a finalizer
 		if (arrays == null || arrays.Count == 0)
 			return surface;
 
@@ -1481,11 +1904,11 @@ public static class LevelViewerPick
 		Vector3 a,
 		Vector3 b,
 		Vector3 c,
-		bool doubleSided,
+		PickFaceMode faceMode,
 		ref float closestLocalT,
 		ref bool anyHit)
 	{
-		if (!TryRayIntersectTriangle(localOrigin, localDirection, a, b, c, doubleSided, out float localT))
+		if (!TryRayIntersectTriangle(localOrigin, localDirection, a, b, c, faceMode, out float localT))
 			return;
 
 		if (localT >= closestLocalT)
@@ -1495,21 +1918,33 @@ public static class LevelViewerPick
 		anyHit = true;
 	}
 
-	private static bool IsDoubleSidedMesh(MeshInstance3D meshInstance)
+	/// <summary>
+	/// Which faces of a mesh the ray is allowed to hit, taken from how its material draws them.
+	/// A face that isn't drawn isn't there to be clicked - an occlusion hull is drawn back-face-only,
+	/// so testing its near half would let an invisible surface swallow clicks meant for the geometry
+	/// on screen inside it.
+	/// </summary>
+	private static PickFaceMode GetMeshFaceMode(MeshInstance3D meshInstance)
 	{
 		Material material = meshInstance.MaterialOverride ?? meshInstance.GetActiveMaterial(0);
+		if (AlienSceneMaterials.IsBackFaceOnlyMaterial(material))
+			return PickFaceMode.BackOnly;
+
 		if (material is not ShaderMaterial shaderMaterial || shaderMaterial.Shader == null)
-			return false;
+			return PickFaceMode.FrontOnly;
 
 		string path = shaderMaterial.Shader.ResourcePath;
 		if (string.IsNullOrEmpty(path))
-			return false;
+			return PickFaceMode.FrontOnly;
 
-		return path.Contains("double_sided")
+		bool doubleSided = path.Contains("double_sided")
+			|| path.Contains("scene_filter_shaded")
 			|| path.Contains("preview_icon_billboard")
 			|| path.Contains("preview_overlay_line")
 			|| path.Contains("preview_opaque")
 			|| path.Contains("preview_transparent");
+
+		return doubleSided ? PickFaceMode.DoubleSided : PickFaceMode.FrontOnly;
 	}
 
 	private static bool TryRayIntersectTriangle(
@@ -1518,7 +1953,7 @@ public static class LevelViewerPick
 		Vector3 v0,
 		Vector3 v1,
 		Vector3 v2,
-		bool doubleSided,
+		PickFaceMode faceMode,
 		out float t)
 	{
 		t = 0f;
@@ -1530,7 +1965,10 @@ public static class LevelViewerPick
 		if (Mathf.Abs(det) < RayEpsilon)
 			return false;
 
-		if (!doubleSided && det > 0f)
+		//Front faces come out negative here, so the sign is what tells the two halves of a hull apart
+		if (faceMode == PickFaceMode.FrontOnly && det > 0f)
+			return false;
+		if (faceMode == PickFaceMode.BackOnly && det < 0f)
 			return false;
 
 		float invDet = 1f / det;

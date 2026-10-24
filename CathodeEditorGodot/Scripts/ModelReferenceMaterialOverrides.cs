@@ -58,13 +58,23 @@ public static class ModelReferenceMaterialOverrides
 
 	{
 
-		public EnvironmentColourScalars(Vector4 vertex, Vector4 diffuse)
+		public EnvironmentColourScalars(Vector4 vertex, Vector4 diffuse) : this(vertex, diffuse, Vector4.One)
+
+		{
+
+		}
+
+
+
+		public EnvironmentColourScalars(Vector4 vertex, Vector4 diffuse, Vector4 vertexScale)
 
 		{
 
 			Vertex = vertex;
 
 			Diffuse = diffuse;
+
+			VertexScale = vertexScale;
 
 		}
 
@@ -73,6 +83,13 @@ public static class ModelReferenceMaterialOverrides
 		public Vector4 Vertex { get; }
 
 		public Vector4 Diffuse { get; }
+
+		/// <summary>
+		/// vertex_colour_scale and vertex_opacity_scale as the game multiplies the mesh's vertex colours by, unclamped -
+		/// where the material reads them as dirt/noise blend amounts and an AO term, not a tint (<see cref="Vertex"/> is
+		/// white then).
+		/// </summary>
+		public Vector4 VertexScale { get; }
 
 
 
@@ -84,7 +101,11 @@ public static class ModelReferenceMaterialOverrides
 
 			&& Mathf.IsEqualApprox(Diffuse.X, 1f) && Mathf.IsEqualApprox(Diffuse.Y, 1f)
 
-			&& Mathf.IsEqualApprox(Diffuse.Z, 1f) && Mathf.IsEqualApprox(Diffuse.W, 1f);
+			&& Mathf.IsEqualApprox(Diffuse.Z, 1f) && Mathf.IsEqualApprox(Diffuse.W, 1f)
+
+			&& Mathf.IsEqualApprox(VertexScale.X, 1f) && Mathf.IsEqualApprox(VertexScale.Y, 1f)
+
+			&& Mathf.IsEqualApprox(VertexScale.Z, 1f) && Mathf.IsEqualApprox(VertexScale.W, 1f);
 
 	}
 
@@ -116,6 +137,21 @@ public static class ModelReferenceMaterialOverrides
 			return false;
 
 		return !string.IsNullOrWhiteSpace(TryGetStringParameter(parameterEntity, fallbackEntity, MaterialParameterName));
+	}
+
+	/// <summary>Whether the entity (an alias, typically) sets anything that changes how a ModelReference it reaches is drawn.</summary>
+	public static bool HasModelReferenceOverrideParameter(Entity entity)
+	{
+		if (entity?.parameters == null)
+			return false;
+
+		for (int i = 0; i < entity.parameters.Count; i++)
+		{
+			if (entity.parameters[i] != null && IsModelReferenceOverrideParameter(entity.parameters[i].name))
+				return true;
+		}
+
+		return false;
 	}
 
 
@@ -170,15 +206,15 @@ public static class ModelReferenceMaterialOverrides
 
 				continue;
 
-			if (!entry.Key.HasMeta(AlienScene.OwnerCompositeMetaKey))
+			uint ownerCompositeId;
+
+			if (!AlienScene.TryGetOwnerCompositeId(entry.Key, out ownerCompositeId))
 
 				continue;
 
 
 
-			Composite ownerComposite = commands.GetComposite(
-
-				new ShortGuid(entry.Key.GetMeta(AlienScene.OwnerCompositeMetaKey).AsUInt32()));
+			Composite ownerComposite = commands.GetComposite(new ShortGuid(ownerCompositeId));
 
 			if (ownerComposite == null)
 
@@ -231,45 +267,79 @@ public static class ModelReferenceMaterialOverrides
 		IReadOnlyDictionary<Node3D, Entity> nodeEntities,
 		Commands commands)
 	{
+		return BuildAliasParameterEntityIndex(nodeEntities, commands, out _);
+	}
+
+	/// <summary>
+	/// As above, also returning the scene depth of the alias chosen for each render target so the index can be
+	/// extended one alias at a time (see <see cref="IndexAliasParameterEntity"/>) with the same shallowest-wins rule.
+	/// </summary>
+	public static Dictionary<Node3D, Entity> BuildAliasParameterEntityIndex(
+		IReadOnlyDictionary<Node3D, Entity> nodeEntities,
+		Commands commands,
+		out Dictionary<Node3D, int> bestDepthByRenderTarget)
+	{
 		Dictionary<Node3D, Entity> index = new Dictionary<Node3D, Entity>();
+		bestDepthByRenderTarget = new Dictionary<Node3D, int>();
 		if (nodeEntities == null || commands == null)
 			return index;
 
-		Dictionary<Node3D, int> bestDepthByRenderTarget = new Dictionary<Node3D, int>();
 		foreach (KeyValuePair<Node3D, Entity> entry in nodeEntities)
 		{
 			if (entry.Key is not EntityOverride aliasOverride)
 				continue;
 			if (entry.Value is not AliasEntity alias)
 				continue;
-			Node3D renderTarget = aliasOverride.PointedEntity;
-			if (renderTarget == null)
-				continue;
-			if (!entry.Key.HasMeta(AlienScene.OwnerCompositeMetaKey))
-				continue;
-
-			Composite ownerComposite = commands.GetComposite(
-				new ShortGuid(entry.Key.GetMeta(AlienScene.OwnerCompositeMetaKey).AsUInt32()));
-			if (ownerComposite == null)
-				continue;
-
-			(_, Entity targetEntity) = commands.Utils.GetResolvedTarget(
-				commands.Utils.ResolveAlias(alias, ownerComposite));
-			if (targetEntity is not FunctionEntity targetFunction
-				|| targetFunction.function.AsFunctionType != FunctionType.ModelReference)
-			{
-				continue;
-			}
-
-			int depth = GetSceneNodeDepth(entry.Key);
-			if (bestDepthByRenderTarget.TryGetValue(renderTarget, out int existingDepth) && depth >= existingDepth)
-				continue;
-
-			bestDepthByRenderTarget[renderTarget] = depth;
-			index[renderTarget] = alias;
+			IndexAliasParameterEntity(index, bestDepthByRenderTarget, aliasOverride, alias, commands);
 		}
 
 		return index;
+	}
+
+	/// <summary>
+	/// Adds one wired alias to the index when it resolves to a ModelReference and is the shallowest alias pointing
+	/// at that node. Called for every alias by the bulk build, and for each alias as it is wired afterwards.
+	/// </summary>
+	public static void IndexAliasParameterEntity(
+		Dictionary<Node3D, Entity> index,
+		Dictionary<Node3D, int> bestDepthByRenderTarget,
+		EntityOverride aliasOverride,
+		AliasEntity alias,
+		Commands commands)
+	{
+		if (index == null || aliasOverride == null || alias == null || commands == null)
+			return;
+
+		Node3D renderTarget = aliasOverride.PointedEntity;
+		if (renderTarget == null)
+			return;
+		uint ownerCompositeId;
+		if (!AlienScene.TryGetOwnerCompositeId(aliasOverride, out ownerCompositeId))
+			return;
+
+		Composite ownerComposite = commands.GetComposite(new ShortGuid(ownerCompositeId));
+		if (ownerComposite == null)
+			return;
+
+		(_, Entity targetEntity) = commands.Utils.GetResolvedTarget(
+			commands.Utils.ResolveAlias(alias, ownerComposite));
+		if (targetEntity is not FunctionEntity targetFunction
+			|| targetFunction.function.AsFunctionType != FunctionType.ModelReference)
+		{
+			return;
+		}
+
+		int depth = GetSceneNodeDepth(aliasOverride);
+		if (bestDepthByRenderTarget != null
+			&& bestDepthByRenderTarget.TryGetValue(renderTarget, out int existingDepth)
+			&& depth >= existingDepth)
+		{
+			return;
+		}
+
+		if (bestDepthByRenderTarget != null)
+			bestDepthByRenderTarget[renderTarget] = depth;
+		index[renderTarget] = alias;
 	}
 
 	public static bool TryGetAliasParameterEntityFromIndex(
@@ -320,6 +390,27 @@ public static class ModelReferenceMaterialOverrides
 
 
 		if (!TryResolveMaterialWriteIndex(level, parameterEntity, fallbackEntity, out int materialWriteIndex))
+
+			return;
+
+
+
+		// A material's name is "<slot>-><assignment>": the parameter can only re-assign within its
+		// own slot, so an override naming a slot this renderable does not use is not for it.
+		// Measured on HAB_Airport: 114 movers carry a 'material' of "screenBlueTextScroll->..." on
+		// renderables sitting in other slots, and retail leaves every one of them alone.
+		string overrideSlot = ModelReferenceMaterialMapping.SlotOf(level.Materials.GetAtWriteIndex(materialWriteIndex)?.Name);
+
+		string currentSlot = ModelReferenceMaterialMapping.SlotOf(level.Materials.GetAtWriteIndex(renderables[0].Item2)?.Name);
+
+		if (overrideSlot != null && currentSlot != null
+			&& !string.Equals(overrideSlot, currentSlot, StringComparison.OrdinalIgnoreCase))
+
+			return;
+
+
+
+		if (materialWriteIndex == renderables[0].Item2)
 
 			return;
 
@@ -441,12 +532,10 @@ public static class ModelReferenceMaterialOverrides
 
 			1f);
 
-		vertexColourScale = ClampVector3Components(vertexColourScale, 0f, 1f);
-		vertexOpacityScale = Mathf.Clamp(vertexOpacityScale, 0f, 1f);
 		diffuseColourScale = ClampVector3Components(diffuseColourScale, 0f, 255f);
 		diffuseOpacityScale = Mathf.Clamp(diffuseOpacityScale, 0f, 255f);
 
-		Vector4 vertex = new Vector4(vertexColourScale.X, vertexColourScale.Y, vertexColourScale.Z, vertexOpacityScale);
+		Vector4 vertex = GetVertexColourTint(material, vertexColourScale, vertexOpacityScale);
 
 		Vector4 diffuse = new Vector4(
 
@@ -458,12 +547,67 @@ public static class ModelReferenceMaterialOverrides
 
 			diffuseOpacityScale);
 
-		scalars = new EnvironmentColourScalars(vertex, diffuse);
+		scalars = new EnvironmentColourScalars(vertex, diffuse, new Vector4(vertexColourScale.X, vertexColourScale.Y, vertexColourScale.Z, vertexOpacityScale));
 
 		return true;
 
 	}
 
+
+
+	/// <summary>
+	/// What vertex_colour_scale / vertex_opacity_scale do to this material's diffuse: the scale the mesh's own vertex
+	/// colours are multiplied by where they tint it (<see cref="TintsWithVertexColour"/> - the shader multiplies them in).
+	/// </summary>
+	/// <remarks>
+	/// Retail copies the two, unclamped, into the instance's first GPU constant (CA_ENVIRONMENT instances only), and
+	/// the environment vertex shader's only use of it is <c>vcol = COLOR0 * scale</c> - so it does nothing at all to a
+	/// material without VERTEX_COLOUR. Where the vertex colour does exist it tints the diffuse only when nothing else
+	/// claims those lanes: ALPHABLEND_NOISE and DIRT_MAPPING turn x/y into the noise/dirt blend amount, and with
+	/// VERTEX_AMBIENT_OCCLUSION only z is used, as the AO term 1 - (1 - vcol.z * z) * (1 - VERT_AO_TINT). Drawn as a
+	/// plain tint, the cutting panel's (1, 0.1, 1) - a dirt/noise blend mask that scripts animate from (4, 1, 1) -
+	/// came out magenta.
+	/// The AO term is left out too: the viewer draws neither the AO baked into the vertex colours nor the emissive
+	/// that retail pairs with a darkened AO (the only retail use, ENG_REACTORCORE's upper core at z = 0, glows in the
+	/// game but came out as a black silhouette here).
+	/// </remarks>
+	private static Vector4 GetVertexColourTint(Materials.Material material, Vector3 scale, float opacity)
+	{
+		Shaders.Shader shader = material.Shader;
+		if (!HasFeature(shader, CA_ENVIRONMENT.FEATURES.VERTEX_COLOUR))
+			return Vector4.One;
+
+		float alpha = Mathf.Clamp(opacity, 0f, 1f);
+		if (!TintsWithVertexColour(shader))
+			return new Vector4(1f, 1f, 1f, alpha);
+
+		Vector3 tint = ClampVector3Components(scale, 0f, 1f);
+		return new Vector4(tint.X, tint.Y, tint.Z, alpha);
+	}
+
+	/// <summary>
+	/// Whether the game tints this material's diffuse with the mesh's vertex colours (times the instance's
+	/// vertex_colour_scale): a CA_ENVIRONMENT material with VERTEX_COLOUR that puts the colour to no other use. With
+	/// ALPHABLEND_NOISE or DIRT_MAPPING its x/y are blend amounts, with VERTEX_AMBIENT_OCCLUSION its z is the AO term,
+	/// and with AMBIENT_OCCLUSION_MAPPING its z scales the AO map's tint instead (see <see cref="GetVertexColourTint"/>).
+	/// Props painted in their vertex colours - the nodding bird's blue hat and red feathers over a grey plastic map -
+	/// rely on it.
+	/// </summary>
+	public static bool TintsWithVertexColour(Shaders.Shader shader)
+	{
+		return shader != null
+			&& shader.Ubershader == SHADER_LIST.CA_ENVIRONMENT
+			&& HasFeature(shader, CA_ENVIRONMENT.FEATURES.VERTEX_COLOUR)
+			&& !HasFeature(shader, CA_ENVIRONMENT.FEATURES.VERTEX_AMBIENT_OCCLUSION)
+			&& !HasFeature(shader, CA_ENVIRONMENT.FEATURES.ALPHABLEND_NOISE)
+			&& !HasFeature(shader, CA_ENVIRONMENT.FEATURES.DIRT_MAPPING)
+			&& !HasFeature(shader, CA_ENVIRONMENT.FEATURES.AMBIENT_OCCLUSION_MAPPING);
+	}
+
+	private static bool HasFeature(Shaders.Shader shader, CA_ENVIRONMENT.FEATURES feature)
+	{
+		return (shader.UbershaderFeatureFlags & (1L << (int)feature)) != 0;
+	}
 
 
 	private static Vector3 ClampVector3Components(Vector3 value, float min, float max)

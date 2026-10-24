@@ -30,16 +30,16 @@ public static class FunctionEntityPreviewSetup
                 p => p.Setup(scene, function, ownerCompositeId, mappingScopeInstanceEntityId));
         }
 
-        if (!RenderFilterDefinitions.IsSupported(functionType))
+        //Model references draw the model itself, so they never take one of the stand-in shapes below
+        if (functionType == FunctionType.ModelReference)
         {
-            if (functionType == FunctionType.ModelReference)
-            {
-                return AddPreview<ModelReferencePreview>(
-                    entityNode,
-                    p => p.Setup(scene, function, ownerCompositeId, mappingScopeInstanceEntityId));
-            }
-            return false;
+            return AddPreview<ModelReferencePreview>(
+                entityNode,
+                p => p.Setup(scene, function, ownerCompositeId, mappingScopeInstanceEntityId));
         }
+
+        if (!RenderFilterDefinitions.IsSupported(functionType))
+            return false;
 
         switch (RenderFilterDefinitions.GetPreviewKind(functionType))
         {
@@ -67,6 +67,12 @@ public static class FunctionEntityPreviewSetup
                 return AddIcon(entityNode, function, IconBillboardPreview.IconKind.SoundObject, ownerCompositeId);
             case RenderPreviewKind.CameraResource:
                 return AddIcon(entityNode, function, IconBillboardPreview.IconKind.Camera, ownerCompositeId);
+            case RenderPreviewKind.Sphere:
+                return AddPreview<SpherePreview>(entityNode, p => p.Setup(function, ownerCompositeId));
+            case RenderPreviewKind.Pyramid:
+                return AddPreview<PyramidPreview>(entityNode, p => p.Setup(function, ownerCompositeId));
+            case RenderPreviewKind.UiIcon:
+                return AddIcon(entityNode, function, IconBillboardPreview.IconKind.UIIcon, ownerCompositeId);
             default:
                 return false;
         }

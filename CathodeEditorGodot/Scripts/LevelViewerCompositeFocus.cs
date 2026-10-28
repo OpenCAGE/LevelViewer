@@ -49,6 +49,13 @@ public static class LevelViewerCompositeFocus
 	/* Owners a pass left as they were because they were selected. Their grey-out was never worked out for the scope they
 	   are in now; ReapplyToOwnersLeftBySelection does it once the selection has moved off them. */
 	private static readonly HashSet<Node3D> _ownersPassedOverForSelection = new();
+	/* What a level paints over its own geometry, under an entity's node: a SurfaceEffectBox's frost (SurfaceEffectOverlay), a
+	   SimpleWater's sheet and caustics (WaterSurface). They are kept out of the pick registry and the material swap - a greyed
+	   box would be drawn over the scene - so the passes here never reached them, and stepped into a vent on SCI_HospitalLower
+	   the frost of every placement around it stayed painted in full colour over its greyed walls (28 Oct 2026). Outside the
+	   focus they are hidden instead, by their own node (their meshes' visibility is theirs to set from their parameters). */
+	public static readonly StringName ScopedOverlayGroupName = new StringName("composite_focus_scoped_overlays");
+	private static readonly HashSet<Node3D> _overlaysHiddenByFocus = new();
 	public static bool HasActiveComposite => PreviewVisibilitySettings.ActiveCompositeId != 0;
 	//Zones are (or were) on and the grey-out is off for it; a zones-off refresh has to bring it back
 	public static bool DimmingStoodDown => _dimmingStoodDown;
@@ -312,9 +319,55 @@ public static class LevelViewerCompositeFocus
 			{
 				ApplyFocusFromPickRegistry(commands);
 			}
+
+			ApplyFocusToScopedOverlays(sceneRoot, commands);
 		}
 
 		LevelViewerPick.InvalidateScopedPickables();
+	}
+
+	/// <summary>Hides the level's painted-on overlays (<see cref="ScopedOverlayGroupName"/>) outside the focus, shows them inside it.</summary>
+	private static void ApplyFocusToScopedOverlays(Node sceneRoot, Commands commands)
+	{
+		SceneTree tree = sceneRoot != null && sceneRoot.IsInsideTree() ? sceneRoot.GetTree() : null;
+		if (tree == null)
+			return;
+
+		foreach (Node node in tree.GetNodesInGroup(ScopedOverlayGroupName))
+		{
+			if (node is Node3D overlay && GodotObject.IsInstanceValid(overlay) && !overlay.IsQueuedForDeletion())
+				ApplyScopedOverlayFocus(overlay, commands);
+		}
+	}
+
+	private static void ApplyScopedOverlayFocus(Node3D overlay, Commands commands)
+	{
+		//By the entity it is drawn for, as that entity's own meshes are judged
+		bool inScope = overlay.GetParent() is not Node3D owner || IsPickOwnerInScope(owner, commands);
+		if (!inScope)
+		{
+			if (!_overlaysHiddenByFocus.Contains(overlay) && overlay.Visible)
+			{
+				overlay.Visible = false;
+				_overlaysHiddenByFocus.Add(overlay);
+			}
+			return;
+		}
+
+		if (_overlaysHiddenByFocus.Remove(overlay))
+			overlay.Visible = true;
+	}
+
+	/// <summary>Shows every overlay the focus hid: the grey-out is coming off (cleared, stood down for zones) or being worked out afresh.</summary>
+	private static void RestoreHiddenOverlays()
+	{
+		foreach (Node3D overlay in _overlaysHiddenByFocus)
+		{
+			if (overlay != null && GodotObject.IsInstanceValid(overlay))
+				overlay.Visible = true;
+		}
+
+		_overlaysHiddenByFocus.Clear();
 	}
 
 	/// <summary>
@@ -350,8 +403,13 @@ public static class LevelViewerCompositeFocus
 			int childCount = owner.GetChildCount();
 			for (int i = 0; i < childCount; i++)
 			{
-				if (owner.GetChild(i) is Node3D child && AlienScene.HasOwnerComposite(child))
+				if (owner.GetChild(i) is not Node3D child)
+					continue;
+				if (AlienScene.HasOwnerComposite(child))
 					pending.Push(child);
+				//A surface effect or water spawned into a greyed-out placement: hidden with the rest of it
+				else if (child.IsInGroup(ScopedOverlayGroupName))
+					ApplyScopedOverlayFocus(child, commands);
 			}
 		}
 	}
@@ -445,6 +503,7 @@ public static class LevelViewerCompositeFocus
 	private static void ResetDimStateForScopeChange()
 	{
 		RestoreAllDimmedMeshes();
+		RestoreHiddenOverlays();
 		_meshDimmedState.Clear();
 		//Everything is judged again by the full pass that follows (or when zones go off), the selection noted afresh
 		_ownersPassedOverForSelection.Clear();
@@ -468,6 +527,7 @@ public static class LevelViewerCompositeFocus
 		}
 		_ownerEntityChainCache.Remove(node);
 		_ownersPassedOverForSelection.Remove(node);
+		_overlaysHiddenByFocus.Remove(node);
 	}
 
 	/// <summary>True when composite focus has this mesh greyed out (used to avoid re-pickable registration).</summary>
@@ -479,6 +539,8 @@ public static class LevelViewerCompositeFocus
 	public static void Clear()
 	{
 		RestoreAllDimmedMeshes();
+		//Before a preview batch too: a preview is the composite as the game draws it, frost and all
+		RestoreHiddenOverlays();
 		_compositesInScope.Clear();
 		_scopeCacheActiveCompositeId = 0;
 		_appliedActiveCompositeId = 0;
@@ -546,6 +608,7 @@ public static class LevelViewerCompositeFocus
 		}
 
 		_ownersPassedOverForSelection.RemoveWhere(owner => owner == null || !GodotObject.IsInstanceValid(owner));
+		_overlaysHiddenByFocus.RemoveWhere(overlay => overlay == null || !GodotObject.IsInstanceValid(overlay));
 	}
 
 	private static void ApplyFocusFromPickRegistry(Commands commands)

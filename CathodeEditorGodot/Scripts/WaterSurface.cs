@@ -8,7 +8,8 @@ using System.Collections.Generic;
 /// A SimpleWater sheet drawn as the game draws it (CA_SIMPLEWATER, shaders/water_surface.gdshader): the alien nest's floor
 /// is one, 140 m across, a finger's depth of black water over the resin with the room mirrored in it - drawn without
 /// it, the nest's floor was matte brown where the game's is a black mirror. Part of how the level looks, so drawn whatever
-/// the render filters say; not pickable and not greyed (the scene filter group), so a click goes through it to the floor.
+/// the render filters say; not pickable and not given the grey-out's material (the scene filter group), so a click goes
+/// through it to the floor. Outside the composite focus it is hidden, caustics and all (LevelViewerCompositeFocus.ScopedOverlayGroupName).
 ///
 /// The game's entity sets its material's constants as it runs (every value here wins over the material's), so everything
 /// is read from the entity, at the values its parameter table gives one it doesn't set. Its ripples scroll and flow as
@@ -67,6 +68,7 @@ public partial class WaterSurface : Node3D
 			return;
 
 		WaterSurface water = new WaterSurface { Name = "WaterSurface", _scene = scene, _entity = function };
+		water.AddToGroup(LevelViewerCompositeFocus.ScopedOverlayGroupName);
 		entityNode.AddChild(water);
 		water.Refresh();
 	}

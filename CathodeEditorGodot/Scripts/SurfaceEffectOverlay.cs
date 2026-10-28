@@ -7,8 +7,9 @@ using Godot;
 /// What a SurfaceEffectBox or SurfaceEffectSphere paints onto the level around it, drawn as the game draws it (the
 /// game's CA_EFFECT_OVERLAY, shaders/surface_effect_overlay.gdshader): ENG_REACTORCORE's and HAB_AIRPORT's frost, scorch
 /// marks. Part of how the level looks, so drawn whatever the render filters say - the filter's box is the entity's own
-/// preview (BoxPreview / SpherePreview). Not pickable, not greyed by composite focus (the scene filter group keeps it
-/// out of both): a click through the frost reaches the wall it is on.
+/// preview (BoxPreview / SpherePreview). Not pickable, and not given the grey-out's material (the scene filter group keeps
+/// it out of both): a click through the frost reaches the wall it is on. Outside the composite focus it is hidden instead
+/// (LevelViewerCompositeFocus.ScopedOverlayGroupName) - left drawn, it painted its frost in full colour over greyed walls.
 /// </summary>
 public partial class SurfaceEffectOverlay : Node3D
 {
@@ -52,6 +53,7 @@ public partial class SurfaceEffectOverlay : Node3D
 
 		SurfaceEffectOverlay overlay = new SurfaceEffectOverlay { Name = "SurfaceEffectOverlay", _scene = scene, _entity = function, _composite = composite };
 		overlay.AddToGroup(GroupName);
+		overlay.AddToGroup(LevelViewerCompositeFocus.ScopedOverlayGroupName);
 		entityNode.AddChild(overlay);
 		overlay.Refresh();
 	}

@@ -324,7 +324,9 @@ public partial class LevelViewerCamera : Camera3D
                     // the entity shown where the level no longer had it (issue 718) - and a shift-clone's
                     // copies are taken back rather than left stacked unseen on the originals.
                     LevelViewerTransformGizmo gizmo = GetGizmo();
-                    if (_boxSelect.IsArmed)
+                    if (GetConnection() is CommandsEditorConnection brushConnection && brushConnection.BrushHandles.Dragging)
+                        brushConnection.BrushHandles.CancelDrag();
+                    else if (_boxSelect.IsArmed)
                         _boxSelect.End();
                     else if (gizmo != null && (gizmo.IsDragging || gizmo.IsHandoverArmed))
                         gizmo.CancelDrag();
@@ -446,6 +448,17 @@ public partial class LevelViewerCamera : Camera3D
         catch (Exception ex)
         {
             ViewerLog.PrintErr("[Viewer] Spline edit handles failed: " + ex);
+        }
+
+        //A selected brush's face handles, likewise
+        try
+        {
+            if (GetConnection() is CommandsEditorConnection brushConnection)
+                brushConnection.BrushHandles.Update(this, _alienScene, _hudLayer);
+        }
+        catch (Exception ex)
+        {
+            ViewerLog.PrintErr("[Viewer] Brush handles failed: " + ex);
         }
 
         /* After ProcessInternal rather than in it: that returns early while the viewer idles, and the pose the game is
@@ -956,6 +969,15 @@ public partial class LevelViewerCamera : Camera3D
                     GetViewport().SetInputAsHandled();
                     break;
                 }
+                /* A brush's face handle takes the press ahead of the gizmo (the bottom face's handle sits on a box's origin, under
+                   the gizmo's centre): the drag pushes that face in or out. No modifiers: those are the gizmo's and the box's. */
+                if (_commandsEditorConnection != null && _commandsEditorConnection.BrushHandlesActive
+                    && !mouseButton.ShiftPressed && !mouseButton.CtrlPressed && !mouseButton.AltPressed
+                    && _commandsEditorConnection.BrushHandleMouseDown(this, mouseButton.Position))
+                {
+                    GetViewport().SetInputAsHandled();
+                    break;
+                }
                 // Let the gizmo consume LMB before the pick/select logic. Shift on a handle means
                 // shift-clone (duplicate then drag the copy) - except in Animation Mode, where a drag
                 // is a keyframe and Shift stays a plain drag. Ctrl+Shift on a translate handle moves the
@@ -1253,7 +1275,9 @@ public partial class LevelViewerCamera : Camera3D
         switch (mouseButton.ButtonIndex)
         {
             case MouseButton.Left:
-                if (_boxSelect.IsArmed)
+                if (_commandsEditorConnection != null && _commandsEditorConnection.BrushHandleMouseUp())
+                    GetViewport().SetInputAsHandled();
+                else if (_boxSelect.IsArmed)
                 {
                     FinishBoxSelectOrClick(mouseButton.Position);
                     GetViewport().SetInputAsHandled();
@@ -2010,6 +2034,13 @@ public partial class LevelViewerCamera : Camera3D
             && motion.Position.DistanceTo(_rightPressPosition) >= LevelViewerBoxSelect.DragThresholdPixels)
         {
             StartRightDrag();
+        }
+
+        //A brush face being dragged has the motion
+        if (_commandsEditorConnection != null && _commandsEditorConnection.BrushHandleMouseMove(this, motion.Position))
+        {
+            GetViewport().SetInputAsHandled();
+            return;
         }
 
         //A left press waiting to become a box, or being one, has the motion; the gizmo's hover stays as it was

@@ -191,6 +191,18 @@ namespace OpenCAGE.UnityConnection
         // is how OpenCAGE tells it is too old.
         // Appended, not inserted: these travel as numbers, so an existing event's value must not move.
         VIEWPORT_QUERY,
+
+        // OpenCAGE -> Level Viewer: the selected entity is a brush (a box or plane OpenCAGE made, which it rebuilds from its size):
+        // show a handle on each face, which a drag pushes in or out along its normal (see brush_edit_*). brush_edit_active = false
+        // takes them away. Built like OpenCAGE's other packets, with the selection on it, so a viewer from before this takes it
+        // as a re-sync of what it has.
+        BRUSH_EDIT,
+        // Level Viewer -> OpenCAGE: a face handle was dragged and let go: the brush's new bounds (brush_edit_min / brush_edit_max,
+        // in its own Cathode space) and which face moved (brush_edit_face). OpenCAGE rebuilds it, one undo step.
+        BRUSH_EDIT_RESIZED,
+        // Level Viewer -> OpenCAGE: a vertex handle on a mesh brush (BRUSH_EDIT with brush_edit_kind 2) was dragged and let go: every
+        // vertex where it is now (brush_edit_vertices) and which one moved (brush_edit_vertex). OpenCAGE rebuilds it, one undo step.
+        BRUSH_EDIT_VERTICES,
     }
 
     /// <summary>
@@ -634,6 +646,24 @@ namespace OpenCAGE.UnityConnection
         // selections by. A pick made before the user's latest selection in OpenCAGE that only arrives after it is left alone, so the
         // last thing clicked wins wherever it was clicked. 0, which a viewer from before this sends, is always taken.
         public uint selection_input_tick = 0;
+
+        // BRUSH_EDIT and BRUSH_EDIT_RESIZED. The brush entity (in `composite`), its bounds in its own Cathode space (min and max
+        // corners, [x, y, z]), its kind (0 box: six face handles; 1 plane: four edge handles, its height unused), and for a resize
+        // the face moved (box: 0 +X, 1 -X, 2 +Y, 3 -Y, 4 +Z, 5 -Z; plane: 0 +X, 1 -X, 4 +Z, 5 -Z). Off and empty is what a packet
+        // from before this carries.
+        public bool brush_edit_active = false;
+        public uint brush_edit_entity = 0;
+        public float[] brush_edit_min = null;
+        public float[] brush_edit_max = null;
+        public int brush_edit_kind = 0;
+        public int brush_edit_face = -1;
+
+        // A mesh brush (brush_edit_kind 2, BRUSH_EDIT and BRUSH_EDIT_VERTICES): its vertices in its own Cathode space, [x, y, z] after
+        // one another; its edges as vertex index pairs, for the wire drawn over it (BRUSH_EDIT only); and the vertex a drag moved
+        // (BRUSH_EDIT_VERTICES). A viewer from before this has no kind 2 and shows no handles for it.
+        public float[] brush_edit_vertices = null;
+        public int[] brush_edit_edges = null;
+        public int brush_edit_vertex = -1;
     }
 
     /// <summary>One point of a spline being edited in the viewport: a position and a rotation (degrees), in Cathode space.</summary>

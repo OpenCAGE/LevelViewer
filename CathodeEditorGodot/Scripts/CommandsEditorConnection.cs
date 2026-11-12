@@ -382,6 +382,71 @@ public partial class CommandsEditorConnection : Node3D
         return true;
     }
 
+    /// <summary>Resize handles on the selected brush (BRUSH_EDIT).</summary>
+    public LevelViewerBrushHandles BrushHandles { get; } = new LevelViewerBrushHandles();
+    public bool BrushHandlesActive => BrushHandles.Active;
+
+    /* A left press on a brush's face handle starts dragging that face. False when the press was not on one, for the gizmo. */
+    public bool BrushHandleMouseDown(Camera3D camera, Vector2 screenPosition)
+    {
+        if (!BrushHandles.Active)
+            return false;
+        //A mesh brush: its vertex handles
+        if (BrushHandles.IsMesh)
+        {
+            if (!BrushHandles.TryPickVertex(camera, screenPosition, out int vertex))
+                return false;
+            BrushHandles.BeginVertexDrag(camera, vertex, screenPosition);
+            LevelViewerRenderIdleThrottle.NotifyUserActivity();
+            return true;
+        }
+        if (!BrushHandles.TryPick(camera, screenPosition, out int face))
+            return false;
+        BrushHandles.BeginDrag(camera, face, screenPosition);
+        LevelViewerRenderIdleThrottle.NotifyUserActivity();
+        return true;
+    }
+
+    public bool BrushHandleMouseMove(Camera3D camera, Vector2 screenPosition)
+    {
+        if (!BrushHandles.Dragging)
+            return false;
+        BrushHandles.DragTo(camera, screenPosition);
+        LevelViewerRenderIdleThrottle.NotifyUserActivity();
+        return true;
+    }
+
+    /* Let go of a face handle: the brush's new bounds go to the editor, which rebuilds it and sends the handles again */
+    public bool BrushHandleMouseUp()
+    {
+        if (!BrushHandles.Dragging)
+            return false;
+        if (BrushHandles.DraggingVertex)
+        {
+            if (BrushHandles.EndVertexDrag(out int vertex, out float[] vertices))
+            {
+                SendMessage(new Packet(PacketEvent.BRUSH_EDIT_VERTICES)
+                {
+                    brush_edit_entity = BrushHandles.EntityId,
+                    brush_edit_vertex = vertex,
+                    brush_edit_vertices = vertices,
+                });
+            }
+            return true;
+        }
+        if (BrushHandles.EndDrag(out int face, out Vector3 min, out Vector3 max))
+        {
+            SendMessage(new Packet(PacketEvent.BRUSH_EDIT_RESIZED)
+            {
+                brush_edit_entity = BrushHandles.EntityId,
+                brush_edit_face = face,
+                brush_edit_min = new float[] { min.X, min.Y, min.Z },
+                brush_edit_max = new float[] { max.X, max.Y, max.Z },
+            });
+        }
+        return true;
+    }
+
     /// <summary>Delete while editing a spline: the selected point goes, not the SplinePath. False if there is none.</summary>
     public bool RequestSplineEditPointDelete()
     {
@@ -1094,6 +1159,30 @@ public partial class CommandsEditorConnection : Node3D
                 catch (Exception ex)
                 {
                     ViewerLog.PrintErr("[Viewer] Animation preview failed: " + ex);
+                }
+            }).CallDeferred();
+            return;
+        }
+
+        if (packet.packet_event == PacketEvent.BRUSH_EDIT)
+        {
+            //The selected brush's bounds for its face handles (or none). Its selection is the selected entity already.
+            bool brushActive = packet.brush_edit_active;
+            uint brushEntity = packet.brush_edit_entity;
+            float[] brushMin = packet.brush_edit_min, brushMax = packet.brush_edit_max;
+            int brushKind = packet.brush_edit_kind;
+            float[] brushVertices = packet.brush_edit_vertices;
+            int[] brushEdges = packet.brush_edit_edges;
+            Callable.From(() =>
+            {
+                try
+                {
+                    BrushHandles.Apply(_scene, brushActive, brushEntity, brushMin, brushMax, brushKind, brushVertices, brushEdges);
+                    LevelViewerRenderIdleThrottle.NotifyUserActivity();
+                }
+                catch (Exception ex)
+                {
+                    ViewerLog.PrintErr("[Viewer] Brush handles failed: " + ex);
                 }
             }).CallDeferred();
             return;

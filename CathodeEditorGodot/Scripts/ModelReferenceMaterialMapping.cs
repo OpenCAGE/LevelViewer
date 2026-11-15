@@ -601,6 +601,9 @@ public static class ModelReferenceMaterialMapping
 		if (sourceMaterialWriteIndex >= 0)
 		{
 			Materials.Material sourceMaterial = level.Materials.GetAtWriteIndex(sourceMaterialWriteIndex);
+			//A material with no slot ("X", not "X->X") keeps its own material
+			if (sourceMaterial != null && !string.IsNullOrEmpty(sourceMaterial.Name) && SlotOf(sourceMaterial.Name) == null)
+				return materialWriteIndex;
 			if (sourceMaterial != null
 				&& !string.IsNullOrEmpty(sourceMaterial.Name)
 				&& TryFindMappingTarget(mapping, sourceMaterial.Name, out string sourceTargetName))
@@ -610,7 +613,7 @@ public static class ModelReferenceMaterialMapping
 		}
 
 		Materials.Material material = level.Materials.GetAtWriteIndex(materialWriteIndex);
-		if (material == null || string.IsNullOrEmpty(material.Name))
+		if (material == null || string.IsNullOrEmpty(material.Name) || SlotOf(material.Name) == null)
 			return materialWriteIndex;
 
 		if (TryFindMappingTarget(mapping, material.Name, out string targetName))

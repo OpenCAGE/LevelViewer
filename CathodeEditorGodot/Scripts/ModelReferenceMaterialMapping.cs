@@ -619,14 +619,8 @@ public static class ModelReferenceMaterialMapping
 		if (TryFindMappingTarget(mapping, material.Name, out string targetName))
 			return ResolveMappedMaterialWriteIndex(level, targetName, materialWriteIndex);
 
-		// Input may already be a previous mapping target; resolve via the original "from" name.
-		MaterialMappings.MaterialMapping.Mapping reverseEntry = FindMappingEntryByTarget(mapping, material.Name);
-		if (reverseEntry != null
-			&& TryFindMappingTarget(mapping, reverseEntry.from, out string refreshedTargetName))
-		{
-			return ResolveMappedMaterialWriteIndex(level, refreshedTargetName, materialWriteIndex);
-		}
-
+		// No entry answers to it: keep it, even when it is a slot twin of one of the mapping's targets
+		// ("MATERIAL #01->X->X" against a target "X->X"). Twins can differ in physical material.
 		return materialWriteIndex;
 	}
 
@@ -689,45 +683,6 @@ public static class ModelReferenceMaterialMapping
 					continue;
 
 				if (NormalizeMaterialNameForLookup(entry.from) == strippedMaterialName)
-					return entry;
-			}
-		}
-
-		return null;
-	}
-
-	private static MaterialMappings.MaterialMapping.Mapping FindMappingEntryByTarget(
-		MaterialMappings.MaterialMapping mapping,
-		string targetMaterialName)
-	{
-		if (mapping?.Mappings == null || string.IsNullOrEmpty(targetMaterialName))
-			return null;
-
-		MaterialMappings.MaterialMapping.Mapping remap = mapping.Mappings.FirstOrDefault(entry => entry.to == targetMaterialName);
-		if (remap != null)
-			return remap;
-
-		string normalizedTargetName = NormalizeMaterialNameForLookup(targetMaterialName);
-		for (int i = 0; i < mapping.Mappings.Count; i++)
-		{
-			MaterialMappings.MaterialMapping.Mapping entry = mapping.Mappings[i];
-			if (entry == null || string.IsNullOrEmpty(entry.to))
-				continue;
-
-			if (NormalizeMaterialNameForLookup(entry.to) == normalizedTargetName)
-				return entry;
-		}
-
-		string strippedTargetName = NormalizeMaterialNameForLookup(StripAuthoringSlot(targetMaterialName));
-		if (strippedTargetName != normalizedTargetName)
-		{
-			for (int i = 0; i < mapping.Mappings.Count; i++)
-			{
-				MaterialMappings.MaterialMapping.Mapping entry = mapping.Mappings[i];
-				if (entry == null || string.IsNullOrEmpty(entry.to))
-					continue;
-
-				if (NormalizeMaterialNameForLookup(entry.to) == strippedTargetName)
 					return entry;
 			}
 		}

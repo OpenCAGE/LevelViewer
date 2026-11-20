@@ -701,6 +701,8 @@ public partial class AlienScene : Node3D
 		//Its stars likewise: the plain sky until the next level brings its own
 		LevelViewerGalaxy.SetGalaxy(this, null);
 		LevelViewerFog.SetFog(this, null);
+		//And its markup, unless it is this level read again (a save's reload): OpenCAGE sends the next level's after its populate
+		ForgetCompositeMarkupUnlessFor(_queuedLevelName);
 
 		/* Freed here, answering sent messages as it goes, as a populate frees the scene it replaces. Queued, the whole
 		   level was deleted in one go at the end of the frame (SceneTree's delete queue, nothing answered): 15 s when
@@ -1204,6 +1206,8 @@ public partial class AlienScene : Node3D
 		{
 			// Filters are often applied from OpenCAGE before the entity tree exists; refresh now that spawn finished.
 			RefreshRenderFilters(null);
+			//The editor's composite markup goes on every instance the populate made
+			RefreshCompositeMarkup();
 			//Same for the scene geometry categories: a filter left on from the last session arrives
 			//before the meshes exist, so it has to be reapplied once they do.
 			RefreshSceneGeometryFilters();
@@ -1942,11 +1946,13 @@ public partial class AlienScene : Node3D
 		if (!_compositeNodes.TryGetValue(composite.shortGUID, out List<Node3D> compositeInstances))
 		{
 			_compositeNodes[composite.shortGUID] = new List<Node3D> { compositeNode };
+			AttachCompositeMarkup(composite, compositeNode);
 			return;
 		}
 
 		if (!compositeInstances.Contains(compositeNode))
 			compositeInstances.Add(compositeNode);
+		AttachCompositeMarkup(composite, compositeNode);
 	}
 
 
@@ -5445,6 +5451,7 @@ public partial class AlienScene : Node3D
 	{
 		if (_collisionOverlay != null && GodotObject.IsInstanceValid(_collisionOverlay))
 			_collisionOverlay.ApplyFilter();
+		ApplyCompositeMarkupVisibility();
 
 		foreach (KeyValuePair<MeshInstance3D, SceneFilterMesh> entry in _sceneFilterMeshes.ToArray())
 		{

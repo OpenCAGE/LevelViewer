@@ -25,13 +25,15 @@ namespace OpenCAGE
     }
 
     /// <summary>
-    /// Scene geometry categories that aren't tied to a FunctionType. These are normally not drawn at
-    /// all, and are rendered in a flat filter colour when switched on.
+    /// Scene geometry categories that aren't tied to a FunctionType. The level's are normally not drawn
+    /// at all, and are rendered in a flat filter colour when switched on; the editor's markup is on by default.
     /// </summary>
     public enum SceneFilterKind
     {
         OcclusionMeshes,
         CollisionMeshes,
+        //Editor-only composite markup (COMPOSITE_MARKUP): shapes showing what a composite is, at each of its instances
+        Markup,
     }
 
     public readonly struct SceneFilterDefinition
@@ -41,14 +43,17 @@ namespace OpenCAGE
         public readonly float R;
         public readonly float G;
         public readonly float B;
+        /// <summary>Whether this filter is on for someone who has never touched it.</summary>
+        public readonly bool DefaultEnabled;
 
-        public SceneFilterDefinition(SceneFilterKind kind, string label, float r, float g, float b)
+        public SceneFilterDefinition(SceneFilterKind kind, string label, float r, float g, float b, bool defaultEnabled = false)
         {
             Kind = kind;
             Label = label;
             R = r;
             G = g;
             B = b;
+            DefaultEnabled = defaultEnabled;
         }
 
         /// <summary>Settings key, and the name this filter travels under in the packet.</summary>
@@ -174,6 +179,7 @@ namespace OpenCAGE
         {
             new SceneFilterDefinition(SceneFilterKind.OcclusionMeshes, "Occlusion Meshes", 0.9f, 0.12f, 0.12f),
             new SceneFilterDefinition(SceneFilterKind.CollisionMeshes, "Collision Meshes", 0.15f, 0.85f, 0.95f),
+            new SceneFilterDefinition(SceneFilterKind.Markup, "Markup", 0.54f, 0.78f, 0.38f, defaultEnabled: true),
         };
 
         public static bool TryGetSceneFilter(SceneFilterKind kind, out SceneFilterDefinition definition)

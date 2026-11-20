@@ -203,6 +203,12 @@ namespace OpenCAGE.UnityConnection
         // Level Viewer -> OpenCAGE: a vertex handle on a mesh brush (BRUSH_EDIT with brush_edit_kind 2) was dragged and let go: every
         // vertex where it is now (brush_edit_vertices) and which one moved (brush_edit_vertex). OpenCAGE rebuilds it, one undo step.
         BRUSH_EDIT_VERTICES,
+
+        // OpenCAGE -> Level Viewer: the editor-only markup of the level's composites (composite_markup, replacing whatever was sent
+        // before), drawn at every instance of each one behind the Markup scene filter. Never selectable, never part of the level.
+        // Built like OpenCAGE's other packets, with the selection on it, so a viewer from before this takes it as a re-sync.
+        // Appended, not inserted: these travel as numbers, so an existing event's value must not move.
+        COMPOSITE_MARKUP,
     }
 
     /// <summary>
@@ -664,6 +670,9 @@ namespace OpenCAGE.UnityConnection
         public float[] brush_edit_vertices = null;
         public int[] brush_edit_edges = null;
         public int brush_edit_vertex = -1;
+
+        // COMPOSITE_MARKUP: every composite with markup and its triangles, in the composite's own Cathode space. Null on any other packet.
+        public List<SyncedCompositeMarkup> composite_markup = null;
     }
 
     /// <summary>One point of a spline being edited in the viewport: a position and a rotation (degrees), in Cathode space.</summary>

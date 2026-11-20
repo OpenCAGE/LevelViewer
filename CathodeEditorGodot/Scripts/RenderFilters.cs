@@ -59,7 +59,7 @@ public static class RenderFilters
                 return false;
             if (_enabledSceneFilters.TryGetValue(kind.ToString(), out bool enabled))
                 return enabled;
-            return false;
+            return RenderFilterDefinitions.TryGetSceneFilter(kind, out SceneFilterDefinition definition) && definition.DefaultEnabled;
         }
     }
 

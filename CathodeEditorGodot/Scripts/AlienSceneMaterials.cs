@@ -175,6 +175,38 @@ public static class AlienSceneMaterials
 		return material;
 	}
 
+	//Composite markup: one material per colour, shaded like the scene filters so its shapes read as shapes, both sides drawn
+	private static readonly Dictionary<Color, Material> _markupMaterials = new Dictionary<Color, Material>();
+
+	public static Material GetMarkupMaterial(Color colour)
+	{
+		colour.A = 1f;
+		if (_markupMaterials.TryGetValue(colour, out Material existing) && GodotObject.IsInstanceValid(existing))
+			return existing;
+
+		Shader shader = GetSceneFilterShader(false);
+		Material material;
+		if (shader != null)
+		{
+			ShaderMaterial shaded = new ShaderMaterial { ResourceName = "Markup", Shader = shader };
+			shaded.SetShaderParameter(FilterColourParam, colour);
+			material = shaded;
+		}
+		else
+		{
+			material = new StandardMaterial3D
+			{
+				ResourceName = "Markup (unshaded fallback)",
+				ShadingMode = BaseMaterial3D.ShadingModeEnum.Unshaded,
+				AlbedoColor = colour,
+				CullMode = BaseMaterial3D.CullModeEnum.Disabled,
+			};
+		}
+
+		_markupMaterials[colour] = material;
+		return material;
+	}
+
 	private static readonly Dictionary<long, ShaderMaterial> _zoneTintMaterials = new Dictionary<long, ShaderMaterial>();
 	private static readonly HashSet<Material> _zoneTintMaterialSet = new HashSet<Material>();
 	private static Shader _zoneTintShader;

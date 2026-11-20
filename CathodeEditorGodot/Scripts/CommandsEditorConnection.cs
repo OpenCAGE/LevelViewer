@@ -1164,6 +1164,27 @@ public partial class CommandsEditorConnection : Node3D
             return;
         }
 
+        if (packet.packet_event == PacketEvent.COMPOSITE_MARKUP)
+        {
+            //The markup set alone: the selection it carries is only for viewers from before this
+            string markupLevel = packet.level_name;
+            List<SyncedCompositeMarkup> markup = packet.composite_markup;
+            Callable.From(() =>
+            {
+                try
+                {
+                    if (_scene != null && GodotObject.IsInstanceValid(_scene))
+                        _scene.SetCompositeMarkup(markupLevel, markup);
+                    LevelViewerRenderIdleThrottle.NotifyUserActivity();
+                }
+                catch (Exception ex)
+                {
+                    ViewerLog.PrintErr("[Viewer] Composite markup failed: " + ex);
+                }
+            }).CallDeferred();
+            return;
+        }
+
         if (packet.packet_event == PacketEvent.BRUSH_EDIT)
         {
             //The selected brush's bounds for its face handles (or none). Its selection is the selected entity already.

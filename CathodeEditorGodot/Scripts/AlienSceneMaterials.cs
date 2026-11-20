@@ -93,7 +93,6 @@ public static class AlienSceneMaterials
 	{
 		"USE_ALPHA_AS_BLENDFACTOR",
 		"FORCE_TO_ALPHA",
-		"GLASS",
 		"FOG_ALPHA",
 		"VERTEX_ALPHA_OPACITY_ONLY",
 	};

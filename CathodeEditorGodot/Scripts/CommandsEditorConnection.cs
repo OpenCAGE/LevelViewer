@@ -265,6 +265,7 @@ public partial class CommandsEditorConnection : Node3D
         ViewerLog.InstallGlobalExceptionHandlers();
         LevelViewerEmbeddedFocus.ConfigureEmbeddedStartup();
         ViewerLog.Print("Level Viewer starting. Viewer log: " + (ViewerLog.LogFilePath ?? "<unavailable>"));
+        AlienSceneMaterials.LimitSamplersOnAppleGpu();
         _scene = GetNode<AlienScene>(SiblingScenePath);
         _connectionCts = new CancellationTokenSource();
         ViewerLogBridge.RegisterConnection(this);

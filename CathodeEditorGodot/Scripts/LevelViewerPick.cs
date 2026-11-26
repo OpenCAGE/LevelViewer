@@ -1882,6 +1882,9 @@ public static class LevelViewerPick
 	private static CachedMeshSurface BuildCachedMeshSurface(Mesh mesh, int surfaceIndex)
 	{
 		CachedMeshSurface surface = new CachedMeshSurface { Vertices = System.Array.Empty<Vector3>() };
+		if (mesh is ArrayMesh && !SurfaceBuffersReadable(mesh.GetRid(), surfaceIndex))
+			return surface;
+
 		using Godot.Collections.Array arrays = mesh.SurfaceGetArrays(surfaceIndex); //released here rather than by a finalizer
 		if (arrays == null || arrays.Count == 0)
 			return surface;
@@ -1896,6 +1899,37 @@ public static class LevelViewerPick
 			surface.Indices = indexVariant.AsInt32Array();
 
 		return surface;
+	}
+
+	/// <summary>
+	/// An ArrayMesh's arrays are read back from its GPU buffers. A surface whose buffers failed to allocate (the GPU out
+	/// of memory) reads back empty but keeps its counts, and SurfaceGetArrays decoding that faults natively.
+	/// </summary>
+	private static bool SurfaceBuffersReadable(Rid meshRid, int surfaceIndex)
+	{
+		using Godot.Collections.Dictionary data = RenderingServer.MeshGetSurface(meshRid, surfaceIndex);
+		if (data == null || data.Count == 0)
+			return false;
+
+		int vertexCount = data.TryGetValue("vertex_count", out Variant count) ? count.AsInt32() : 0;
+		if (vertexCount <= 0)
+			return false;
+		if (!data.TryGetValue("vertex_data", out Variant vertexData) || vertexData.AsByteArray().Length == 0)
+			return false;
+
+		int indexCount = data.TryGetValue("index_count", out Variant indices) ? indices.AsInt32() : 0;
+		if (indexCount > 0 && (!data.TryGetValue("index_data", out Variant indexData) || indexData.AsByteArray().Length == 0))
+			return false;
+
+		RenderingServer.ArrayFormat format = data.TryGetValue("format", out Variant formatValue)
+			? (RenderingServer.ArrayFormat)formatValue.AsInt64()
+			: 0;
+		if (RenderingServer.MeshSurfaceGetFormatAttributeStride(format, vertexCount) > 0 && !data.ContainsKey("attribute_data"))
+			return false;
+		if (RenderingServer.MeshSurfaceGetFormatSkinStride(format, vertexCount) > 0 && !data.ContainsKey("skin_data"))
+			return false;
+
+		return true;
 	}
 
 	private static void TryUpdateClosestTriangleHit(

@@ -388,62 +388,325 @@ public static class AlienSceneTextures
 	}
 
 	/// <summary>One-time alpha scan from Cathode source bytes before Content is released.</summary>
+	/// <remarks>
+	/// Reads the base mip's alpha straight from the bytes (DXT5 and BC7 decoded a block at a time) with the same sampling
+	/// and thresholds as ScanImageForTransparency. It runs on the prewarm's worker threads: decoding each texture to an RGBA8
+	/// Godot Image there ran the process out of memory on big levels.
+	/// </remarks>
 	public static bool DetectTransparencyFromContent(byte[] content, int width, int height, Textures.TextureFormat sourceFormat)
 	{
 		if (content == null || content.Length == 0 || width <= 0 || height <= 0)
 			return false;
 
-		Image.Format format = MapImageFormat(sourceFormat);
-		if (format == Image.Format.Max && !AstcTextureDecode.IsAstcFormat(sourceFormat))
-			return false;
-
-		if (format == Image.Format.Rgb8 || format == Image.Format.L8 || format == Image.Format.Rf)
-			return false;
-
-		if (sourceFormat == Textures.TextureFormat.DXT1 || sourceFormat == Textures.TextureFormat.X8R8G8B8)
-			return false;
-
-		//The base mip decompressed to RGBA8 (16 MB for a 2048 square), for every texture a load converts: released here
-		using Image probe = CreateProbeImage(content, width, height, format, sourceFormat);
-		if (probe == null)
-			return false;
-
-		return ScanImageForTransparency(probe);
-	}
-
-	private static Image CreateProbeImage(byte[] content, int width, int height, Image.Format format, Textures.TextureFormat sourceFormat)
-	{
 		if (AstcTextureDecode.IsAstcFormat(sourceFormat))
 		{
 			byte[] baseMip = ExtractBaseMipData(content, width, height, Image.Format.Max, sourceFormat);
-			if (baseMip == null)
-				return null;
-
-			byte[] rgba = AstcTextureDecode.DecodeToRgba8(baseMip, width, height, sourceFormat);
-			if (rgba == null)
-				return null;
-
-			return Image.CreateFromData(width, height, false, Image.Format.Rgba8, rgba);
+			byte[] rgba = baseMip == null ? null : AstcTextureDecode.DecodeToRgba8(baseMip, width, height, sourceFormat);
+			return rgba != null && rgba.Length >= (long)width * height * 4 && ScanRgba8Alpha(rgba, width, height);
 		}
 
-		byte[] upload = ExtractBaseMipData(content, width, height, format, sourceFormat);
-		if (upload == null)
-			return null;
+		Image.Format format = MapImageFormat(sourceFormat);
+		int baseSize = GetBaseMipByteSize(width, height, format, sourceFormat);
+		if (baseSize <= 0 || content.Length < baseSize)
+			return false;
 
-		Image image = Image.CreateFromData(width, height, false, format, upload);
-		if (image == null || image.IsEmpty())
-			return null;
+		switch (format)
+		{
+			case Image.Format.Rgba8:
+				return ScanRgba8Alpha(content, width, height);
+			case Image.Format.Rgbah:
+				return ScanFloatAlpha(content, width, height, false);
+			case Image.Format.Rgbaf:
+				return ScanFloatAlpha(content, width, height, true);
+			case Image.Format.Dxt5:
+				return ScanBlockAlpha(content, width, height, false);
+			case Image.Format.BptcRgba:
+				return ScanBlockAlpha(content, width, height, true);
+			default:
+				//DXT1, X8R8G8B8, L8 and R16F were never scanned; A8, DXN and BC6H all decode with alpha 255
+				return false;
+		}
+	}
 
-		if (IsBlockCompressed(format))
-			image.Decompress();
+	/// <summary>The every-fourth-texel tally ScanImageForTransparency keeps.</summary>
+	private struct AlphaTally
+	{
+		private readonly long _samples;
+		private long _tested;
+		private long _low;
+		private int _min;
 
-		if (sourceFormat == Textures.TextureFormat.A8R8G8B8)
-			SwizzleBgraToRgba(image);
+		public AlphaTally(long texels)
+		{
+			_samples = (texels + 3) / 4;
+			_tested = 0;
+			_low = 0;
+			_min = byte.MaxValue;
+		}
 
-		if (image.GetFormat() != Image.Format.Rgba8)
-			image.Convert(Image.Format.Rgba8);
+		public void Add(int alpha)
+		{
+			_tested++;
+			if (alpha < _min)
+				_min = alpha;
+			if (alpha < 250)
+				_low++;
+		}
 
-		return image;
+		/// <summary>The answer can only be yes from here.</summary>
+		public bool Settled => _min <= 16 || _low * 200 >= _samples;
+
+		public bool Result => _tested > 0 && (_min <= 16 || _low * 200 >= _tested);
+	}
+
+	private static bool ScanRgba8Alpha(byte[] rgba, int width, int height)
+	{
+		long texels = (long)width * height;
+		AlphaTally tally = new AlphaTally(texels);
+		for (long texel = 0; texel < texels; texel += 4)
+		{
+			tally.Add(rgba[texel * 4 + 3]);
+			if (tally.Settled)
+				return true;
+		}
+		return tally.Result;
+	}
+
+	private static bool ScanFloatAlpha(byte[] content, int width, int height, bool fullFloat)
+	{
+		long texels = (long)width * height;
+		int stride = fullFloat ? 16 : 8;
+		AlphaTally tally = new AlphaTally(texels);
+		for (long texel = 0; texel < texels; texel += 4)
+		{
+			int offset = (int)(texel * stride) + (fullFloat ? 12 : 6);
+			float alpha = fullFloat ? BitConverter.ToSingle(content, offset) : (float)BitConverter.ToHalf(content, offset);
+			tally.Add(float.IsNaN(alpha) ? 0 : (int)Math.Clamp(alpha * 255.0f, 0.0f, 255.0f));
+			if (tally.Settled)
+				return true;
+		}
+		return tally.Result;
+	}
+
+	private static bool ScanBlockAlpha(byte[] content, int width, int height, bool bc7)
+	{
+		int blocksWide = (width + 3) / 4;
+		int blocksHigh = (height + 3) / 4;
+		AlphaTally tally = new AlphaTally((long)width * height);
+		Span<byte> alpha = stackalloc byte[16];
+		for (int blockY = 0; blockY < blocksHigh; blockY++)
+		{
+			for (int blockX = 0; blockX < blocksWide; blockX++)
+			{
+				int offset = (blockY * blocksWide + blockX) * 16;
+				if (bc7)
+					DecodeBc7Alpha(content, offset, alpha);
+				else
+					DecodeDxt5Alpha(content, offset, alpha);
+
+				for (int row = 0; row < 4; row++)
+				{
+					int y = blockY * 4 + row;
+					if (y >= height)
+						break;
+					for (int column = 0; column < 4; column++)
+					{
+						int x = blockX * 4 + column;
+						if (x >= width)
+							break;
+						if ((((long)y * width + x) & 3) == 0)
+							tally.Add(alpha[row * 4 + column]);
+					}
+				}
+
+				if (tally.Settled)
+					return true;
+			}
+		}
+		return tally.Result;
+	}
+
+	private static void DecodeDxt5Alpha(byte[] block, int offset, Span<byte> alpha)
+	{
+		int a0 = block[offset];
+		int a1 = block[offset + 1];
+		Span<byte> palette = stackalloc byte[8];
+		palette[0] = (byte)a0;
+		palette[1] = (byte)a1;
+		if (a0 > a1)
+		{
+			for (int i = 1; i <= 6; i++)
+				palette[i + 1] = (byte)(((7 - i) * a0 + i * a1 + 1) / 7);
+		}
+		else
+		{
+			for (int i = 1; i <= 4; i++)
+				palette[i + 1] = (byte)(((5 - i) * a0 + i * a1 + 1) / 5);
+			palette[6] = 0;
+			palette[7] = 255;
+		}
+
+		ulong indices = 0;
+		for (int i = 0; i < 6; i++)
+			indices |= (ulong)block[offset + 2 + i] << (8 * i);
+		for (int i = 0; i < 16; i++)
+		{
+			alpha[i] = palette[(int)(indices & 7)];
+			indices >>= 3;
+		}
+	}
+
+	//BC7 two-subset partitions (bit n = texel n's subset) and subset 1's anchor texel
+	private static readonly ushort[] Bc7Partition2 =
+	{
+		0xCCCC, 0x8888, 0xEEEE, 0xECC8, 0xC880, 0xFEEC, 0xFEC8, 0xEC80,
+		0xC800, 0xFFEC, 0xFE80, 0xE800, 0xFFE8, 0xFF00, 0xFFF0, 0xF000,
+		0xF710, 0x008E, 0x7100, 0x08CE, 0x008C, 0x7310, 0x3100, 0x8CCE,
+		0x088C, 0x3110, 0x6666, 0x366C, 0x17E8, 0x0FF0, 0x718E, 0x399C,
+		0xAAAA, 0xF0F0, 0x5A5A, 0x33CC, 0x3C3C, 0x55AA, 0x9696, 0xA55A,
+		0x73CE, 0x13C8, 0x324C, 0x3BDC, 0x6996, 0xC33C, 0x9966, 0x0660,
+		0x0272, 0x04E4, 0x4E40, 0x2720, 0xC936, 0x936C, 0x39C6, 0x639C,
+		0x9336, 0x9CC6, 0x817E, 0xE718, 0xCCF0, 0x0FCC, 0x7744, 0xEE22,
+	};
+
+	private static readonly byte[] Bc7Anchor2 =
+	{
+		15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15,
+		15, 2, 8, 2, 2, 8, 8, 15, 2, 8, 2, 2, 8, 8, 2, 2,
+		15, 15, 6, 8, 2, 8, 15, 15, 2, 8, 2, 2, 2, 15, 15, 6,
+		6, 2, 6, 8, 15, 15, 2, 2, 15, 15, 15, 15, 15, 2, 2, 15,
+	};
+
+	private static readonly byte[] Bc7Weights2 = { 0, 21, 43, 64 };
+	private static readonly byte[] Bc7Weights3 = { 0, 9, 18, 27, 37, 46, 55, 64 };
+	private static readonly byte[] Bc7Weights4 = { 0, 4, 9, 13, 17, 21, 26, 30, 34, 38, 43, 47, 51, 55, 60, 64 };
+
+	/// <summary>The final alpha of a BC7 block's 16 texels (after any mode 4/5 channel rotation).</summary>
+	private static void DecodeBc7Alpha(byte[] block, int offset, Span<byte> alpha)
+	{
+		Bc7Bits bits = new Bc7Bits(BitConverter.ToUInt64(block, offset), BitConverter.ToUInt64(block, offset + 8));
+		int mode = 0;
+		while (mode < 8 && bits.Read(1) == 0)
+			mode++;
+
+		if (mode == 8)
+		{
+			alpha.Fill(0); //reserved mode decodes to zero
+			return;
+		}
+		if (mode < 4)
+		{
+			alpha.Fill(255); //modes 0-3 carry no alpha
+			return;
+		}
+
+		if (mode == 4 || mode == 5)
+		{
+			int rotation = bits.Read(2);
+			int indexSelection = mode == 4 ? bits.Read(1) : 0;
+			int colourBits = mode == 4 ? 5 : 7;
+			int alphaBits = mode == 4 ? 6 : 8;
+
+			//R0 R1 G0 G1 B0 B1 A0 A1
+			Span<int> endpoints = stackalloc int[8];
+			for (int i = 0; i < 6; i++)
+				endpoints[i] = Bc7Unquantise(bits.Read(colourBits), colourBits);
+			endpoints[6] = Bc7Unquantise(bits.Read(alphaBits), alphaBits);
+			endpoints[7] = Bc7Unquantise(bits.Read(alphaBits), alphaBits);
+
+			int secondaryIndexBits = mode == 4 ? 3 : 2;
+			Span<byte> primary = stackalloc byte[16];
+			Span<byte> secondary = stackalloc byte[16];
+			for (int i = 0; i < 16; i++)
+				primary[i] = (byte)bits.Read(i == 0 ? 1 : 2);
+			for (int i = 0; i < 16; i++)
+				secondary[i] = (byte)bits.Read(i == 0 ? secondaryIndexBits - 1 : secondaryIndexBits);
+
+			//Rotation 1-3 swaps alpha with R, G or B, so the final alpha is that colour channel
+			int channel = rotation == 0 ? 3 : rotation - 1;
+			bool alphaUsesSecondary = indexSelection == 0;
+			bool useSecondary = channel == 3 ? alphaUsesSecondary : !alphaUsesSecondary;
+			Span<byte> indices = useSecondary ? secondary : primary;
+			byte[] weights = useSecondary && secondaryIndexBits == 3 ? Bc7Weights3 : Bc7Weights2;
+			int e0 = endpoints[channel * 2];
+			int e1 = endpoints[channel * 2 + 1];
+			for (int i = 0; i < 16; i++)
+				alpha[i] = Bc7Interpolate(e0, e1, weights[indices[i]]);
+			return;
+		}
+
+		if (mode == 6)
+		{
+			bits.Skip(42); //RGB endpoints, 6 x 7 bits
+			int a0 = bits.Read(7);
+			int a1 = bits.Read(7);
+			a0 = (a0 << 1) | bits.Read(1);
+			a1 = (a1 << 1) | bits.Read(1);
+			for (int i = 0; i < 16; i++)
+				alpha[i] = Bc7Interpolate(a0, a1, Bc7Weights4[bits.Read(i == 0 ? 3 : 4)]);
+			return;
+		}
+
+		//Mode 7: two subsets, 5-bit endpoints plus a p-bit each, 2-bit indices
+		int partition = bits.Read(6);
+		bits.Skip(60); //RGB endpoints, 12 x 5 bits
+		Span<int> alphaEndpoints = stackalloc int[4];
+		for (int i = 0; i < 4; i++)
+			alphaEndpoints[i] = bits.Read(5);
+		for (int i = 0; i < 4; i++)
+			alphaEndpoints[i] = Bc7Unquantise((alphaEndpoints[i] << 1) | bits.Read(1), 6);
+
+		int mask = Bc7Partition2[partition];
+		int anchor = Bc7Anchor2[partition];
+		for (int i = 0; i < 16; i++)
+		{
+			int subset = (mask >> i) & 1;
+			int index = bits.Read(i == 0 || i == anchor ? 1 : 2);
+			alpha[i] = Bc7Interpolate(alphaEndpoints[subset * 2], alphaEndpoints[subset * 2 + 1], Bc7Weights2[index]);
+		}
+	}
+
+	private static int Bc7Unquantise(int value, int bits)
+	{
+		return bits >= 8 ? value : (value << (8 - bits)) | (value >> (2 * bits - 8));
+	}
+
+	private static byte Bc7Interpolate(int e0, int e1, int weight)
+	{
+		return (byte)(((64 - weight) * e0 + weight * e1 + 32) >> 6);
+	}
+
+	/// <summary>LSB-first reader over one 128-bit BC7 block.</summary>
+	private struct Bc7Bits
+	{
+		private readonly ulong _low;
+		private readonly ulong _high;
+		private int _position;
+
+		public Bc7Bits(ulong low, ulong high)
+		{
+			_low = low;
+			_high = high;
+			_position = 0;
+		}
+
+		public int Read(int count)
+		{
+			ulong value;
+			if (_position >= 64)
+				value = _high >> (_position - 64);
+			else if (_position + count <= 64)
+				value = _low >> _position;
+			else
+				value = (_low >> _position) | (_high << (64 - _position));
+			_position += count;
+			return (int)(value & ((1UL << count) - 1));
+		}
+
+		public void Skip(int count)
+		{
+			_position += count;
+		}
 	}
 
 	private static bool ScanImageForTransparency(Image image)

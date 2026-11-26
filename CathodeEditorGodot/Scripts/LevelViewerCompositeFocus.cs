@@ -56,6 +56,11 @@ public static class LevelViewerCompositeFocus
 	   focus they are hidden instead, by their own node (their meshes' visibility is theirs to set from their parameters). */
 	public static readonly StringName ScopedOverlayGroupName = new StringName("composite_focus_scoped_overlays");
 	private static readonly HashSet<Node3D> _overlaysHiddenByFocus = new();
+	/* Composite markup (AlienSceneMarkup), drawn under the instance it marks and kept out of the pick registry. It is judged
+	   by its composite and that instance, and greyed with the shared double-sided grey outside the focus. */
+	public static readonly StringName MarkupGroupName = new StringName("composite_focus_markup");
+	public static readonly StringName MarkupCompositeMeta = new StringName("markup_composite");
+	private static readonly HashSet<MeshInstance3D> _markupDimmedByFocus = new();
 	public static bool HasActiveComposite => PreviewVisibilitySettings.ActiveCompositeId != 0;
 	//Zones are (or were) on and the grey-out is off for it; a zones-off refresh has to bring it back
 	public static bool DimmingStoodDown => _dimmingStoodDown;
@@ -321,9 +326,61 @@ public static class LevelViewerCompositeFocus
 			}
 
 			ApplyFocusToScopedOverlays(sceneRoot, commands);
+			ApplyFocusToMarkup(sceneRoot, commands);
 		}
 
 		LevelViewerPick.InvalidateScopedPickables();
+	}
+
+	/// <summary>Greys the composite markup outside the focus and gives it back its colours inside it.</summary>
+	private static void ApplyFocusToMarkup(Node sceneRoot, Commands commands)
+	{
+		SceneTree tree = sceneRoot != null && sceneRoot.IsInsideTree() ? sceneRoot.GetTree() : null;
+		if (tree == null)
+			return;
+
+		foreach (Node node in tree.GetNodesInGroup(MarkupGroupName))
+		{
+			if (node is MeshInstance3D markup && GodotObject.IsInstanceValid(markup) && !markup.IsQueuedForDeletion())
+				ApplyMarkupFocusState(markup, commands);
+		}
+	}
+
+	/// <summary>Markup attached after the focus was worked out (a new markup set, an instance added) gets its grey now.</summary>
+	public static void ApplyMarkupFocus(MeshInstance3D markup, Commands commands)
+	{
+		if (markup == null || !GodotObject.IsInstanceValid(markup) || !PrepareForReapply(commands))
+			return;
+		ApplyMarkupFocusState(markup, commands);
+	}
+
+	private static void ApplyMarkupFocusState(MeshInstance3D markup, Commands commands)
+	{
+		//In scope when its composite is, in the placement the focus is on (the stepped-into instance's own markup included)
+		bool inScope = markup.GetParent() is not Node3D instance
+			|| !markup.HasMeta(MarkupCompositeMeta)
+			|| (IsOwnerCompositeInScope(markup.GetMeta(MarkupCompositeMeta).AsUInt32(), commands) && IsOwnerUnderFocusInstancePath(instance));
+		if (inScope)
+		{
+			if (_markupDimmedByFocus.Remove(markup))
+				markup.MaterialOverride = null;
+			return;
+		}
+
+		_cachedDimmedOpaqueDoubleSided ??= CreateSharedDimmedMaterial(GetDimmedDoubleSidedShader(), transparent: false);
+		markup.MaterialOverride = _cachedDimmedOpaqueDoubleSided;
+		_markupDimmedByFocus.Add(markup);
+	}
+
+	private static void RestoreDimmedMarkup()
+	{
+		foreach (MeshInstance3D markup in _markupDimmedByFocus)
+		{
+			if (markup != null && GodotObject.IsInstanceValid(markup))
+				markup.MaterialOverride = null;
+		}
+
+		_markupDimmedByFocus.Clear();
 	}
 
 	/// <summary>Hides the level's painted-on overlays (<see cref="ScopedOverlayGroupName"/>) outside the focus, shows them inside it.</summary>
@@ -410,6 +467,8 @@ public static class LevelViewerCompositeFocus
 				//A surface effect or water spawned into a greyed-out placement: hidden with the rest of it
 				else if (child.IsInGroup(ScopedOverlayGroupName))
 					ApplyScopedOverlayFocus(child, commands);
+				else if (child is MeshInstance3D markup && child.IsInGroup(MarkupGroupName))
+					ApplyMarkupFocusState(markup, commands);
 			}
 		}
 	}
@@ -504,6 +563,7 @@ public static class LevelViewerCompositeFocus
 	{
 		RestoreAllDimmedMeshes();
 		RestoreHiddenOverlays();
+		RestoreDimmedMarkup();
 		_meshDimmedState.Clear();
 		//Everything is judged again by the full pass that follows (or when zones go off), the selection noted afresh
 		_ownersPassedOverForSelection.Clear();
@@ -524,6 +584,7 @@ public static class LevelViewerCompositeFocus
 		{
 			_meshDimmedState.Remove(mesh);
 			_savedMaterialOverrides.Remove(mesh);
+			_markupDimmedByFocus.Remove(mesh);
 		}
 		_ownerEntityChainCache.Remove(node);
 		_ownersPassedOverForSelection.Remove(node);
@@ -541,6 +602,7 @@ public static class LevelViewerCompositeFocus
 		RestoreAllDimmedMeshes();
 		//Before a preview batch too: a preview is the composite as the game draws it, frost and all
 		RestoreHiddenOverlays();
+		RestoreDimmedMarkup();
 		_compositesInScope.Clear();
 		_scopeCacheActiveCompositeId = 0;
 		_appliedActiveCompositeId = 0;

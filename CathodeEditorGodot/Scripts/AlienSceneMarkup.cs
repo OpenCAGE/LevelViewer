@@ -8,7 +8,7 @@ using System.Collections.Generic;
 /// <summary>
 /// Editor-only composite markup (COMPOSITE_MARKUP): the shapes OpenCAGE sends for a composite, drawn under every instance of it
 /// behind the Markup scene filter. One shared mesh per composite and one node per instance, kept out of picking, selection
-/// highlights, composite focus and composite previews; never part of the level.
+/// highlights and composite previews, and greyed outside the composite focus; never part of the level.
 /// </summary>
 public partial class AlienScene
 {
@@ -61,7 +61,7 @@ public partial class AlienScene
 			if (!_markupMeshes.TryGetValue(entry.Key.AsUInt32, out ArrayMesh mesh))
 				continue;
 			for (int i = 0; i < entry.Value.Count; i++)
-				AttachCompositeMarkup(entry.Value[i], mesh);
+				AttachCompositeMarkup(entry.Value[i], mesh, entry.Key.AsUInt32);
 		}
 	}
 
@@ -71,10 +71,10 @@ public partial class AlienScene
 		if (_isBulkPopulating || composite == null || _markupMeshes.Count == 0)
 			return;
 		if (_markupMeshes.TryGetValue(composite.shortGUID.AsUInt32, out ArrayMesh mesh))
-			AttachCompositeMarkup(instanceNode, mesh);
+			AttachCompositeMarkup(instanceNode, mesh, composite.shortGUID.AsUInt32);
 	}
 
-	private void AttachCompositeMarkup(Node3D instanceNode, ArrayMesh mesh)
+	private void AttachCompositeMarkup(Node3D instanceNode, ArrayMesh mesh, uint compositeId)
 	{
 		if (instanceNode == null || !GodotObject.IsInstanceValid(instanceNode) || instanceNode.IsQueuedForDeletion())
 			return;
@@ -98,9 +98,16 @@ public partial class AlienScene
 			Visible = visible,
 		};
 		LevelViewerMeshUtil.ConfigureMeshInstance(markup);
-		//Keeps the pick walk, focus dimming and zone tint off it: it is the viewport's, not the level's
+		//Keeps the pick walk, the per-mesh grey-out and zone tint off it: it is the viewport's, not the level's
 		markup.AddToGroup(LevelViewerPick.SceneFilterGroupName);
+		//Greyed outside a stepped-into composite like the geometry around it, by its own rule
+		markup.AddToGroup(LevelViewerCompositeFocus.MarkupGroupName);
+		markup.SetMeta(LevelViewerCompositeFocus.MarkupCompositeMeta, compositeId);
 		instanceNode.AddChild(markup);
+
+		//A populate applies the focus when it ends; a preview batch has it stood down and puts it back itself
+		if (!_isBulkPopulating && !_previewOverlaysStoodDown && _content.Loaded)
+			LevelViewerCompositeFocus.ApplyMarkupFocus(markup, _content.Level.Commands);
 	}
 
 	/// <summary>The Markup filter was switched: show or hide what is drawn.</summary>

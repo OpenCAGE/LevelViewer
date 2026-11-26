@@ -84,6 +84,54 @@ public static class AlienSceneMaterials
 	//The shaded shaders with a secondary diffuse layer and/or glass, built from them on first use, by variant
 	//(doubleSided + transparent * 2 + secondary diffuse * 4 + glass * 8)
 	private static readonly Dictionary<int, Shader> _shadedVariantShaders = new Dictionary<int, Shader>();
+
+	private const string AnisotropicFilterHint = "filter_linear_mipmap_anisotropic";
+	private static bool _limitSamplers;
+	//Held so the resource cache keeps the patched copies
+	private static readonly List<Resource> _samplerLimitedShaders = new List<Resource>();
+
+	/// <summary>
+	/// Metal allows 16 samplers per shader stage. Through MoltenVK without argument buffers (this Windows build run on a Mac
+	/// via a translation layer) Godot's anisotropic repeat sampler lands in slot 17, so no scene pipeline using it builds and
+	/// the viewer crashes drawing them. On an Apple GPU the shaders take the plain mipmapped sampler (slot 15) instead.
+	/// Call before materials are made.
+	/// </summary>
+	public static void LimitSamplersOnAppleGpu()
+	{
+		string adapter = RenderingServer.GetVideoAdapterVendor() + " " + RenderingServer.GetVideoAdapterName();
+		if (_limitSamplers || !adapter.Contains("Apple", System.StringComparison.OrdinalIgnoreCase))
+			return;
+
+		_limitSamplers = true;
+		ViewerLog.Print("[Materials] Apple GPU (" + adapter + "): shaders use mipmapped rather than anisotropic samplers.");
+
+		string[] files = DirAccess.GetFilesAt("res://shaders");
+		//Includes first: setting each shader's code again re-reads its includes
+		foreach (bool includes in new[] { true, false })
+		{
+			foreach (string file in files)
+			{
+				string name = file.EndsWith(".remap") ? file.Substring(0, file.Length - ".remap".Length) : file;
+				if (!name.EndsWith(includes ? ".gdshaderinc" : ".gdshader"))
+					continue;
+
+				Resource resource = GD.Load("res://shaders/" + name);
+				if (resource is ShaderInclude include)
+					include.Code = LimitSamplers(include.Code);
+				else if (resource is Shader shader)
+					shader.Code = LimitSamplers(shader.Code);
+				else
+					continue;
+				_samplerLimitedShaders.Add(resource);
+			}
+		}
+	}
+
+	private static string LimitSamplers(string code)
+	{
+		return _limitSamplers && code != null ? code.Replace(AnisotropicFilterHint, "filter_linear_mipmap") : code;
+	}
+
 	private static Shader _wireframeShader;
 	private static Shader _wireframeShaderDoubleSided;
 	private static Shader _wireframeShaderTransparent;
@@ -1195,7 +1243,7 @@ vec3 model_reference_secondary_diffuse(vec2 uv) {
 
 		code = code
 			.Insert(insertAt, "color.rgb *= model_reference_secondary_diffuse(UV);\n\t")
-			.Insert(fragment, SecondaryDiffuseDeclarations);
+			.Insert(fragment, LimitSamplers(SecondaryDiffuseDeclarations));
 
 		//The double-sided and transparent checks elsewhere (picking, zones, composite focus) go by the
 		//shader's path, so this one keeps the plain shader's with a suffix
